@@ -1,0 +1,1089 @@
+// The town: everything that never moves.
+//
+// A dead mining town at the end of the afternoon — two rows of false-front
+// buildings down a dirt street, a boardwalk on each side, a windmill turning
+// over nothing, and a fenced graveyard on the rise past the last roof. It is
+// generated rather than loaded, so `milo run` is the whole install.
+//
+// The street runs down +Z. The player stands at about z = 0 and everything
+// worth shooting at is between 7 and 40 metres away.
+//
+// Geometry is baked once into one mesh per material and drawn as nine draw
+// calls, which is why no object here carries a transform at run time: the
+// transform is applied on the CPU as the vertices are pushed.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Mesh
+}
+from "./mat4" import {
+    identity, multiply, rotationX, rotationY, rotationZ, translation
+}
+from "./mesh" import {
+    Builder, builder
+}
+from "./render" import {
+    Material, material, materialTex, sceneAttrs
+}
+from "./rng" import {
+    Rand, rand
+}
+from "./textures" import {
+    TEX_ADOBE, TEX_CANVAS, TEX_CONCRETE, TEX_GLASS, TEX_GRASS, TEX_GRAVEL,
+    TEX_PAINT, TEX_PLANK, TEX_RUST, TEX_SAND, TEX_STEEL, TEX_TIN, TEX_WOOD
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+// Bucket indices. Each is one material and one draw call.
+pub let B_DIRT: i64 = 0
+
+pub let B_GRASS: i64 = 1
+
+pub let B_STONE: i64 = 2
+
+pub let B_WOOD: i64 = 3
+
+pub let B_STEEL: i64 = 4
+
+pub let B_CANVAS: i64 = 5
+
+pub let B_RUST: i64 = 6
+
+pub let B_PAINT: i64 = 7
+
+pub let B_HILLS: i64 = 8
+
+pub let B_POSTER: i64 = 9
+
+pub let B_SIGN_A: i64 = 10
+
+pub let B_SIGN_B: i64 = 11
+
+pub let BUCKETS: i64 = 12
+
+// The street is this wide either side of x = 0; the boardwalks start here.
+pub let STREET_HALF: f64 = 5.8
+
+pub let WALK_TOP: f64 = 0.30
+
+// Whole texture repeats across one ground quad. Must be an integer — see
+// `groundVertex`.
+let QUAD_REPEATS: i64 = 1
+
+pub struct World {
+    meshes: Vec<Mesh>,
+    mats: Vec<Material>,
+}
+
+// ── noise ─────────────────────────────────────────────────────────────────────
+
+// @wrapping because a hash IS modular arithmetic: Milo traps on overflow
+// everywhere else, which is right everywhere else.
+@wrapping
+fn hash2(ix: i64, iy: i64): f64 {
+    var h = ((ix & 0xFFFF) as u64) * 0x9E3779B1 + ((iy & 0xFFFF) as u64) * 0x85EBCA77
+    h = h ^ (h >> 15)
+    h = (h * 0x2545F491) & 0xFFFFFFFF
+    h = h ^ (h >> 13)
+    return ((h & 0xFFFFFF) as f64) / 16777216.0
+}
+
+fn vnoise(x: f64, y: f64): f64 {
+    let fx = Math.floor(x)
+    let fy = Math.floor(y)
+    let ix = fx as i64
+    let iy = fy as i64
+    var tx = x - fx
+    var ty = y - fy
+    tx = tx * tx * (3.0 - 2.0 * tx)
+    ty = ty * ty * (3.0 - 2.0 * ty)
+    let a = hash2(ix, iy)
+    let b = hash2(ix + 1, iy)
+    let c = hash2(ix, iy + 1)
+    let d = hash2(ix + 1, iy + 1)
+    let top = a + (b - a) * tx
+    let bot = c + (d - c) * tx
+    return top + (bot - top) * ty
+}
+
+fn fbm2(x: f64, y: f64, octaves: i64): f64 {
+    var s = 0.0
+    var amp = 0.5
+    var fx = x
+    var fy = y
+    for _i in 0..octaves {
+        s = s + amp * vnoise(fx, fy)
+        fx = fx * 2.03
+        fy = fy * 2.03
+        amp = amp * 0.5
+    }
+    return s
+}
+
+// How far the ground is above zero at (x, z). Dead flat down the street and
+// through the town, rising into dunes outside it and into the graveyard rise at
+// the far end — so nothing the player walks on or shoots across is ever tilted
+// by a stray octave of noise.
+pub fn groundHeight(x: f64, z: f64): f64 {
+    var h = 0.0
+    // The rise the graveyard sits on.
+    let gz = (z - 46.0) / 16.0
+    let gx = x / 26.0
+    let d2 = gx * gx + gz * gz
+    if d2 < 1.0 {
+        let t = 1.0 - d2
+        h = h + 2.2 * t * t
+    }
+    let out = Math.maxF64(Math.abs(x) - 20.0, Math.maxF64(-16.0 - z, z - 72.0))
+    if out > 0.0 {
+        let blend = Math.minF64(out / 26.0, 1.0)
+        let dune = (fbm2(x * 0.011, z * 0.011, 4) - 0.5) * 11.0
+        h = h + dune * blend * blend
+    }
+    return h
+}
+
+// Tint is per vertex, not per quad: over a 2.3 m quad a single tint reads as a
+// band, and the whole street becomes a stack of stripes.
+//
+// The uv is measured from the quad's own corner rather than from the world
+// origin, and this is not a style choice. A world-space uv out at x = 170 is a
+// texture coordinate of about 200, and a sampler carries far fewer significant
+// bits below the point at 200 than it does at 2 — the ground came out a smooth
+// wash everywhere except a cross through the origin, which is exactly where the
+// coordinate was still small enough to resolve a texel. Because the texture
+// wraps, restarting the count at every quad is invisible: an offset of a whole
+// number of repeats is a no-op. QUAD_REPEATS is an integer for that reason.
+fn groundVertex(b: &mut Builder, x: f64, z: f64, ox: f64, oz: f64, step: f64) {
+    let rut = Math.minF64(Math.abs(Math.abs(x) - 1.5), 2.0) / 2.0
+    var t = 0.80 + 0.32 * fbm2(x * 0.09 + 11.0, z * 0.09 + 7.0, 4)
+    if Math.abs(x) < STREET_HALF && z > -14.0 && z < 60.0 {
+        // Packed and darkened where the wheels ran, and where the wheels ran is
+        // the only part of a street anyone ever looks at.
+        let edge = Math.minF64((STREET_HALF - Math.abs(x)) / 1.2, 1.0)
+        t = t * (1.0 - 0.30 * (1.0 - rut) * edge)
+    }
+    b.setTint(t, t * 0.985, t * 0.93)
+    let k = (QUAD_REPEATS as f64) / step
+    b.push(v3(x, groundHeight(x, z), z), groundNormal(x, z), (x - ox) * k, (z - oz) * k)
+}
+
+fn groundNormal(x: f64, z: f64): Vec3 {
+    let e = 0.7
+    let dx = groundHeight(x + e, z) - groundHeight(x - e, z)
+    let dz = groundHeight(x, z + e) - groundHeight(x, z - e)
+    return v3(-dx, 2.0 * e, -dz).norm()
+}
+
+// ── ground ────────────────────────────────────────────────────────────────────
+
+fn addGround(b: &mut Builder) {
+    let n = 150
+    let half = 175.0
+    let step = 2.0 * half / (n as f64)
+    for j in 0..n {
+        for i in 0..n {
+            let x0 = -half + (i as f64) * step
+            let x1 = x0 + step
+            let z0 = -half + (j as f64) * step
+            let z1 = z0 + step
+            // Two wheel ruts down the middle of the street, darker and damper
+            // than the dust either side of them. Nothing says "a road people
+            // used" like the two lines a wagon wore into it.
+            // Counter-clockwise seen from above. The other winding compiles,
+            // runs, lights correctly and is entirely invisible, because back-face
+            // culling throws it away before any of that matters.
+            groundVertex(b, x0, z0, x0, z0, step)
+            groundVertex(b, x0, z1, x0, z0, step)
+            groundVertex(b, x1, z1, x0, z0, step)
+            groundVertex(b, x0, z0, x0, z0, step)
+            groundVertex(b, x1, z1, x0, z0, step)
+            groundVertex(b, x1, z0, x0, z0, step)
+        }
+    }
+    b.setTint(1.0, 1.0, 1.0)
+}
+
+// ── buildings ─────────────────────────────────────────────────────────────────
+
+// A false-front building: a flat tall wall facing the street with a lower box
+// behind it, which is exactly what these were — a one-storey shed made to look
+// like two from the street, and the reason a western town reads the way it does.
+//
+// `side` is -1 for the left of the street and +1 for the right; the facade
+// always faces x = 0.
+fn falseFront(wood: &mut Builder, paint: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64, depth: f64, frontHeight: f64, bodyHeight: f64, tint: f64) {
+    let xFace = side * STREET_HALF
+    let xBack = side * (STREET_HALF + depth)
+    let lo = Math.minF64(xFace, xBack)
+    let hi = Math.maxF64(xFace, xBack)
+
+    wood.setUvScale(1.5)
+    // body
+    wood.setTint(tint * 0.90, tint * 0.84, tint * 0.76)
+    wood.boxSpan(v3(lo, -0.3, zNear), v3(hi, bodyHeight, zFar))
+    // the false front itself, a little proud of the body on all three edges
+    wood.setTint(tint, tint * 0.93, tint * 0.85)
+    wood.boxSpan(v3(xFace - side * 0.12, -0.3, zNear - 0.12), v3(xFace, frontHeight, zFar + 0.12))
+    // cornice
+    wood.setTint(tint * 0.82, tint * 0.76, tint * 0.68)
+    wood.boxSpan(v3(xFace - side * 0.26, frontHeight, zNear - 0.22), v3(xFace + side * 0.04, frontHeight + 0.22, zFar + 0.22))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+
+    // Windows: dark recesses rather than glass, because a lit interior is a
+    // whole second lighting problem and a black window at golden hour is what a
+    // photograph of an empty building actually shows.
+    paint.setTint(0.018, 0.018, 0.020)
+    paint.setAo(0.25)
+    var z = zNear + 1.1
+    while z < zFar - 1.1 {
+        paint.boxSpan(v3(xFace - side * 0.02, 1.15, z), v3(xFace - side * 0.16, 2.15, z + 0.85))
+        if frontHeight > bodyHeight + 1.2 {
+            paint.boxSpan(v3(xFace - side * 0.02, 2.75, z + 0.1), v3(xFace - side * 0.16, 3.55, z + 0.75))
+        }
+        z = z + 2.4
+    }
+    paint.setAo(1.0)
+    paint.setTint(1.0, 1.0, 1.0)
+}
+
+// Corner boards, a water table and battens. A sunlit plank wall with nothing on
+// it is a bright rectangle however good the texture is: what breaks it up in a
+// photograph is the shadow each piece of trim throws across it, and every one of
+// these is 4 cm proud for exactly that reason.
+fn addTrim(wood: &mut Builder, xLo: f64, xHi: f64, zLo: f64, zHi: f64, top: f64, tint: f64) {
+    wood.setUvScale(2.4)
+    wood.setTint(tint * 0.78, tint * 0.72, tint * 0.64)
+    let p = 0.04
+    // corner boards
+    wood.boxSpan(v3(xLo - p, -0.2, zLo - p), v3(xLo + 0.10, top, zLo + 0.10))
+    wood.boxSpan(v3(xHi - 0.10, -0.2, zLo - p), v3(xHi + p, top, zLo + 0.10))
+    wood.boxSpan(v3(xLo - p, -0.2, zHi - 0.10), v3(xLo + 0.10, top, zHi + p))
+    wood.boxSpan(v3(xHi - 0.10, -0.2, zHi - 0.10), v3(xHi + p, top, zHi + p))
+    // water table along the bottom
+    wood.boxSpan(v3(xLo - p, 0.22, zLo - p), v3(xHi + p, 0.34, zHi + p))
+    // battens down the long walls
+    var z = zLo + 0.9
+    while z < zHi - 0.3 {
+        wood.boxSpan(v3(xLo - p, 0.34, z), v3(xLo + 0.02, top, z + 0.07))
+        wood.boxSpan(v3(xHi - 0.02, 0.34, z), v3(xHi + p, top, z + 0.07))
+        z = z + 1.15
+    }
+    var x = xLo + 0.9
+    while x < xHi - 0.3 {
+        wood.boxSpan(v3(x, 0.34, zLo - p), v3(x + 0.07, top, zLo + 0.02))
+        x = x + 1.15
+    }
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// A shallow shed roof of corrugated tin over the body, sloping away from the
+// street. The point of it is the eave: it puts a hard shadow line across the top
+// of the wall and stops the wall meeting the sky in a straight bright edge.
+fn addTinRoof(tin: &mut Builder, xLo: f64, xHi: f64, zLo: f64, zHi: f64, yFront: f64, yBack: f64, alongZ: bool) {
+    tin.setUvScale(1.6)
+    let ribs = 26
+    for i in 0..ribs {
+        let t0 = (i as f64) / (ribs as f64)
+        let t1 = ((i + 1) as f64) / (ribs as f64)
+        let wob = 0.03 * Math.sin((i as f64) * 3.1416 * 0.5)
+        let shade = 0.80 + 0.22 * Math.abs(Math.sin((i as f64) * 1.57))
+        tin.setTint(shade, shade * 0.98, shade * 0.95)
+        if alongZ {
+            let a0 = xLo - 0.22 + (xHi - xLo + 0.44) * t0
+            let a1 = xLo - 0.22 + (xHi - xLo + 0.44) * t1
+            tin.quad(v3(a0, yFront + wob, zLo - 0.22), v3(a1, yFront + wob, zLo - 0.22), v3(a1, yBack + wob, zHi + 0.22), v3(a0, yBack + wob, zHi + 0.22), 0.5, 4.0)
+            tin.quad(v3(a0, yBack + wob - 0.05, zHi + 0.22), v3(a1, yBack + wob - 0.05, zHi + 0.22), v3(a1, yFront + wob - 0.05, zLo - 0.22), v3(a0, yFront + wob - 0.05, zLo - 0.22), 0.5, 4.0)
+        } else {
+            let a0 = zLo - 0.22 + (zHi - zLo + 0.44) * t0
+            let a1 = zLo - 0.22 + (zHi - zLo + 0.44) * t1
+            tin.quad(v3(xLo - 0.22, yFront + wob, a0), v3(xLo - 0.22, yFront + wob, a1), v3(xHi + 0.22, yBack + wob, a1), v3(xHi + 0.22, yBack + wob, a0), 0.5, 4.0)
+            tin.quad(v3(xHi + 0.22, yBack + wob - 0.05, a0), v3(xHi + 0.22, yBack + wob - 0.05, a1), v3(xLo - 0.22, yFront + wob - 0.05, a1), v3(xLo - 0.22, yFront + wob - 0.05, a0), 0.5, 4.0)
+        }
+    }
+    tin.setUvScale(1.0)
+    tin.setTint(1.0, 1.0, 1.0)
+}
+
+// The building at the near end of each row faces the player rather than the
+// street, so the first thing in the frame is a shop front and not the blank
+// side of a shed. It is the same false front turned ninety degrees, with a door,
+// a boarded window and a sign board.
+fn addEndFacade(wood: &mut Builder, paint: &mut Builder, xLo: f64, xHi: f64, z: f64, top: f64, tint: f64) {
+    wood.setUvScale(1.5)
+    wood.setTint(tint, tint * 0.92, tint * 0.84)
+    wood.boxSpan(v3(xLo - 0.14, -0.3, z - 0.14), v3(xHi + 0.14, top, z))
+    wood.setTint(tint * 0.80, tint * 0.74, tint * 0.66)
+    wood.boxSpan(v3(xLo - 0.30, top, z - 0.26), v3(xHi + 0.30, top + 0.24, z + 0.06))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+
+    let mid = (xLo + xHi) * 0.5
+    // doorway
+    // A doorway is a hole, and a hole is not a dark grey panel in the sun: the
+    // albedo has to be low enough that direct light on it still reads as black,
+    // and the frame around it has to be proud enough to shade its own top.
+    paint.setTint(0.018, 0.018, 0.020)
+    paint.setAo(0.25)
+    paint.boxSpan(v3(mid - 0.52, 0.0, z - 0.18), v3(mid + 0.52, 2.15, z - 0.06))
+    paint.boxSpan(v3(xLo + 0.35, 1.05, z - 0.18), v3(xLo + 1.45, 2.10, z - 0.06))
+    paint.boxSpan(v3(xHi - 1.45, 1.05, z - 0.18), v3(xHi - 0.35, 2.10, z - 0.06))
+    paint.setAo(1.0)
+    paint.setTint(1.0, 1.0, 1.0)
+    wood.setUvScale(3.0)
+    wood.setTint(tint * 0.62, tint * 0.56, tint * 0.48)
+    wood.boxSpan(v3(mid - 0.66, 2.10, z - 0.32), v3(mid + 0.66, 2.26, z - 0.06))
+    wood.boxSpan(v3(mid - 0.66, 0.0, z - 0.26), v3(mid - 0.52, 2.20, z - 0.06))
+    wood.boxSpan(v3(mid + 0.52, 0.0, z - 0.26), v3(mid + 0.66, 2.20, z - 0.06))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+
+    wood.setUvScale(3.0)
+    wood.setTint(0.70, 0.64, 0.56)
+    var k = 0
+    while k < 3 {
+        let y = 1.25 + (k as f64) * 0.36
+        wood.boxSpan(v3(xLo + 0.30, y, z - 0.20), v3(xLo + 1.50, y + 0.16, z - 0.14))
+        wood.boxSpan(v3(xHi - 1.50, y, z - 0.20), v3(xHi - 0.30, y + 0.16, z - 0.14))
+        k = k + 1
+    }
+    // the sign board over the door
+    wood.setTint(0.42, 0.30, 0.20)
+    wood.boxSpan(v3(mid - 1.30, 2.35, z - 0.24), v3(mid + 1.30, 3.05, z - 0.16))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// The porch roof and its posts, along one side of the street.
+fn addPorch(wood: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64, height: f64) {
+    let xIn = side * (STREET_HALF - 2.1)
+    let xOut = side * STREET_HALF
+    wood.setUvScale(1.4)
+    wood.setTint(0.86, 0.80, 0.72)
+    var z = zNear + 0.3
+    while z < zFar {
+        wood.boxSpan(v3(xIn - 0.06, WALK_TOP, z - 0.06), v3(xIn + 0.06, height, z + 0.06))
+        z = z + 2.6
+    }
+    // beam and a shallow shed roof sloping out over the walk
+    wood.setTint(0.78, 0.73, 0.66)
+    wood.boxSpan(v3(xIn - 0.09, height, zNear), v3(xIn + 0.09, height + 0.18, zFar))
+    let lo = Math.minF64(xIn, xOut)
+    let hi = Math.maxF64(xIn, xOut)
+    let planks = 16
+    for i in 0..planks {
+        let t0 = (i as f64) / (planks as f64)
+        let t1 = ((i + 1) as f64) / (planks as f64)
+        let za = zNear + (zFar - zNear) * t0
+        let zb = zNear + (zFar - zNear) * t1
+        wood.setTint(0.72 + 0.1 * fbm2((i as f64) * 3.1, 0.0, 2), 0.68, 0.60)
+        // The roof drops 22 cm from the building to the street edge.
+        wood.quad(v3(lo, height + 0.18 + (if side < 0.0 {
+            0.0
+        } else {
+            0.22
+        }
+        ), za), v3(hi, height + 0.18 + (if side < 0.0 {
+            0.22
+        } else {
+            0.0
+        }
+        ), za), v3(hi, height + 0.18 + (if side < 0.0 {
+            0.22
+        } else {
+            0.0
+        }
+        ), zb), v3(lo, height + 0.18 + (if side < 0.0 {
+            0.0
+        } else {
+            0.22
+        }
+        ), zb), 2.4, 1.0)
+        wood.quad(v3(lo, height + 0.13 + (if side < 0.0 {
+            0.0
+        } else {
+            0.22
+        }
+        ), zb), v3(hi, height + 0.13 + (if side < 0.0 {
+            0.22
+        } else {
+            0.0
+        }
+        ), zb), v3(hi, height + 0.13 + (if side < 0.0 {
+            0.22
+        } else {
+            0.0
+        }
+        ), za), v3(lo, height + 0.13 + (if side < 0.0 {
+            0.0
+        } else {
+            0.22
+        }
+        ), za), 2.4, 1.0)
+    }
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// A rail along the street edge of the boardwalk. It is here to hang targets on:
+// a rail puts them at chest height in a line the eye can sweep, which is what
+// makes a reflex game readable, and it is what a porch has anyway.
+// Literal, not WALK_TOP + 0.95: a non-constant f64 global currently emits
+// `double 0` with an integer zero and the module fails to link.
+pub let RAIL_TOP: f64 = 1.25
+
+fn addWalkRail(wood: &mut Builder, side: f64, zNear: f64, zFar: f64) {
+    let x = side * (STREET_HALF - 0.16)
+    wood.setUvScale(2.2)
+    var z = zNear
+    while z < zFar {
+        wood.setTint(0.82, 0.77, 0.69)
+        wood.boxSpan(v3(x - 0.055, WALK_TOP - 0.1, z - 0.055), v3(x + 0.055, RAIL_TOP + 0.06, z + 0.055))
+        z = z + 2.55
+    }
+    wood.setTint(0.74, 0.69, 0.61)
+    wood.boxSpan(v3(x - 0.075, RAIL_TOP, zNear - 0.1), v3(x + 0.075, RAIL_TOP + 0.06, zFar + 0.1))
+    wood.boxSpan(v3(x - 0.045, RAIL_TOP - 0.42, zNear - 0.1), v3(x + 0.045, RAIL_TOP - 0.36, zFar + 0.1))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// Plank boardwalk, laid across the walk so the joints run the way a real one's
+// do, with a step down to the street.
+fn addBoardwalk(wood: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64) {
+    let xIn = side * STREET_HALF
+    let xOut = side * (STREET_HALF - 2.1)
+    let lo = Math.minF64(xIn, xOut)
+    let hi = Math.maxF64(xIn, xOut)
+    wood.setUvScale(2.4)
+    var z = zNear
+    while z < zFar {
+        let w = 0.28
+        let t = 0.74 + 0.26 * hash2((z * 7.0) as i64, side as i64)
+        wood.setTint(t, t * 0.94, t * 0.86)
+        // Each plank sits a millimetre or two off its neighbour, which is what
+        // catches the low sun as a line of bright edges down the whole walk.
+        let y = WALK_TOP + 0.006 * (hash2((z * 13.0) as i64, 5) - 0.5)
+        wood.boxSpan(v3(lo, y - 0.09, z), v3(hi, y, z + w - 0.012))
+        z = z + w
+    }
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// ── street furniture ──────────────────────────────────────────────────────────
+
+fn addHitchingRail(wood: &mut Builder, x: f64, zNear: f64, zFar: f64) {
+    wood.setUvScale(2.0)
+    wood.setTint(0.80, 0.74, 0.66)
+    var z = zNear
+    while z <= zFar + 0.01 {
+        let g = groundHeight(x, z)
+        wood.boxSpan(v3(x - 0.07, g - 0.2, z - 0.07), v3(x + 0.07, g + 1.05, z + 0.07))
+        z = z + (zFar - zNear) * 0.5
+    }
+    let g0 = groundHeight(x, zNear)
+    wood.setTint(0.72, 0.66, 0.58)
+    wood.boxSpan(v3(x - 0.05, g0 + 0.92, zNear), v3(x + 0.05, g0 + 1.02, zFar))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// A trough with water in it. The water is a separate near-mirror surface, and it
+// is the only thing in the scene that reflects the sky sharply — which is what
+// makes the sky look like it is really up there.
+fn addTrough(wood: &mut Builder, steel: &mut Builder, x: f64, z: f64) {
+    let g = groundHeight(x, z)
+    wood.setUvScale(2.2)
+    wood.setTint(0.62, 0.56, 0.48)
+    wood.boxSpan(v3(x - 0.42, g, z - 1.5), v3(x - 0.32, g + 0.62, z + 1.5))
+    wood.boxSpan(v3(x + 0.32, g, z - 1.5), v3(x + 0.42, g + 0.62, z + 1.5))
+    wood.boxSpan(v3(x - 0.42, g, z - 1.5), v3(x + 0.42, g + 0.62, z - 1.4))
+    wood.boxSpan(v3(x - 0.42, g, z + 1.4), v3(x + 0.42, g + 0.62, z + 1.5))
+    wood.boxSpan(v3(x - 0.42, g, z - 1.5), v3(x + 0.42, g + 0.10, z + 1.5))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+    steel.setTint(0.09, 0.11, 0.10)
+    steel.setUvScale(0.4)
+    steel.quad(v3(x - 0.32, g + 0.46, z - 1.4), v3(x + 0.32, g + 0.46, z - 1.4), v3(x + 0.32, g + 0.46, z + 1.4), v3(x - 0.32, g + 0.46, z + 1.4), 1.0, 4.0)
+    steel.setUvScale(1.0)
+    steel.setTint(1.0, 1.0, 1.0)
+}
+
+fn addBarrel(wood: &mut Builder, steel: &mut Builder, x: f64, z: f64, yaw: f64, tint: f64) {
+    let g = groundHeight(x, z)
+    let m = multiply(translation(v3(x, g, z)), rotationY(yaw))
+    wood.setUvScale(2.6)
+    wood.setTint(tint, tint * 0.88, tint * 0.74)
+    wood.setXform(m)
+    // Two stacked cylinders with the middle one wider: a barrel bulges, and a
+    // straight tube reads as a bin.
+    wood.cylinder(v3(0.0, 0.0, 0.0), 0.27, 0.30, 16, true)
+    wood.cylinder(v3(0.0, 0.28, 0.0), 0.30, 0.30, 16, false)
+    wood.cylinder(v3(0.0, 0.56, 0.0), 0.27, 0.30, 16, true)
+    wood.resetXform()
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+    steel.setTint(0.35, 0.33, 0.31)
+    steel.setXform(m)
+    steel.cylinder(v3(0.0, 0.16, 0.0), 0.275, 0.045, 16, false)
+    steel.cylinder(v3(0.0, 0.42, 0.0), 0.305, 0.045, 16, false)
+    steel.cylinder(v3(0.0, 0.70, 0.0), 0.275, 0.045, 16, false)
+    steel.resetXform()
+    steel.setTint(1.0, 1.0, 1.0)
+}
+
+fn addCrate(wood: &mut Builder, x: f64, y: f64, z: f64, s: f64, yaw: f64, tint: f64) {
+    wood.setUvScale(3.0)
+    wood.setTint(tint, tint * 0.93, tint * 0.80)
+    wood.setXform(multiply(translation(v3(x, y, z)), rotationY(yaw)))
+    wood.box(v3(0.0, s, 0.0), s, s, s * 0.8)
+    wood.resetXform()
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// A wagon, missing a wheel and leaning on its axle. The spoked wheels are the
+// most recognisable silhouette in the whole town and cost eight triangles each.
+fn addWagon(wood: &mut Builder, rust: &mut Builder, x: f64, z: f64, yaw: f64) {
+    let g = groundHeight(x, z)
+    let m = multiply(translation(v3(x, g, z)), rotationY(yaw))
+    wood.setUvScale(1.8)
+    wood.setTint(0.66, 0.58, 0.48)
+    wood.setXform(m)
+    wood.boxSpan(v3(-0.75, 0.62, -1.5), v3(0.75, 0.72, 1.5))
+    wood.boxSpan(v3(-0.75, 0.72, -1.5), v3(-0.65, 1.18, 1.5))
+    wood.boxSpan(v3(0.65, 0.72, -1.5), v3(0.75, 1.18, 1.5))
+    wood.boxSpan(v3(-0.75, 0.72, -1.5), v3(0.75, 1.18, -1.4))
+    // tongue
+    wood.boxSpan(v3(-0.06, 0.40, 1.5), v3(0.06, 0.50, 3.1))
+    wood.resetXform()
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+
+    rust.setTint(0.55, 0.42, 0.32)
+    let wheels: Vec<f64> = [-1.05, 1.05]
+    var wi = 0
+    for wz in wheels {
+        let radius = if wi == 0 {
+            0.42
+        } else {
+            0.56
+        }
+        let sides: Vec<f64> = [-0.78, 0.78]
+        for sx in sides {
+            // The front-left wheel is off and lying in the dirt.
+            if wi == 0 && sx < 0.0 {
+                continue
+            }
+            rust.setXform(multiply(m, multiply(translation(v3(sx, radius, wz)), rotationZ(1.5708))))
+            wheelShape(rust, radius, 0.05)
+            rust.resetXform()
+        }
+        wi = wi + 1
+    }
+    rust.setXform(multiply(m, multiply(translation(v3(-1.35, 0.05, -1.4)), rotationX(1.4))))
+    wheelShape(rust, 0.42, 0.05)
+    rust.resetXform()
+    rust.setTint(1.0, 1.0, 1.0)
+}
+
+// A wheel in the XZ plane of the current transform, spun up by the caller.
+fn wheelShape(b: &mut Builder, radius: f64, width: f64) {
+    let segs = 14
+    for i in 0..segs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+        let p0 = v3(Math.cos(a0) * radius, 0.0, Math.sin(a0) * radius)
+        let p1 = v3(Math.cos(a1) * radius, 0.0, Math.sin(a1) * radius)
+        let n0 = v3(Math.cos(a0), 0.0, Math.sin(a0))
+        let n1 = v3(Math.cos(a1), 0.0, Math.sin(a1))
+        let hw = v3(0.0, width, 0.0)
+        b.push(p0 - hw, n0, 0.0, 0.0)
+        b.push(p1 - hw, n1, 0.2, 0.0)
+        b.push(p1 + hw, n1, 0.2, 0.1)
+        b.push(p0 - hw, n0, 0.0, 0.0)
+        b.push(p1 + hw, n1, 0.2, 0.1)
+        b.push(p0 + hw, n0, 0.0, 0.1)
+    }
+    // hub and spokes
+    b.cylinder(v3(0.0, -0.05, 0.0), 0.07, 0.10, 8, true)
+    for i in 0..8 {
+        let a = 2.0 * Math.pi() * (i as f64) / 8.0
+        let d = v3(Math.cos(a), 0.0, Math.sin(a))
+        let sw = v3(-d.z, 0.0, d.x).scale(0.022)
+        b.quad(d.scale(0.06) - sw + v3(0.0, -0.012, 0.0), d.scale(radius) - sw + v3(0.0, -0.012, 0.0), d.scale(radius) + sw + v3(0.0, -0.012, 0.0), d.scale(0.06) + sw + v3(0.0, -0.012, 0.0), 0.1, 1.0)
+        b.quad(d.scale(0.06) + sw + v3(0.0, 0.012, 0.0), d.scale(radius) + sw + v3(0.0, 0.012, 0.0), d.scale(radius) - sw + v3(0.0, 0.012, 0.0), d.scale(0.06) - sw + v3(0.0, 0.012, 0.0), 0.1, 1.0)
+    }
+}
+
+// The windmill at the end of the street. It turns, but the tower does not, so
+// the tower is baked here and the fan is a separate mesh in `props.milo`.
+fn addWindmillTower(wood: &mut Builder, steel: &mut Builder, x: f64, z: f64, height: f64) {
+    let g = groundHeight(x, z)
+    let legs = 4
+    let baseR = 1.15
+    let topR = 0.34
+    steel.setUvScale(1.0)
+    steel.setTint(0.42, 0.40, 0.38)
+    for i in 0..legs {
+        let a = 2.0 * Math.pi() * ((i as f64) + 0.5) / (legs as f64)
+        let bx = x + Math.cos(a) * baseR
+        let bz = z + Math.sin(a) * baseR
+        let tx = x + Math.cos(a) * topR
+        let tz = z + Math.sin(a) * topR
+        legStrut(steel, v3(bx, g - 0.2, bz), v3(tx, g + height, tz), 0.035)
+    }
+    // Cross bracing every couple of metres, which is what makes a lattice tower
+    // read as a lattice rather than as four sticks.
+    let bands = 5
+    for band in 0..bands {
+        let t0 = (band as f64) / (bands as f64)
+        let t1 = ((band + 1) as f64) / (bands as f64)
+        for i in 0..legs {
+            let a0 = 2.0 * Math.pi() * ((i as f64) + 0.5) / (legs as f64)
+            let a1 = 2.0 * Math.pi() * ((i as f64) + 1.5) / (legs as f64)
+            let r0 = baseR + (topR - baseR) * t0
+            let r1 = baseR + (topR - baseR) * t1
+            let p0 = v3(x + Math.cos(a0) * r0, g + height * t0, z + Math.sin(a0) * r0)
+            let p1 = v3(x + Math.cos(a1) * r0, g + height * t0, z + Math.sin(a1) * r0)
+            let q0 = v3(x + Math.cos(a0) * r1, g + height * t1, z + Math.sin(a0) * r1)
+            let q1 = v3(x + Math.cos(a1) * r1, g + height * t1, z + Math.sin(a1) * r1)
+            legStrut(steel, p0, q1, 0.018)
+            legStrut(steel, p1, q0, 0.018)
+            legStrut(steel, q0, q1, 0.018)
+        }
+    }
+    steel.setTint(1.0, 1.0, 1.0)
+
+    wood.setUvScale(2.0)
+    wood.setTint(0.68, 0.62, 0.54)
+    wood.boxSpan(v3(x - 1.6, g, z - 1.6), v3(x - 1.4, g + 1.9, z - 1.4))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+fn legStrut(b: &mut Builder, a: Vec3, c: Vec3, radius: f64) {
+    let d = c - a
+    let len = d.len()
+    if len <= 0.0001 {
+        return
+    }
+    b.setXform(multiply(translation(a), basisY(d.scale(1.0 / len))))
+    b.cylinder(v3(0.0, 0.0, 0.0), radius, len, 5, false)
+    b.resetXform()
+}
+
+// A thin cylinder from a to b. Wire, rails and hinge pins all want this and none
+// of them want to think about the basis.
+pub fn strand(b: &mut Builder, a: Vec3, c: Vec3) {
+    legStrut(b, a, c, 0.007)
+}
+
+fn basisY(axis: Vec3): Vec<f32> {
+    let y = axis.norm()
+    let x = y.anyPerp()
+    let z = x.cross(y)
+    var m = identity()
+    m[0] = x.x as f32
+    m[1] = x.y as f32
+    m[2] = x.z as f32
+    m[4] = y.x as f32
+    m[5] = y.y as f32
+    m[6] = y.z as f32
+    m[8] = z.x as f32
+    m[9] = z.y as f32
+    m[10] = z.z as f32
+    return m
+}
+
+// ── graveyard ─────────────────────────────────────────────────────────────────
+
+fn addGraveyard(wood: &mut Builder, stone: &mut Builder, r: &mut Rand) {
+    let cx = -9.0
+    let cz = 47.0
+    // Picket fence around it, with a gap for the gate facing the street.
+    wood.setUvScale(2.0)
+    let halfX = 7.0
+    let halfZ = 6.0
+    var i = 0
+    while i < 4 {
+        let along = if i % 2 == 0 {
+            halfX
+        } else {
+            halfZ
+        }
+        var t = -along
+        while t < along {
+            var px = cx
+            var pz = cz
+            if i == 0 {
+                px = cx + t
+                pz = cz - halfZ
+            } else if i == 1 {
+                px = cx + halfX
+                pz = cz + t
+            } else if i == 2 {
+                px = cx + t
+                pz = cz + halfZ
+            } else {
+                px = cx - halfX
+                pz = cz + t
+            }
+            // the gate
+            if i == 0 && Math.abs(t) < 0.7 {
+                t = t + 0.24
+                continue
+            }
+            let g = groundHeight(px, pz)
+            let h = 0.85 + 0.08 * hash2((t * 40.0) as i64, i)
+            let tint = 0.72 + 0.24 * hash2((t * 71.0) as i64, i + 9)
+            wood.setTint(tint, tint * 0.96, tint * 0.90)
+            wood.boxSpan(v3(px - 0.045, g - 0.15, pz - 0.02), v3(px + 0.045, g + h, pz + 0.02))
+            // the point on top of a picket
+            wood.tri(v3(px - 0.045, g + h, pz), v3(px + 0.045, g + h, pz), v3(px, g + h + 0.09, pz), 0.0, 0.0, 0.09, 0.0, 0.045, 0.09)
+            t = t + 0.24
+        }
+        i = i + 1
+    }
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+
+    // Crosses and headstones, leaning in the dirt.
+    for k in 0..16 {
+        let px = cx + r.range(-6.0, 6.0)
+        let pz = cz + r.range(-5.0, 5.0)
+        let g = groundHeight(px, pz)
+        let lean = r.jitter(0.16)
+        let yaw = r.range(-0.5, 0.5)
+        let m = multiply(translation(v3(px, g, pz)), multiply(rotationY(yaw), rotationZ(lean)))
+        if k % 3 == 0 {
+            stone.setUvScale(1.6)
+            let t = r.range(0.75, 1.0)
+            stone.setTint(t, t, t * 0.97)
+            stone.setXform(m)
+            stone.box(v3(0.0, 0.42, 0.0), 0.28, 0.42, 0.07)
+            // a rounded top, faked with a narrower slab
+            stone.box(v3(0.0, 0.86, 0.0), 0.20, 0.05, 0.07)
+            stone.resetXform()
+            stone.setUvScale(1.0)
+            stone.setTint(1.0, 1.0, 1.0)
+        } else {
+            wood.setUvScale(3.0)
+            let t = r.range(0.62, 0.9)
+            wood.setTint(t, t * 0.93, t * 0.84)
+            wood.setXform(m)
+            wood.box(v3(0.0, 0.46, 0.0), 0.055, 0.46, 0.045)
+            wood.box(v3(0.0, 0.70, 0.0), 0.24, 0.05, 0.045)
+            wood.resetXform()
+            wood.setUvScale(1.0)
+            wood.setTint(1.0, 1.0, 1.0)
+        }
+    }
+}
+
+// ── planting ──────────────────────────────────────────────────────────────────
+
+fn addGrass(b: &mut Builder, r: &mut Rand) {
+    b.setUvScale(6.0)
+    let tufts = 1700
+    for _i in 0..tufts {
+        let x = r.range(-44.0, 44.0)
+        let z = r.range(-20.0, 70.0)
+        // Nothing grows in the street or on a boardwalk.
+        if Math.abs(x) < STREET_HALF + 2.4 && z > -14.0 && z < 40.0 {
+            continue
+        }
+        let g = groundHeight(x, z)
+        let t = r.range(0.62, 1.0)
+        b.setTint(t, t * 0.94, t * 0.60)
+        let blades = 3 + r.int(4)
+        for _k in 0..blades {
+            let a = r.range(0.0, 6.283)
+            let lean = r.range(0.15, 0.55)
+            let h = r.range(0.13, 0.36)
+            let dir = v3(Math.cos(a), 0.0, Math.sin(a))
+            let base = v3(x, g, z) + dir.scale(r.range(0.0, 0.07))
+            let tip = base + v3(0.0, h, 0.0) + dir.scale(h * lean)
+            let side = dir.cross(v3(0.0, 1.0, 0.0)).norm().scale(0.012)
+            b.tri(base - side, base + side, tip, 0.0, 0.0, 0.05, 0.0, 0.02, 0.3)
+            b.tri(base + side, base - side, tip, 0.05, 0.0, 0.0, 0.0, 0.02, 0.3)
+        }
+    }
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// Saguaro, in the same bucket as the grass because it is the same texture with a
+// different tint and it saves a draw call.
+fn addCacti(b: &mut Builder, r: &mut Rand) {
+    b.setUvScale(1.2)
+    for _i in 0..22 {
+        let a = r.range(0.0, 6.283)
+        let d = r.range(24.0, 60.0)
+        let x = Math.cos(a) * d
+        let z = 24.0 + Math.sin(a) * d
+        if Math.abs(x) < 9.0 && z < 42.0 {
+            continue
+        }
+        let g = groundHeight(x, z)
+        let t = r.range(0.38, 0.62)
+        b.setTint(t * 0.55, t, t * 0.42)
+        let h = r.range(1.8, 3.8)
+        b.setXform(translation(v3(x, g, z)))
+        b.cylinder(v3(0.0, 0.0, 0.0), 0.22, h, 10, true)
+        let arms = r.int(3)
+        for k in 0..arms {
+            let side = if k % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            }
+            let ay = h * r.range(0.42, 0.68)
+            let reach = r.range(0.45, 0.75)
+            b.cylinder(v3(side * 0.16, ay, 0.0), 0.14, reach, 8, true)
+            b.setXform(multiply(translation(v3(x, g, z)), translation(v3(side * (0.16 + reach * 0.0), ay + reach, 0.0))))
+            b.cylinder(v3(side * 0.30, 0.0, 0.0), 0.14, r.range(0.5, 1.1), 8, true)
+            b.setXform(translation(v3(x, g, z)))
+        }
+        b.resetXform()
+    }
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+fn addRocks(b: &mut Builder, r: &mut Rand) {
+    b.setUvScale(0.8)
+    for _i in 0..60 {
+        let x = r.range(-60.0, 60.0)
+        let z = r.range(-30.0, 80.0)
+        if Math.abs(x) < STREET_HALF + 1.0 && z > -14.0 && z < 40.0 {
+            continue
+        }
+        let g = groundHeight(x, z)
+        let s = r.range(0.10, 0.55)
+        let t = r.range(0.55, 0.9)
+        b.setTint(t, t * 0.96, t * 0.90)
+        b.setXform(multiply(translation(v3(x, g - s * 0.35, z)), multiply(rotationY(r.range(0.0, 6.28)), rotationZ(r.jitter(0.4)))))
+        b.sphere(v3(0.0, s * 0.6, 0.0), s, 3, 5)
+        b.resetXform()
+    }
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// The land beyond the town: three rings of ridges. Aerial perspective in the
+// scene shader does the rest — these are deliberately plain shapes at a distance
+// where texture would not read anyway.
+fn addHills(b: &mut Builder) {
+    b.setUvScale(0.02)
+
+    // The plain the rings stand on, tucked 15 cm under the detailed ground so
+    // there is never a horizon-height gap between the two and never a z-fight
+    // where they overlap.
+    let discSegs = 96
+    b.setTint(0.90, 0.88, 0.85)
+    for i in 0..discSegs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (discSegs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (discSegs as f64)
+        let outer = 7000.0
+        b.tri(v3(0.0, -0.15, 0.0), v3(Math.cos(a1) * outer, -0.15, Math.sin(a1) * outer), v3(Math.cos(a0) * outer, -0.15, Math.sin(a0) * outer), 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+    }
+
+    let segs = 170
+    for ring in 0..3 {
+        let radius = 1300.0 + (ring as f64) * 1300.0
+        let height = 210.0 + (ring as f64) * 300.0
+        let tint = 0.92 - (ring as f64) * 0.10
+        for i in 0..segs {
+            let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+            let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+            let n0 = fbm2(Math.cos(a0) * 19.0 + (ring as f64) * 40.0, Math.sin(a0) * 19.0, 4)
+            let n1 = fbm2(Math.cos(a1) * 19.0 + (ring as f64) * 40.0, Math.sin(a1) * 19.0, 4)
+            let h0 = height * (0.20 + 1.5 * n0 * n0)
+            let h1 = height * (0.20 + 1.5 * n1 * n1)
+            let r0 = radius * (0.94 + 0.14 * n0)
+            let r1 = radius * (0.94 + 0.14 * n1)
+            // A ridge, not a cone: it rises out of the plain and drops back to
+            // it, so nothing about it is visible below its own crest line.
+            let inA = radius * 0.62
+            let outA = radius * 1.55
+            let c0 = v3(Math.cos(a0) * r0, h0, Math.sin(a0) * r0)
+            let c1 = v3(Math.cos(a1) * r1, h1, Math.sin(a1) * r1)
+            let i0 = v3(Math.cos(a0) * inA, -1.0, Math.sin(a0) * inA)
+            let i1 = v3(Math.cos(a1) * inA, -1.0, Math.sin(a1) * inA)
+            let o0 = v3(Math.cos(a0) * outA, -1.0, Math.sin(a0) * outA)
+            let o1 = v3(Math.cos(a1) * outA, -1.0, Math.sin(a1) * outA)
+            b.setTint(tint, tint * 0.97, tint * 0.95)
+            b.tri(i0, i1, c1, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+            b.tri(i0, c1, c0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+            b.tri(c0, c1, o1, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+            b.tri(c0, o1, o0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+        }
+    }
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// ── assembly ──────────────────────────────────────────────────────────────────
+
+// A sheet of paper nailed to a wall, facing `nx`/`nz`, with its own texture
+// filling exactly one quad — so the uv here runs 0..1 and does not tile.
+fn addPoster(b: &mut Builder, x: f64, y: f64, z: f64, nx: f64, nz: f64, w: f64, h: f64, tilt: f64) {
+    let right = v3(-nz, 0.0, nx).scale(w * 0.5)
+    let up = v3(0.0, h * 0.5, 0.0)
+    let c = v3(x, y, z)
+    let lean = v3(nx, 0.0, nz).scale(0.012)
+    // A poster curls off the wall at one corner; a perfectly flat rectangle
+    // reads as a decal.
+    let a0 = c - right - up + lean
+    let a1 = c + right - up + lean
+    let a2 = c + right + up + lean + v3(0.0, 0.0, 0.0) + v3(nx, 0.0, nz).scale(tilt)
+    let a3 = c - right + up + lean
+    // Wound so the front face is the one the normal points out of. The other
+    // order lights identically and is culled, which looks exactly like a poster
+    // that was never placed.
+    b.setUvScale(1.0)
+    b.push(a0, v3(nx, 0.0, nz), 1.0, 1.0)
+    b.push(a3, v3(nx, 0.0, nz), 1.0, 0.0)
+    b.push(a2, v3(nx, 0.0, nz), 0.0, 0.0)
+    b.push(a0, v3(nx, 0.0, nz), 1.0, 1.0)
+    b.push(a2, v3(nx, 0.0, nz), 0.0, 0.0)
+    b.push(a1, v3(nx, 0.0, nz), 0.0, 1.0)
+}
+
+fn addSignFace(b: &mut Builder, x: f64, y: f64, z: f64, nx: f64, nz: f64, w: f64, h: f64) {
+    let right = v3(-nz, 0.0, nx).scale(w * 0.5)
+    let up = v3(0.0, h * 0.5, 0.0)
+    let c = v3(x, y, z) + v3(nx, 0.0, nz).scale(0.01)
+    b.setUvScale(1.0)
+    // u increases towards the viewer's right, which for a wall facing -nz means
+    // decreasing world x. Getting this backwards reads the sign in a mirror.
+    b.push(c - right - up, v3(nx, 0.0, nz), 1.0, 1.0)
+    b.push(c - right + up, v3(nx, 0.0, nz), 1.0, 0.0)
+    b.push(c + right + up, v3(nx, 0.0, nz), 0.0, 0.0)
+    b.push(c - right - up, v3(nx, 0.0, nz), 1.0, 1.0)
+    b.push(c + right + up, v3(nx, 0.0, nz), 0.0, 0.0)
+    b.push(c + right - up, v3(nx, 0.0, nz), 0.0, 1.0)
+}
+
+pub fn buildWorld(gl: &mut GlContext, posterTex: i64, flatTex: i64, signATex: i64, signBTex: i64): World {
+    var r = rand(0x5EED1234)
+    var builders: Vec<Builder> = Vec.new()
+    for _i in 0..BUCKETS {
+        builders.push(builder())
+    }
+
+    addGround(builders[B_DIRT])
+
+    // Left of the street: the saloon, then two smaller storefronts.
+    falseFront(builders[B_WOOD], builders[B_PAINT], r, -1.0, 10.0, 19.0, 7.0, 6.4, 4.1, 0.86)
+    falseFront(builders[B_WOOD], builders[B_PAINT], r, -1.0, 20.5, 26.0, 5.5, 4.9, 3.4, 0.74)
+    falseFront(builders[B_WOOD], builders[B_PAINT], r, -1.0, 27.5, 34.0, 5.0, 4.4, 3.2, 0.80)
+    addPorch(builders[B_WOOD], r, -1.0, 10.0, 26.0, 2.85)
+    addBoardwalk(builders[B_WOOD], r, -1.0, 9.0, 35.0)
+    addWalkRail(builders[B_WOOD], -1.0, 9.5, 34.0)
+    addTrim(builders[B_WOOD], -12.8, -5.8, 10.0, 19.0, 4.1, 0.86)
+    addTrim(builders[B_WOOD], -11.3, -5.8, 20.5, 26.0, 3.4, 0.74)
+    addTinRoof(builders[B_CANVAS], -12.8, -5.8, 10.0, 19.0, 4.16, 3.55, false)
+    addTinRoof(builders[B_CANVAS], -11.3, -5.8, 20.5, 26.0, 3.46, 2.95, false)
+    addEndFacade(builders[B_WOOD], builders[B_PAINT], -12.8, -5.8, 10.0, 5.2, 0.88)
+
+    // Right of the street: the general store and a livery.
+    falseFront(builders[B_WOOD], builders[B_PAINT], r, 1.0, 12.5, 20.5, 6.5, 5.6, 3.8, 0.82)
+    falseFront(builders[B_WOOD], builders[B_PAINT], r, 1.0, 22.0, 30.5, 8.0, 5.0, 4.6, 0.70)
+    addPorch(builders[B_WOOD], r, 1.0, 12.5, 21.5, 2.85)
+    addBoardwalk(builders[B_WOOD], r, 1.0, 11.5, 31.5)
+    addWalkRail(builders[B_WOOD], 1.0, 12.0, 31.0)
+    addTrim(builders[B_WOOD], 5.8, 12.3, 12.5, 20.5, 3.8, 0.82)
+    addTrim(builders[B_WOOD], 5.8, 13.8, 22.0, 30.5, 4.6, 0.70)
+    addTinRoof(builders[B_CANVAS], 5.8, 12.3, 12.5, 20.5, 3.86, 3.25, false)
+    addTinRoof(builders[B_CANVAS], 5.8, 13.8, 22.0, 30.5, 4.66, 4.05, false)
+    addEndFacade(builders[B_WOOD], builders[B_PAINT], 5.8, 12.3, 12.5, 4.9, 0.80)
+
+    addHitchingRail(builders[B_WOOD], -4.2, 12.0, 16.0)
+    addHitchingRail(builders[B_WOOD], 4.2, 14.5, 18.5)
+    addTrough(builders[B_WOOD], builders[B_STEEL], 4.4, 23.0)
+
+    addBarrel(builders[B_WOOD], builders[B_STEEL], -5.1, 13.4, 0.3, 0.92)
+    addBarrel(builders[B_WOOD], builders[B_STEEL], -5.0, 14.5, 1.1, 0.84)
+    addBarrel(builders[B_WOOD], builders[B_STEEL], 5.05, 25.5, 2.2, 0.88)
+    addBarrel(builders[B_WOOD], builders[B_STEEL], 4.9, 26.7, 0.7, 0.78)
+    addBarrel(builders[B_WOOD], builders[B_STEEL], -4.9, 28.5, 1.7, 0.90)
+
+    addCrate(builders[B_WOOD], -5.2, WALK_TOP, 21.5, 0.28, 0.25, 0.80)
+    addCrate(builders[B_WOOD], -4.8, WALK_TOP + 0.56, 21.6, 0.20, -0.4, 0.72)
+    addCrate(builders[B_WOOD], 5.3, WALK_TOP, 16.5, 0.30, -0.15, 0.86)
+
+    addWagon(builders[B_WOOD], builders[B_RUST], -1.9, 37.0, 0.42)
+    addWindmillTower(builders[B_WOOD], builders[B_STEEL], 13.5, 42.0, 9.5)
+    addGraveyard(builders[B_WOOD], builders[B_STONE], r)
+    // Milo is wanted in this town.
+    addPoster(builders[B_POSTER], -5.65, 1.84, 13.9, 1.0, 0.0, 0.52, 0.69, 0.02)
+    addPoster(builders[B_POSTER], -5.65, 1.78, 24.4, 1.0, 0.0, 0.52, 0.69, -0.015)
+    addPoster(builders[B_POSTER], 5.65, 1.82, 19.3, -1.0, 0.0, 0.52, 0.69, 0.018)
+    addPoster(builders[B_POSTER], -7.9, 1.74, 9.85, 0.0, -1.0, 0.52, 0.69, 0.0)
+    addPoster(builders[B_POSTER], 10.6, 1.70, 12.35, 0.0, -1.0, 0.52, 0.69, -0.02)
+    addSignFace(builders[B_SIGN_A], -9.3, 2.70, 9.765, 0.0, -1.0, 2.50, 0.62)
+    addSignFace(builders[B_SIGN_B], 9.05, 2.60, 12.265, 0.0, -1.0, 2.40, 0.58)
+    addCacti(builders[B_GRASS], r)
+    addGrass(builders[B_GRASS], r)
+    addRocks(builders[B_STONE], r)
+    addHills(builders[B_HILLS])
+
+    var meshes: Vec<Mesh> = Vec.new()
+    for i in 0..BUCKETS {
+        var m = Mesh.new(gl, sceneAttrs())
+        m.upload(builders[i].data.clone())
+        meshes.push(m)
+    }
+
+    var mats: Vec<Material> = Vec.new()
+    var dirt = material(TEX_SAND, 0.46, 0.38, 0.27, 0.96, 0.0)
+    // The detail copy is a second ripple train an eighth the size of the first.
+    // Too much of it and the ground reads as corduroy rather than sand, which is
+    // what 7.0 and a normal strength of 1.7 produced.
+    dirt.detail = 4.5
+    dirt.normalStrength = 0.34
+    mats.push(dirt)
+    mats.push(material(TEX_GRASS, 0.52, 0.46, 0.28, 0.92, 0.0))
+    var stone = material(TEX_ADOBE, 0.50, 0.46, 0.40, 0.82, 0.0)
+    stone.normalStrength = 1.2
+    mats.push(stone)
+    var wood = material(TEX_PLANK, 0.34, 0.28, 0.22, 0.88, 0.0)
+    wood.detail = 5.0
+    wood.normalStrength = 1.3
+    mats.push(wood)
+    mats.push(material(TEX_STEEL, 0.52, 0.54, 0.57, 0.38, 0.80))
+    var tin = material(TEX_TIN, 0.50, 0.48, 0.45, 0.60, 0.60)
+    tin.normalStrength = 1.3
+    mats.push(tin)
+    mats.push(material(TEX_RUST, 0.36, 0.23, 0.16, 0.88, 0.35))
+    mats.push(material(TEX_PAINT, 0.74, 0.73, 0.70, 0.55, 0.0))
+    var far = material(TEX_SAND, 0.46, 0.41, 0.34, 0.98, 0.0)
+    far.normalStrength = 0.0
+    mats.push(far)
+    mats.push(materialTex(posterTex, flatTex, 1.05, 0.94, 0.74, 0.90, 0.0))
+    mats.push(materialTex(signATex, flatTex, 0.80, 0.80, 0.80, 0.60, 0.0))
+    mats.push(materialTex(signBTex, flatTex, 0.80, 0.80, 0.80, 0.60, 0.0))
+
+    return World {
+        meshes: meshes, mats: mats
+    }
+}
+
+impl World {
+    fn free(self: Self, gl: &mut GlContext) {
+        var meshes = self.meshes
+        while meshes.len > 0 {
+            let m = meshes.pop()!
+            m.free(gl)
+        }
+    }
+}

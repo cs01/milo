@@ -1,0 +1,274 @@
+// Paper and paint: the wanted poster, and the boards over the doors.
+//
+// These are the only textures in the game that carry words, so they are built
+// here rather than in textures.milo — they need the HUD's font table, they are
+// not square, they are not tiled, and there is exactly one of each.
+//
+// Milo is the chihuahua from the other games in this directory. His portrait is
+// the same kind of art they use: a grid of digits indexed into a small palette,
+// which is a sprite you can read in the source.
+
+from "std/math" import {
+    Math
+}
+from "./hud" import {
+    fontTable
+}
+
+pub let POSTER_W: i64 = 192
+
+pub let POSTER_H: i64 = 256
+
+pub let SIGN_W: i64 = 256
+
+pub let SIGN_H: i64 = 64
+
+@wrapping
+fn noiseHash(x: i64, y: i64, salt: i64): f64 {
+    var h = (((x & 0xFFF) as u64) * 0x9E3779B1) & 0xFFFFFFFF
+    h = (h + ((((y & 0xFFF) as u64) * 0x85EBCA77) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    h = (h + ((((salt & 0xFFF) as u64) * 0xC2B2AE35) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    h = h ^ (h >> 15)
+    h = (h * 0x2545F491) & 0xFFFFFFFF
+    h = h ^ (h >> 13)
+    return ((h & 0xFFFFFF) as f64) / 16777216.0
+}
+
+fn smoothNoise(x: f64, y: f64, salt: i64): f64 {
+    let fx = Math.floor(x)
+    let fy = Math.floor(y)
+    var tx = x - fx
+    var ty = y - fy
+    tx = tx * tx * (3.0 - 2.0 * tx)
+    ty = ty * ty * (3.0 - 2.0 * ty)
+    let ix = fx as i64
+    let iy = fy as i64
+    let a = noiseHash(ix, iy, salt)
+    let b = noiseHash(ix + 1, iy, salt)
+    let c = noiseHash(ix, iy + 1, salt)
+    let d = noiseHash(ix + 1, iy + 1, salt)
+    let top = a + (b - a) * tx
+    let bot = c + (d - c) * tx
+    return top + (bot - top) * ty
+}
+
+fn pack(r: f64, g: f64, b: f64): u32 {
+    let rr = (Math.clampF64(r, 0.0, 1.0) * 255.0) as u32
+    let gg = (Math.clampF64(g, 0.0, 1.0) * 255.0) as u32
+    let bb = (Math.clampF64(b, 0.0, 1.0) * 255.0) as u32
+    return 0xFF000000 | (bb << 16) | (gg << 8) | rr
+}
+
+// Stamp one 5x7 glyph at `scale`, in ink that is not quite black and not quite
+// even — printed on a press, on paper, a century ago.
+fn stampGlyph(px: &mut Vec<u32>, w: i64, h: i64, table: &Vec<i64>, code: i64, x0: i64, y0: i64, scale: i64, r: f64, g: f64, b: f64) {
+    if code <= 0 || code >= 128 {
+        return
+    }
+    let bits = table[code]
+    if bits == 0 {
+        return
+    }
+    for row in 0..7 {
+        for col in 0..5 {
+            if ((bits >> (row * 5 + col)) & 1) != 1 {
+                continue
+            }
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let x = x0 + col * scale + dx
+                    let y = y0 + row * scale + dy
+                    if x < 0 || y < 0 || x >= w || y >= h {
+                        continue
+                    }
+                    let fade = 0.72 + 0.5 * noiseHash(x, y, 7)
+                    px[y * w + x] = pack(r * fade, g * fade, b * fade)
+                }
+            }
+        }
+    }
+}
+
+fn stampText(px: &mut Vec<u32>, w: i64, h: i64, table: &Vec<i64>, msg: &string, cx: i64, y0: i64, scale: i64, r: f64, g: f64, b: f64) {
+    var n = 0
+    for _c in msg.codePoints() {
+        n = n + 1
+    }
+    let width = n * 6 * scale - scale
+    var x = cx - width / 2
+    for cp in msg.codePoints() {
+        let code = cp as i64
+        if code != 32 {
+            stampGlyph(px, w, h, table, code, x, y0, scale, r, g, b)
+        }
+        x = x + 6 * scale
+    }
+}
+
+// Milo, side on, ears up. Digits index the palette in `dogInk`; a dot is paper.
+fn dogArt(): Vec<string> {
+    var a: Vec<string> = Vec.new()
+    a.push("..............030..030........")
+    a.push("..............0300.0300.......")
+    a.push("..............0330003300......")
+    a.push("..............0353003530......")
+    a.push("..............03533333500.....")
+    a.push("..............033333333300....")
+    a.push("...000.......00333333333300...")
+    a.push("...0200......033333333333300..")
+    a.push("...002000...003333373333300...")
+    a.push("....0022000.03333377333333000.")
+    a.push(".....002220000333333334447770.")
+    a.push("......00220222333333444447770.")
+    a.push("......00222222233333444447770.")
+    a.push(".....002222228883333444444400.")
+    a.push(".....02222222888433333555500..")
+    a.push(".....0222222289844442000000...")
+    a.push(".....02222222244444440........")
+    a.push(".....00222222224444400........")
+    a.push("......022222222444400.........")
+    a.push(".....002220222224000..........")
+    a.push(".....04444400444440...........")
+    a.push(".....04444400444440...........")
+    a.push(".....00000000000000...........")
+    return a
+}
+
+fn dogInk(c: i64): Vec<f64> {
+    var v: Vec<f64> = Vec.new()
+    // Printed in one colour of ink, so the palette is a set of greys with a
+    // little sepia in them rather than the fur colours the sprite has elsewhere.
+    let tones: Vec<f64> = [0.10, 0.08, 0.07, 0.34, 0.28, 0.22, 0.46, 0.39, 0.31, 0.60, 0.52, 0.42, 0.72, 0.64, 0.53, 0.52, 0.40, 0.38, 0.86, 0.80, 0.70, 0.09, 0.07, 0.06, 0.40, 0.24, 0.22, 0.66, 0.56, 0.34,]
+    var i = c
+    if i < 0 || i > 9 {
+        i = 0
+    }
+    v.push(tones[i * 3])
+    v.push(tones[i * 3 + 1])
+    v.push(tones[i * 3 + 2])
+    return v
+}
+
+// Aged paper: a warm base, blotches, a darker rim where it has been handled,
+// and a few fly-specks.
+fn paper(px: &mut Vec<u32>, w: i64, h: i64) {
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f64
+            let fy = y as f64
+            let blot = smoothNoise(fx * 0.035, fy * 0.035, 3) * 0.5 + smoothNoise(fx * 0.12, fy * 0.12, 5) * 0.3
+            let grain = noiseHash(x, y, 11) * 0.06
+            // distance to the nearest edge, for the handled rim
+            let dx = Math.minF64(fx, (w - 1 - x) as f64)
+            let dy = Math.minF64(fy, (h - 1 - y) as f64)
+            let edge = Math.minF64(Math.minF64(dx, dy) / 14.0, 1.0)
+            var base = 0.90 - 0.20 * blot - grain
+            base = base * (0.62 + 0.38 * edge)
+            var r = base
+            var g = base * 0.93
+            var b = base * 0.76
+            if noiseHash(x, y, 23) > 0.9985 {
+                r = 0.25
+                g = 0.20
+                b = 0.16
+            }
+            px[y * w + x] = pack(r, g, b)
+        }
+    }
+}
+
+pub fn posterPixels(): Vec<u32> {
+    let w = POSTER_W
+    let h = POSTER_H
+    var px: Vec<u32> = Vec.filled(w * h, 0)
+    paper(px, w, h)
+    let table = fontTable()
+
+    // rule lines
+    for y in 0..h {
+        for x in 0..w {
+            let onFrame = (x == 6 || x == w - 7 || y == 6 || y == h - 7)
+            || (x == 9 || x == w - 10 || y == 9 || y == h - 10)
+            if onFrame && x > 5 && x < w - 6 && y > 5 && y < h - 6 {
+                px[y * w + x] = pack(0.18, 0.14, 0.11)
+            }
+        }
+    }
+
+    stampText(px, w, h, table, "WANTED", w / 2, 20, 5, 0.14, 0.10, 0.08)
+    stampText(px, w, h, table, "DEAD OR ALIVE", w / 2, 62, 2, 0.20, 0.15, 0.12)
+
+    // the portrait
+    let art = dogArt()
+    let scale = 5
+    let artW = 30 * scale
+    let ox = (w - artW) / 2
+    let oy = 84
+    var row = 0
+    for line in art {
+        var col = 0
+        for cp in line.codePoints() {
+            let ch = cp as i64
+            if ch != 46 {
+                let ink = dogInk(ch - 48)
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = ox + col * scale + dx
+                        let y = oy + row * scale + dy
+                        if x >= 0 && y >= 0 && x < w && y < h {
+                            let fade = 0.80 + 0.35 * noiseHash(x, y, 13)
+                            px[y * w + x] = pack(ink[0] * fade, ink[1] * fade, ink[2] * fade)
+                        }
+                    }
+                }
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    stampText(px, w, h, table, "MILO", w / 2, 212, 4, 0.14, 0.10, 0.08)
+    stampText(px, w, h, table, "REWARD 5000", w / 2, 236, 2, 0.22, 0.16, 0.12)
+    return px
+}
+
+// A painted board over a door. `msg` is stamped in cracked white on dark green.
+pub fn signPixels(msg: &string): Vec<u32> {
+    let w = SIGN_W
+    let h = SIGN_H
+    var px: Vec<u32> = Vec.filled(w * h, 0)
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f64
+            let fy = y as f64
+            let wear = smoothNoise(fx * 0.09, fy * 0.22, 31)
+            let grain = smoothNoise(fx * 0.5, fy * 3.0, 37) * 0.18
+            let base = 0.14 + 0.10 * wear + grain
+            px[y * w + x] = pack(base * 0.75, base * 1.05, base * 0.85)
+        }
+    }
+    let table = fontTable()
+    // Scale the lettering so the message fills the board however long it is.
+    var n = 0
+    for _c in msg.codePoints() {
+        n = n + 1
+    }
+    var scale = 6
+    while scale > 1 && n * 6 * scale > w - 24 {
+        scale = scale - 1
+    }
+    stampText(px, w, h, table, msg, w / 2, (h - 7 * scale) / 2, scale, 0.92, 0.88, 0.76)
+    // Flake the paint off the letters where the board has weathered.
+    for y in 0..h {
+        for x in 0..w {
+            if smoothNoise((x as f64) * 0.22, (y as f64) * 0.22, 41) > 0.74 {
+                let fx = x as f64
+                let fy = y as f64
+                let wear = smoothNoise(fx * 0.09, fy * 0.22, 31)
+                let base = 0.14 + 0.10 * wear
+                px[y * w + x] = pack(base * 0.75, base * 1.05, base * 0.85)
+            }
+        }
+    }
+    return px
+}

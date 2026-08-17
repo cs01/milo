@@ -1,0 +1,483 @@
+// The frame: shadow pass, sky, opaque geometry, bloom, composite.
+//
+// The scene renders into an RGBA16F target at a resolution capped independently
+// of the window, because every pass here is per-pixel and a retina panel hands
+// back four times the pixels of the display it is showing. `--scale` moves that
+// cap; the HUD is drawn afterwards at the real drawable size so text stays sharp
+// however low the scene goes.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Gpu, Mesh, Shader, Target, Texture2D, Wrap, bindScreen
+}
+from "./mat4" import {
+    identity, multiply
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./sky" import {
+    SKY_H, SKY_W, Sky
+}
+from "./shaders" import {
+    SCENE_VERT, SHADOW_FRAG, SHADOW_VERT, SKY_VERT, sceneFrag, skyFrag
+}
+from "./post" import {
+    BLUR_FRAG, BRIGHT_FRAG, COMPOSITE_FRAG, HUD_FRAG, HUD_VERT, QUAD_VERT
+}
+
+pub let SHADOW_SIZE: i64 = 2048
+
+// How the surface is lit, independent of what shape it is. Textures are indices
+// into `Gfx.tex` rather than `Texture2D` values because a Texture2D is @noCopy —
+// two materials naming one texture would otherwise be two things that each think
+// they may free it.
+pub struct Material {
+    albedoTex: i64,
+    surfTex: i64,
+    albedo: Vec3,
+    rough: f64,
+    metal: f64,
+    normalStrength: f64,
+    // Extra repeats of the same texture, multiplied in for close-up grain. 0 is
+    // off, and off is right for anything you never stand on top of.
+    detail: f64,
+    emissive: Vec3,
+    alpha: f64,
+}
+
+// `slot` is a TEX_* index from textures.milo. Each material contributes two GL
+// textures in order — albedo then surface — so the slot doubles into `Gfx.tex`.
+// Passing the GL indices directly is how a material ends up sampling its own
+// albedo as a normal map, which looks almost right and is very hard to see.
+pub fn material(slot: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Material {
+    return Material {
+        albedoTex: slot * 2,
+        surfTex: slot * 2 + 1,
+        albedo: v3(r, g, b),
+        rough: rough,
+        metal: metal,
+        normalStrength: 1.0,
+        detail: 0.0,
+        emissive: v3(0.0, 0.0, 0.0),
+        alpha: 1.0,
+    }
+}
+
+// For the handful of surfaces that are one-of-a-kind — a poster, a painted
+// board — where there is no tiling surface map to pair with the picture.
+pub fn materialTex(albedoTex: i64, surfTex: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Material {
+    return Material {
+        albedoTex: albedoTex,
+        surfTex: surfTex,
+        albedo: v3(r, g, b),
+        rough: rough,
+        metal: metal,
+        normalStrength: 1.0,
+        detail: 0.0,
+        emissive: v3(0.0, 0.0, 0.0),
+        alpha: 1.0,
+    }
+}
+
+pub struct Gfx {
+    scene: Shader,
+    shadowSh: Shader,
+    skySh: Shader,
+    bright: Shader,
+    blur: Shader,
+    composite: Shader,
+    hudSh: Shader,
+
+    sceneTgt: Target,
+    shadowTgt: Target,
+    bloomA: Target,
+    bloomB: Target,
+
+    quad: Mesh,
+    hudMesh: Mesh,
+
+    skyTex: Texture2D,
+    atlas: Texture2D,
+    tex: Vec<Texture2D>,
+
+    lightVP: Vec<f32>,
+    shadowTexel: f64,
+    sunDir: Vec3,
+    sunColor: Vec3,
+    skyUp: Vec3,
+    skyDown: Vec3,
+    cloudCover: f64,
+
+    rw: i64,
+    rh: i64,
+    debug: f64,
+    exposure: f64,
+    bloomAmount: f64,
+    // Additive white the composite adds before tone mapping — the muzzle flash
+    // lighting the whole frame for two frames rather than only the barrel.
+    flash: f64,
+    time: f64,
+}
+
+fn quadMesh(gl: &mut GlContext): Mesh {
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(2)
+    var m = Mesh.new(gl, attrs)
+    var d: Vec<f32> = Vec.new()
+    d.push(-1.0)
+    d.push(-1.0)
+    d.push(3.0)
+    d.push(-1.0)
+    d.push(-1.0)
+    d.push(3.0)
+    m.upload(d)
+    return m
+}
+
+pub fn sceneAttrs(): Vec<i64> {
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(3) // position
+    attrs.push(3) // normal
+    attrs.push(2) // uv
+    attrs.push(3) // tint
+    attrs.push(1) // baked ao
+    return attrs
+}
+
+pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec<u32>, atlasSize: i64): Result<Gfx, string> {
+    let scene = match Shader.compile(gl, SCENE_VERT, sceneFrag()) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("scene: " + e)
+        }
+    }
+    let shadowSh = match Shader.compile(gl, SHADOW_VERT, SHADOW_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("shadow: " + e)
+        }
+    }
+    let skySh = match Shader.compile(gl, SKY_VERT, skyFrag()) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("sky: " + e)
+        }
+    }
+    let bright = match Shader.compile(gl, QUAD_VERT, BRIGHT_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("bright: " + e)
+        }
+    }
+    let blur = match Shader.compile(gl, QUAD_VERT, BLUR_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("blur: " + e)
+        }
+    }
+    let composite = match Shader.compile(gl, QUAD_VERT, COMPOSITE_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("composite: " + e)
+        }
+    }
+    let hudSh = match Shader.compile(gl, HUD_VERT, HUD_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("hud: " + e)
+        }
+    }
+    let sceneTgt = match Target.new(gl, rw, rh, true, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("scene target: " + e)
+        }
+    }
+    let shadowTgt = match Target.new(gl, SHADOW_SIZE, SHADOW_SIZE, true, false) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("shadow target: " + e)
+        }
+    }
+    let bw = rw / 4
+    let bh = rh / 4
+    let bloomA = match Target.new(gl, bw, bh, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("bloom a: " + e)
+        }
+    }
+    let bloomB = match Target.new(gl, bw, bh, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("bloom b: " + e)
+        }
+    }
+    let skyTex = Texture2D.rgb32f(gl, SKY_W, SKY_H, sky.table.clone(), true)
+    skyTex.setWrap(Wrap.Repeat)
+    skyTex.generateMipmaps()
+    let atlas = Texture2D.rgba8(gl, atlasSize, atlasSize, atlasPixels.clone(), true)
+
+    var hudAttrs: Vec<i64> = Vec.new()
+    hudAttrs.push(2)
+    hudAttrs.push(2)
+    hudAttrs.push(4)
+
+    return Result.Ok(Gfx {
+        scene: scene,
+        shadowSh: shadowSh,
+        skySh: skySh,
+        bright: bright,
+        blur: blur,
+        composite: composite,
+        hudSh: hudSh,
+        sceneTgt: sceneTgt,
+        shadowTgt: shadowTgt,
+        bloomA: bloomA,
+        bloomB: bloomB,
+        quad: quadMesh(gl),
+        hudMesh: Mesh.new(gl, hudAttrs),
+        skyTex: skyTex,
+        atlas: atlas,
+        tex: Vec.new(),
+        lightVP: identity(),
+        shadowTexel: 0.03,
+        sunDir: sky.sun,
+        sunColor: sky.sunColor,
+        skyUp: sky.skyUp,
+        skyDown: sky.skyDown,
+        cloudCover: 0.42,
+        rw: rw,
+        rh: rh,
+        debug: 0.0,
+        exposure: 1.0,
+        bloomAmount: 0.06,
+        flash: 0.0,
+        time: 0.0,
+    }
+    )
+}
+
+impl Gfx {
+    fn addTexture(self: &mut Self, t: Texture2D): i64 {
+        self.tex.push(t)
+        return self.tex.len - 1
+    }
+
+    // Uniforms every pass that reads the sky needs, in one place: the sky pass
+    // and the scene pass share CHUNK_SKY, so they have to be fed identically or
+    // the horizon disagrees with the ground it meets.
+    fn bindSkyUniforms(self: &Self, sh: &Shader) {
+        sh.uniform3F("uSunDir", self.sunDir.x, self.sunDir.y, self.sunDir.z)
+        sh.uniform3F("uSunColor", self.sunColor.x, self.sunColor.y, self.sunColor.z)
+        sh.uniformF("uTime", self.time)
+        sh.uniformF("uCloudCover", self.cloudCover)
+        sh.sampler("uSky", self.skyTex, 2)
+    }
+
+    // ── shadow pass ───────────────────────────────────────────────────────────
+
+    // A box in light space around `centre`. Everything that can cast into the
+    // range fits in it; nothing outside it is drawn, so the extent is the whole
+    // budget for how far a shadow can reach.
+    fn shadowBegin(self: &mut Self, centre: &Vec3, extent: f64, depth: f64) {
+        let eye = centre + self.sunDir.scale(depth * 0.5)
+        var up = v3(0.0, 1.0, 0.0)
+        if Math.abs(self.sunDir.y) > 0.98 {
+            up = v3(0.0, 0.0, 1.0)
+        }
+        let view = lookAtM(eye, centre, up)
+        let proj = orthoM(-extent, extent, -extent, extent, 0.05, depth)
+        self.lightVP = multiply(proj, view)
+        self.shadowTexel = 2.0 * extent / (SHADOW_SIZE as f64)
+        self.shadowTgt.bind()
+        Gpu.clear(1.0, 1.0, 0.0, 1.0, true)
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.blendOff()
+        // Front-face culling in the depth pass moves acne onto surfaces the
+        // camera cannot see. It costs nothing and removes the need for a large
+        // constant bias, which is what makes a shadow detach from its object.
+        Gpu.cullBackFaces(false)
+        self.shadowSh.bind()
+        self.shadowSh.uniformMat4("uLightVP", self.lightVP)
+    }
+
+    fn shadowDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>) {
+        self.shadowSh.uniformMat4("uModel", model)
+        mesh.draw()
+    }
+
+    // ── scene ─────────────────────────────────────────────────────────────────
+
+    fn sceneBegin(self: &mut Self, viewProj: &Vec<f32>, invViewProj: &Vec<f32>, cam: &Vec3) {
+        self.sceneTgt.bind()
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+
+        self.skySh.bind()
+        self.skySh.uniformMat4("uInvViewProj", invViewProj)
+        self.bindSkyUniforms(self.skySh)
+        self.quad.draw()
+
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.cullBackFaces(true)
+        self.scene.bind()
+        self.scene.uniformMat4("uViewProj", viewProj)
+        self.scene.uniform3F("uCam", cam.x, cam.y, cam.z)
+        self.bindSkyUniforms(self.scene)
+        self.scene.uniform3F("uSkyUp", self.skyUp.x, self.skyUp.y, self.skyUp.z)
+        self.scene.uniform3F("uSkyDown", self.skyDown.x, self.skyDown.y, self.skyDown.z)
+        self.scene.uniformF("uDebug", self.debug)
+        self.scene.uniformMat4("uLightVP", self.lightVP)
+        self.scene.uniformF("uShadowTexel", self.shadowTexel)
+        self.shadowTgt.bindTexture(3)
+        self.scene.uniformI("uShadow", 3)
+    }
+
+    fn sceneDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>, m: &Material) {
+        self.scene.uniformMat4("uModel", model)
+        self.scene.uniform3F("uAlbedo", m.albedo.x, m.albedo.y, m.albedo.z)
+        self.scene.uniformF("uRough", m.rough)
+        self.scene.uniformF("uMetal", m.metal)
+        self.scene.uniformF("uNormalStrength", m.normalStrength)
+        self.scene.uniformF("uDetail", m.detail)
+        self.scene.uniform3F("uEmissive", m.emissive.x, m.emissive.y, m.emissive.z)
+        self.scene.uniformF("uAlpha", m.alpha)
+        self.scene.sampler("uAlbedoTex", self.tex[m.albedoTex], 0)
+        self.scene.sampler("uSurfTex", self.tex[m.surfTex], 1)
+        mesh.draw()
+    }
+
+    // ── post ──────────────────────────────────────────────────────────────────
+
+    fn present(self: &mut Self, dw: i64, dh: i64) {
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+
+        let bw = self.bloomA.w
+        let bh = self.bloomA.h
+        self.bloomA.bind()
+        self.bright.bind()
+        self.sceneTgt.bindTexture(0)
+        self.bright.uniformI("uSrc", 0)
+        self.bright.uniformF("uThreshold", 1.1)
+        self.bright.uniform2F("uTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
+        self.quad.draw()
+
+        for _pass in 0..2 {
+            self.bloomB.bind()
+            self.blur.bind()
+            self.bloomA.bindTexture(0)
+            self.blur.uniformI("uSrc", 0)
+            self.blur.uniform2F("uDir", 1.0 / (bw as f64), 0.0)
+            self.quad.draw()
+
+            self.bloomA.bind()
+            self.blur.bind()
+            self.bloomB.bindTexture(0)
+            self.blur.uniformI("uSrc", 0)
+            self.blur.uniform2F("uDir", 0.0, 1.0 / (bh as f64))
+            self.quad.draw()
+        }
+
+        bindScreen(dw, dh)
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+        self.composite.bind()
+        self.sceneTgt.bindTexture(0)
+        self.composite.uniformI("uScene", 0)
+        self.bloomA.bindTexture(1)
+        self.composite.uniformI("uBloom", 1)
+        self.composite.uniform2F("uTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
+        self.composite.uniformF("uBloomAmount", self.bloomAmount)
+        self.composite.uniformF("uExposure", self.exposure)
+        self.composite.uniformF("uVignette", 0.55)
+        self.composite.uniformF("uGrain", 0.018)
+        self.composite.uniformF("uTime", self.time)
+        self.composite.uniformF("uFlash", self.flash)
+        self.quad.draw()
+    }
+
+    // The overlay, at the real drawable size rather than the scene's, as one
+    // draw call of textured quads. A CPU canvas uploaded per frame would be
+    // several megabytes a frame to say the same thing.
+    fn drawHud(self: &mut Self, verts: &Vec<f32>, dw: i64, dh: i64) {
+        if verts.len == 0 {
+            return
+        }
+        self.hudMesh.upload(verts.clone())
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendAlpha()
+        Gpu.cullBackFaces(false)
+        self.hudSh.bind()
+        self.hudSh.uniform2F("uScreen", dw as f64, dh as f64)
+        self.hudSh.sampler("uAtlas", self.atlas, 0)
+        self.hudMesh.draw()
+        Gpu.blendOff()
+    }
+
+    fn free(self: Self, gl: &mut GlContext) {
+        self.scene.free(gl)
+        self.shadowSh.free(gl)
+        self.skySh.free(gl)
+        self.bright.free(gl)
+        self.blur.free(gl)
+        self.composite.free(gl)
+        self.hudSh.free(gl)
+        self.sceneTgt.free(gl)
+        self.shadowTgt.free(gl)
+        self.bloomA.free(gl)
+        self.bloomB.free(gl)
+        self.quad.free(gl)
+        self.hudMesh.free(gl)
+        self.skyTex.free(gl)
+        self.atlas.free(gl)
+        var tex = self.tex
+        while tex.len > 0 {
+            let t = tex.pop()!
+            t.free(gl)
+        }
+    }
+}
+
+// Local copies rather than an import cycle: mat4 does not know about the light.
+fn lookAtM(eye: Vec3, at: Vec3, up: Vec3): Vec<f32> {
+    let f = (at - eye).norm()
+    let s = f.cross(up).norm()
+    let u = s.cross(f)
+    var m = identity()
+    m[0] = s.x as f32
+    m[4] = s.y as f32
+    m[8] = s.z as f32
+    m[1] = u.x as f32
+    m[5] = u.y as f32
+    m[9] = u.z as f32
+    m[2] = (-f.x) as f32
+    m[6] = (-f.y) as f32
+    m[10] = (-f.z) as f32
+    m[12] = (-s.dot(eye)) as f32
+    m[13] = (-u.dot(eye)) as f32
+    m[14] = f.dot(eye) as f32
+    return m
+}
+
+fn orthoM(l: f64, r: f64, b: f64, t: f64, near: f64, far: f64): Vec<f32> {
+    var m = identity()
+    m[0] = (2.0 / (r - l)) as f32
+    m[5] = (2.0 / (t - b)) as f32
+    m[10] = (-2.0 / (far - near)) as f32
+    m[12] = (-(r + l) / (r - l)) as f32
+    m[13] = (-(t + b) / (t - b)) as f32
+    m[14] = (-(far + near) / (far - near)) as f32
+    return m
+}

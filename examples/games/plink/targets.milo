@@ -1,0 +1,617 @@
+// The targets and what happens to them.
+//
+// A rig is a bottle or a tin plate bolted to a steel flap that turns on a pin.
+// At rest it lies flat, hidden behind whatever it is standing on; when it is
+// called it snaps up in about a fifth of a second, holds a beat, and drops back.
+// Hit it anywhere and it shatters — this is a reflex game, not an accuracy one,
+// so there is no scoring ring and the whole face counts.
+//
+// The hinge is a spring, not an animation curve. A commanded angle, a stiffness
+// and a damping give the overshoot and the settle for free, and the same two
+// numbers make a rig that is knocked over behave like the one that stood up.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Mesh
+}
+from "./mat4" import {
+    identity, multiply, rotationX, rotationY, translation
+}
+from "./mesh" import {
+    Builder, builder
+}
+from "./render" import {
+    Gfx, Material, material, sceneAttrs
+}
+from "./rng" import {
+    Rand, rand
+}
+from "./textures" import {
+    TEX_GLASS, TEX_PAINT, TEX_RUST, TEX_STEEL
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./world" import {
+    RAIL_TOP
+}
+
+// How far above the pin the middle of the target sits.
+let ARM: f64 = 0.30
+
+pub let ST_DOWN: i64 = 0
+
+pub let ST_RISING: i64 = 1
+
+pub let ST_UP: i64 = 2
+
+pub let ST_FALLING: i64 = 3
+
+pub let KIND_BOTTLE: i64 = 0
+
+pub let KIND_PLATE: i64 = 1
+
+pub struct Rig {
+    pos: Vec3,
+    yaw: f64,
+    kind: i64,
+    // 0 is flat, pi/2 is standing. The spring drives this towards `commanded`.
+    angle: f64,
+    angVel: f64,
+    commanded: f64,
+    state: i64,
+    hold: f64,
+    // Set when the target is shattered so the flap drops empty and the rig
+    // cannot be hit again on its way down.
+    broken: bool,
+    // Seconds until this rig may be called again.
+    cooldown: f64,
+    hitRadius: f64,
+}
+
+pub struct Shard {
+    pos: Vec3,
+    vel: Vec3,
+    // A unit axis and a rate, integrated into `spin`. A quaternion would be
+    // correct and nobody can see the difference on something that lives 2.4 s.
+    axis: Vec3,
+    rate: f64,
+    spin: f64,
+    // Local triangle, relative to the shard's own centre.
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+    r: f64,
+    g: f64,
+    bl: f64,
+    life: f64,
+    maxLife: f64,
+    onGround: bool,
+}
+
+pub struct Targets {
+    rigs: Vec<Rig>,
+    shards: Vec<Shard>,
+    bottleMesh: Mesh,
+    plateMesh: Mesh,
+    flapMesh: Mesh,
+    baseMesh: Mesh,
+    shardMesh: Mesh,
+    bottleMat: Material,
+    plateMat: Material,
+    steelMat: Material,
+    rustMat: Material,
+    shardVerts: Vec<f32>,
+    rng: Rand,
+    // Wave state.
+    sinceSpawn: f64,
+    wantUp: i64,
+}
+
+// ── geometry ──────────────────────────────────────────────────────────────────
+
+// A whiskey bottle: a body, a shoulder and a neck, standing on the flap.
+fn bottleGeometry(b: &mut Builder) {
+    b.setUvScale(2.0)
+    b.setTint(1.0, 1.0, 1.0)
+    let y0 = 0.02
+    b.cylinder(v3(0.0, y0, 0.0), 0.062, 0.215, 16, true)
+    // shoulder, as two short tapering rings
+    b.cylinder(v3(0.0, y0 + 0.215, 0.0), 0.052, 0.042, 16, false)
+    b.cylinder(v3(0.0, y0 + 0.257, 0.0), 0.036, 0.038, 16, false)
+    b.cylinder(v3(0.0, y0 + 0.295, 0.0), 0.022, 0.095, 12, true)
+    b.setUvScale(1.0)
+}
+
+// A tin plate on edge, the other classic thing to shoot off a fence.
+fn plateGeometry(b: &mut Builder) {
+    b.setUvScale(3.0)
+    b.setTint(1.0, 1.0, 1.0)
+    let radius = 0.20
+    let segs = 24
+    let cy = radius + 0.03
+    for i in 0..segs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+        let p0 = v3(Math.cos(a0) * radius, cy + Math.sin(a0) * radius, 0.0)
+        let p1 = v3(Math.cos(a1) * radius, cy + Math.sin(a1) * radius, 0.0)
+        let c = v3(0.0, cy, 0.0)
+        let front = 0.009
+        let m0 = v3(Math.cos(a0) * radius * 0.55, cy + Math.sin(a0) * radius * 0.55, 0.0)
+        let m1 = v3(Math.cos(a1) * radius * 0.55, cy + Math.sin(a1) * radius * 0.55, 0.0)
+        // A red ring on white. Nothing scores differently for hitting the middle
+        // — the ring is there so a 30 m target is a thing your eye finds, which
+        // is the only kind of aiming this game asks for.
+        b.setTint(1.0, 0.98, 0.94)
+        b.tri(c - v3(0.0, 0.0, front), m1 - v3(0.0, 0.0, front), m0 - v3(0.0, 0.0, front), 0.5, 0.5, 1.0, 0.5, 0.5, 1.0)
+        b.setTint(1.35, 0.30, 0.16)
+        b.tri(m0 - v3(0.0, 0.0, front), m1 - v3(0.0, 0.0, front), p1 - v3(0.0, 0.0, front), 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+        b.tri(m0 - v3(0.0, 0.0, front), p1 - v3(0.0, 0.0, front), p0 - v3(0.0, 0.0, front), 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+        b.setTint(0.86, 0.84, 0.80)
+        b.tri(c + v3(0.0, 0.0, front), p0 + v3(0.0, 0.0, front), p1 + v3(0.0, 0.0, front), 0.5, 0.5, 1.0, 0.5, 0.5, 1.0)
+        b.setTint(1.0, 1.0, 1.0)
+        // rim
+        b.quad(p0 - v3(0.0, 0.0, front), p1 - v3(0.0, 0.0, front), p1 + v3(0.0, 0.0, front), p0 + v3(0.0, 0.0, front), 0.2, 0.05)
+    }
+    b.setUvScale(1.0)
+}
+
+// The steel flap the target rides on, and the pin it turns about.
+fn flapGeometry(b: &mut Builder) {
+    b.setUvScale(4.0)
+    b.setTint(0.55, 0.56, 0.58)
+    b.boxSpan(v3(-0.12, -0.014, -0.10), v3(0.12, 0.014, 0.10))
+    b.boxSpan(v3(-0.014, 0.0, -0.024), v3(0.014, ARM, 0.024))
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// The bracket bolted to the rail or barrel, which does not move.
+fn baseGeometry(b: &mut Builder) {
+    b.setUvScale(4.0)
+    b.setTint(0.68, 0.55, 0.42)
+    b.boxSpan(v3(-0.15, -0.09, -0.12), v3(0.15, -0.01, 0.12))
+    b.cylinder(v3(-0.16, -0.01, 0.0), 0.016, 0.06, 8, true)
+    b.cylinder(v3(0.16, -0.01, 0.0), 0.016, 0.06, 8, true)
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// ── the rigs ──────────────────────────────────────────────────────────────────
+
+// Where the targets live: along the two boardwalk rails, on the barrels, on the
+// trough, on the graveyard fence, and one on the wagon. Placed by hand rather
+// than scattered, because a reflex game is only fair if the same rig is always
+// in the same place.
+fn placeRigs(): Vec<Rig> {
+    var out: Vec<Rig> = Vec.new()
+    // x, y (the pin, in world metres), z, which way it faces, kind.
+    // These are placed against real surfaces rather than scattered: a rig
+    // floating a hand's width off the rail it is supposedly bolted to is the
+    // first thing anyone notices, and a reflex game is only fair if the same
+    // target is always in the same place.
+    let rail = RAIL_TOP + 0.08
+    let spots: Vec<f64> = [-5.62, rail, 11.6, 1.0, 0.0, -5.62, rail, 14.4, 1.0, 1.0, -5.62, rail, 17.2, 1.0, 0.0, -5.62, rail, 20.0, 1.0, 1.0, -5.62, rail, 23.5, 1.0, 0.0, -5.62, rail, 27.0, 1.0, 1.0, -5.62, rail, 31.0, 1.0, 0.0, 5.62, rail, 13.2, -1.0, 1.0, 5.62, rail, 16.0, -1.0, 0.0, 5.62, rail, 18.8, -1.0, 1.0, 5.62, rail, 22.0, -1.0, 0.0, 5.62, rail, 25.5, -1.0, 1.0, 5.62, rail, 29.0, -1.0, 0.0, -4.20, 1.10, 12.4, 1.0, 1.0, -4.20, 1.10, 15.6, 1.0, 0.0, 4.20, 1.10, 14.9, -1.0, 0.0, 4.20, 1.10, 18.1, -1.0, 1.0, -5.10, 0.94, 13.4, 1.0, 0.0, 5.05, 0.94, 25.5, -1.0, 1.0, 4.44, 0.70, 23.0, -1.0, 0.0, -1.90, 0.80, 37.0, 0.0, 1.0, 1.40, 0.14, 34.0, 0.0, 0.0, -2.60, 0.14, 41.0, 0.0, 1.0,]
+    var i = 0
+    while i * 5 < spots.len {
+        let x = spots[i * 5]
+        let y = spots[i * 5 + 1]
+        let z = spots[i * 5 + 2]
+        let face = spots[i * 5 + 3]
+        let kind = spots[i * 5 + 4] as i64
+        // yaw turns local -Z towards the street.
+        var yaw = 0.0
+        if face > 0.5 {
+            yaw = -1.5708
+        } else if face < -0.5 {
+            yaw = 1.5708
+        }
+        out.push(Rig {
+            pos: v3(x, y, z),
+            yaw: yaw,
+            kind: kind,
+            angle: 0.0,
+            angVel: 0.0,
+            commanded: 0.0,
+            state: ST_DOWN,
+            hold: 0.0,
+            broken: false,
+            cooldown: 0.0,
+            hitRadius: if kind == KIND_BOTTLE {
+                0.17
+            } else {
+                0.21
+            }
+            ,
+        }
+        )
+        i = i + 1
+    }
+    return out
+}
+
+pub fn newTargets(gl: &mut GlContext): Targets {
+    var bb = builder()
+    bottleGeometry(bb)
+    var pb = builder()
+    plateGeometry(pb)
+    var fb = builder()
+    flapGeometry(fb)
+    var sb = builder()
+    baseGeometry(sb)
+
+    var bottleMesh = Mesh.new(gl, sceneAttrs())
+    bottleMesh.upload(bb.data.clone())
+    var plateMesh = Mesh.new(gl, sceneAttrs())
+    plateMesh.upload(pb.data.clone())
+    var flapMesh = Mesh.new(gl, sceneAttrs())
+    flapMesh.upload(fb.data.clone())
+    var baseMesh = Mesh.new(gl, sceneAttrs())
+    baseMesh.upload(sb.data.clone())
+
+    var bottleMat = material(TEX_GLASS, 0.13, 0.42, 0.12, 0.07, 0.0)
+    bottleMat.normalStrength = 0.4
+    var plateMat = material(TEX_PAINT, 0.90, 0.88, 0.84, 0.38, 0.0)
+    let steelMat = material(TEX_STEEL, 0.48, 0.50, 0.53, 0.36, 0.85)
+    let rustMat = material(TEX_RUST, 0.40, 0.27, 0.18, 0.85, 0.30)
+
+    return Targets {
+        rigs: placeRigs(),
+        shards: Vec.new(),
+        bottleMesh: bottleMesh,
+        plateMesh: plateMesh,
+        flapMesh: flapMesh,
+        baseMesh: baseMesh,
+        shardMesh: Mesh.new(gl, sceneAttrs()),
+        bottleMat: bottleMat,
+        plateMat: plateMat,
+        steelMat: steelMat,
+        rustMat: rustMat,
+        shardVerts: Vec.new(),
+        rng: rand(0xB0771E),
+        sinceSpawn: 0.0,
+        wantUp: 2,
+    }
+}
+
+// The model matrix of a rig's moving part. Local space has the pin on the X
+// axis at the origin and the target on +Y when the flap is up.
+fn flapMatrix(r: &Rig): Vec<f32> {
+    return multiply(translation(r.pos), multiply(rotationY(r.yaw), rotationX(1.5708 - r.angle)))
+}
+
+fn baseMatrix(r: &Rig): Vec<f32> {
+    return multiply(translation(r.pos), rotationY(r.yaw))
+}
+
+// Where the middle of the target is right now, in world space.
+pub fn rigCentre(r: &Rig): Vec3 {
+    let m = flapMatrix(r)
+    var local = v3(0.0, ARM + 0.155, 0.0)
+    if r.kind == KIND_PLATE {
+        local = v3(0.0, ARM + 0.23, 0.0)
+    }
+    let x = (m[0] as f64) * local.x + (m[4] as f64) * local.y + (m[8] as f64) * local.z + (m[12] as f64)
+    let y = (m[1] as f64) * local.x + (m[5] as f64) * local.y + (m[9] as f64) * local.z + (m[13] as f64)
+    let z = (m[2] as f64) * local.x + (m[6] as f64) * local.y + (m[10] as f64) * local.z + (m[14] as f64)
+    return v3(x, y, z)
+}
+
+pub struct Hit {
+    ok: bool,
+    point: Vec3,
+    index: i64,
+    kind: i64,
+}
+
+impl Targets {
+    fn liveCount(self: &Self): i64 {
+        var n = 0
+        for r in self.rigs {
+            if r.state == ST_RISING || r.state == ST_UP {
+                n = n + 1
+            }
+        }
+        return n
+    }
+
+    // Call a rig up. `hold` is how long it stays there once it arrives.
+    fn raise(self: &mut Self, index: i64, hold: f64) {
+        self.rigs[index].commanded = 1.5708
+        self.rigs[index].state = ST_RISING
+        self.rigs[index].hold = hold
+        self.rigs[index].broken = false
+        self.rigs[index].angVel = 26.0
+    }
+
+    fn drop(self: &mut Self, index: i64) {
+        self.rigs[index].commanded = 0.0
+        self.rigs[index].state = ST_FALLING
+    }
+
+    // `pressure` runs 0..1 and is how hard the game is pushing: more rigs up at
+    // once and less time on each.
+    fn update(self: &mut Self, dt: f64, pressure: f64, running: bool) {
+        for i in 0..self.rigs.len {
+            // A spring, integrated semi-implicitly so the stiffness can be high
+            // enough to snap without the step blowing up.
+            let stiff = 340.0
+            let damp = 17.0
+            let err = self.rigs[i].commanded - self.rigs[i].angle
+            self.rigs[i].angVel = self.rigs[i].angVel + (err * stiff - self.rigs[i].angVel * damp) * dt
+            self.rigs[i].angle = self.rigs[i].angle + self.rigs[i].angVel * dt
+            if self.rigs[i].angle < 0.0 {
+                self.rigs[i].angle = 0.0
+                // The flap hitting its stop: keep a little bounce, lose the rest.
+                if self.rigs[i].angVel < 0.0 {
+                    self.rigs[i].angVel = -self.rigs[i].angVel * 0.18
+                }
+            }
+            if self.rigs[i].angle > 1.62 {
+                self.rigs[i].angle = 1.62
+                if self.rigs[i].angVel > 0.0 {
+                    self.rigs[i].angVel = -self.rigs[i].angVel * 0.22
+                }
+            }
+            if self.rigs[i].cooldown > 0.0 {
+                self.rigs[i].cooldown = self.rigs[i].cooldown - dt
+            }
+            if self.rigs[i].state == ST_RISING && self.rigs[i].angle > 1.45 {
+                self.rigs[i].state = ST_UP
+            }
+            if self.rigs[i].state == ST_UP {
+                self.rigs[i].hold = self.rigs[i].hold - dt
+                if self.rigs[i].hold <= 0.0 {
+                    self.drop(i)
+                }
+            }
+            if self.rigs[i].state == ST_FALLING && self.rigs[i].angle < 0.05 {
+                self.rigs[i].state = ST_DOWN
+                self.rigs[i].broken = false
+                if self.rigs[i].cooldown < 0.5 {
+                    self.rigs[i].cooldown = 0.5
+                }
+            }
+        }
+
+        if running {
+            self.sinceSpawn = self.sinceSpawn + dt
+            let want = 3 + (pressure * 3.2) as i64
+            let gap = 0.80 - 0.48 * pressure
+            if self.liveCount() < want && self.sinceSpawn > gap {
+                self.sinceSpawn = 0.0
+                // Pick among the rigs that are down and off cooldown. Rejection
+                // sampling over a list of seventeen is cheaper than building the
+                // candidate list every time.
+                var tries = 0
+                while tries < 24 {
+                    let k = self.rng.int(self.rigs.len)
+                    if self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
+                        let hold = (1.85 - 0.75 * pressure) * self.rng.range(0.85, 1.2)
+                        self.raise(k, hold)
+                        self.rigs[k].cooldown = 1.4
+                        break
+                    }
+                    tries = tries + 1
+                }
+            }
+        }
+
+        self.stepShards(dt)
+    }
+
+    // A hitscan ray against every standing target. Returns the nearest.
+    fn trace(self: &Self, origin: Vec3, dir: Vec3): Hit {
+        var best = 1.0e30
+        var hit = Hit {
+            ok: false, point: v3(0.0, 0.0, 0.0), index: -1, kind: 0
+        }
+        for i in 0..self.rigs.len {
+            if self.rigs[i].broken {
+                continue
+            }
+            if self.rigs[i].state != ST_UP && self.rigs[i].state != ST_RISING {
+                continue
+            }
+            // Only count a rig that is most of the way up: a flap still on its
+            // way through the first half of the swing is edge-on and hitting it
+            // would feel arbitrary.
+            if self.rigs[i].angle < 0.9 {
+                continue
+            }
+            let c = rigCentre(self.rigs[i])
+            let toC = c - origin
+            let t = toC.dot(dir)
+            if t <= 0.0 || t >= best {
+                continue
+            }
+            // Distance from the ray to the centre. A sphere is the right shape
+            // for a bottle and close enough for a plate, and it means a shot
+            // that clips the edge still counts — which is the point of the game.
+            let perp = toC - dir.scale(t)
+            if perp.len() <= self.rigs[i].hitRadius {
+                best = t
+                hit = Hit {
+                    ok: true, point: origin + dir.scale(t), index: i, kind: self.rigs[i].kind
+                }
+            }
+        }
+        return hit
+    }
+
+    // Break the target on rig `index` into shards flying away from `from`.
+    fn shatter(self: &mut Self, index: i64, from: Vec3) {
+        let c = rigCentre(self.rigs[index])
+        let kind = self.rigs[index].kind
+        self.rigs[index].broken = true
+        self.drop(index)
+        self.rigs[index].angVel = self.rigs[index].angVel - 7.0
+        self.rigs[index].cooldown = 1.1
+
+        let away = (c - from).norm()
+        let pieces = if kind == KIND_BOTTLE {
+            34
+        } else {
+            30
+        }
+        let spread = if kind == KIND_BOTTLE {
+            0.085
+        } else {
+            0.150
+        }
+        for _k in 0..pieces {
+            // A shard starts on a small random offset from the centre and flies
+            // outward from there, plus a share of the bullet's own momentum.
+            let dx = self.rng.range(-1.0, 1.0)
+            let dy = self.rng.range(-1.0, 1.0)
+            let dz = self.rng.range(-1.0, 1.0)
+            let off = v3(dx, dy, dz).norm().scale(spread * self.rng.range(0.2, 1.0))
+            let radial = off.norm().scale(self.rng.range(1.1, 3.4))
+            let vel = radial + away.scale(self.rng.range(1.6, 4.2)) + v3(0.0, self.rng.range(0.4, 2.1), 0.0)
+            let s = self.rng.range(0.012, 0.038)
+            var r = 0.80
+            var g = 0.80
+            var bl = 0.78
+            if kind == KIND_BOTTLE {
+                r = self.rng.range(0.10, 0.22)
+                g = self.rng.range(0.34, 0.52)
+                bl = self.rng.range(0.10, 0.20)
+            }
+            self.shards.push(Shard {
+                pos: c + off,
+                vel: vel,
+                axis: v3(self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0)).norm(),
+                rate: self.rng.range(-19.0, 19.0),
+                spin: self.rng.range(0.0, 6.28),
+                a: v3(-s, -s * 0.7, 0.0),
+                b: v3(s * self.rng.range(0.6, 1.3), -s * 0.5, 0.0),
+                c: v3(self.rng.range(-0.5, 0.5) * s, s * self.rng.range(0.8, 1.6), 0.0),
+                r: r,
+                g: g,
+                bl: bl,
+                life: 0.0,
+                maxLife: self.rng.range(1.8, 3.2),
+                onGround: false,
+            }
+            )
+        }
+    }
+
+    fn stepShards(self: &mut Self, dt: f64) {
+        var i = 0
+        while i < self.shards.len {
+            self.shards[i].life = self.shards[i].life + dt
+            if self.shards[i].life > self.shards[i].maxLife {
+                // Swap-remove: order does not matter and this keeps the step
+                // linear no matter how many plates are in the air.
+                let last = self.shards.len - 1
+                if i != last {
+                    self.shards[i] = self.shards[last].clone()
+                }
+                let _ = self.shards.pop()
+                continue
+            }
+            if !self.shards[i].onGround {
+                self.shards[i].vel = self.shards[i].vel + v3(0.0, -12.5 * dt, 0.0)
+                self.shards[i].pos = self.shards[i].pos + self.shards[i].vel.scale(dt)
+                self.shards[i].spin = self.shards[i].spin + self.shards[i].rate * dt
+                if self.shards[i].pos.y < 0.012 {
+                    self.shards[i].pos.y = 0.012
+                    if self.shards[i].vel.y < -1.4 {
+                        // One bounce, then it lies where it fell.
+                        self.shards[i].vel.y = -self.shards[i].vel.y * 0.32
+                        self.shards[i].vel.x = self.shards[i].vel.x * 0.55
+                        self.shards[i].vel.z = self.shards[i].vel.z * 0.55
+                        self.shards[i].rate = self.shards[i].rate * 0.5
+                    } else {
+                        self.shards[i].onGround = true
+                        // Lay it flat on the dirt rather than leaving it frozen
+                        // at whatever angle it landed at.
+                        self.shards[i].axis = v3(1.0, 0.0, 0.0)
+                        self.shards[i].spin = 1.5708
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    // ── drawing ───────────────────────────────────────────────────────────────
+
+    fn drawRigs(self: &Self, gfx: &Gfx, shadowPass: bool) {
+        for i in 0..self.rigs.len {
+            let bm = baseMatrix(self.rigs[i])
+            let fm = flapMatrix(self.rigs[i])
+            if shadowPass {
+                gfx.shadowDraw(self.baseMesh, bm)
+                gfx.shadowDraw(self.flapMesh, fm)
+            } else {
+                gfx.sceneDraw(self.baseMesh, bm, self.rustMat)
+                gfx.sceneDraw(self.flapMesh, fm, self.steelMat)
+            }
+            if self.rigs[i].broken {
+                continue
+            }
+            if self.rigs[i].kind == KIND_BOTTLE {
+                if shadowPass {
+                    gfx.shadowDraw(self.bottleMesh, fm)
+                } else {
+                    gfx.sceneDraw(self.bottleMesh, fm, self.bottleMat)
+                }
+            } else {
+                if shadowPass {
+                    gfx.shadowDraw(self.plateMesh, fm)
+                } else {
+                    gfx.sceneDraw(self.plateMesh, fm, self.plateMat)
+                }
+            }
+        }
+    }
+
+    // Shards are rebuilt on the CPU every frame into one buffer: a few hundred
+    // triangles is nothing to upload, and it avoids a draw call and a matrix per
+    // fragment of glass.
+    fn drawShards(self: &mut Self, gfx: &Gfx) {
+        if self.shards.len == 0 {
+            return
+        }
+        var b = builder()
+        for i in 0..self.shards.len {
+            let s = Math.sin(self.shards[i].spin)
+            let cth = Math.cos(self.shards[i].spin)
+            let ax = self.shards[i].axis
+            let fade = 1.0 - Math.maxF64(0.0, (self.shards[i].life - self.shards[i].maxLife + 0.5) / 0.5)
+            let k = Math.clampF64(fade, 0.0, 1.0)
+            b.setTint(self.shards[i].r, self.shards[i].g, self.shards[i].bl)
+            b.setAo(k)
+            let pa = self.shards[i].pos + rotAbout(self.shards[i].a, ax, s, cth).scale(k)
+            let pb = self.shards[i].pos + rotAbout(self.shards[i].b, ax, s, cth).scale(k)
+            let pc = self.shards[i].pos + rotAbout(self.shards[i].c, ax, s, cth).scale(k)
+            // Both windings: a shard is a flake with no inside, and one that
+            // vanishes when it tumbles past edge-on reads as a flicker.
+            b.tri(pa, pb, pc, 0.0, 0.0, 1.0, 0.0, 0.5, 1.0)
+            b.tri(pa, pc, pb, 0.0, 0.0, 0.5, 1.0, 1.0, 0.0)
+        }
+        b.setTint(1.0, 1.0, 1.0)
+        b.setAo(1.0)
+        self.shardMesh.upload(b.data.clone())
+        let m = identity()
+        gfx.sceneDraw(self.shardMesh, m, self.bottleMat)
+    }
+
+    fn free(self: Self, gl: &mut GlContext) {
+        self.bottleMesh.free(gl)
+        self.plateMesh.free(gl)
+        self.flapMesh.free(gl)
+        self.baseMesh.free(gl)
+        self.shardMesh.free(gl)
+    }
+}
+
+// Rodrigues, with the sine and cosine already computed by the caller because it
+// rotates three points about the same axis by the same angle.
+fn rotAbout(v: Vec3, axis: Vec3, s: f64, c: f64): Vec3 {
+    return v.scale(c) + axis.cross(v).scale(s) + axis.scale(axis.dot(v) * (1.0 - c))
+}

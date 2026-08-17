@@ -1,0 +1,240 @@
+// The sky, integrated once on the CPU.
+//
+// Rayleigh and Mie single scattering along a ray through a spherical atmosphere
+// — the same integral a physical sky shader runs per pixel, except the sun does
+// not move during a session, so running it 32768 times at startup and sampling
+// the result costs nothing per frame and buys a table accurate enough to light
+// the scene from.
+//
+// Two things come out of it and both matter:
+//
+//   - a lat-long radiance table, sampled for the dome and for rough reflections
+//   - the irradiance that table delivers to an up-facing and a down-facing
+//     surface, which IS the ambient term. Ambient picked by eye is what makes a
+//     render look like a render: shadowed faces here are lit by the actual sky
+//     above them, so they go blue at dusk without anyone deciding they should.
+//
+// The table is sampled with the v coordinate clamped half a texel off each pole
+// (`skyLookup` in the shader), because the wrap mode has to be REPEAT for the
+// azimuth seam and REPEAT at the poles would blend the zenith into the nadir.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub let SKY_W: i64 = 256
+
+pub let SKY_H: i64 = 128
+
+let EARTH_R: f64 = 6360000.0
+let ATMOS_R: f64 = 6420000.0
+let H_RAYLEIGH: f64 = 7994.0
+let H_MIE: f64 = 1200.0
+let MIE_G: f64 = 0.76
+
+// Scattering coefficients at sea level, per metre, for ~680/550/440 nm.
+let BETA_R_X: f64 = 0.0000058
+let BETA_R_Y: f64 = 0.0000135
+let BETA_R_Z: f64 = 0.0000331
+let BETA_M: f64 = 0.000021
+
+pub struct Sky {
+    // SKY_W * SKY_H * 3 floats of linear radiance, u = azimuth, v = zenith angle.
+    table: Vec<f32>,
+    sun: Vec3,
+    // Direct sunlight reaching the ground, after extinction along the sun's own
+    // path. This is the key light.
+    sunColor: Vec3,
+    // Irradiance from the sky alone, on an up-facing surface and reflected back
+    // up off the ground. `ambient(n)` interpolates between them.
+    skyUp: Vec3,
+    skyDown: Vec3,
+}
+
+// Distance to the far intersection of a ray from the planet's centre frame with
+// a sphere of radius `r`. The ray always starts inside, so there is exactly one.
+fn atmosphereExit(origin: &Vec3, dir: &Vec3, r: f64): f64 {
+    let b = 2.0 * origin.dot(dir)
+    let c = origin.dot(origin) - r * r
+    let disc = b * b - 4.0 * c
+    if disc < 0.0 {
+        return 0.0
+    }
+    return (-b + Math.sqrt(disc)) * 0.5
+}
+
+// True if the ray from `origin` towards `dir` hits the planet before leaving the
+// atmosphere — which is what puts the ground in shadow at sunset.
+fn hitsGround(origin: &Vec3, dir: &Vec3): bool {
+    let b = 2.0 * origin.dot(dir)
+    let c = origin.dot(origin) - EARTH_R * EARTH_R
+    let disc = b * b - 4.0 * c
+    if disc < 0.0 {
+        return false
+    }
+    let t = (-b - Math.sqrt(disc)) * 0.5
+    return t > 0.0
+}
+
+// Optical depth of both species along a ray, by the same marching the primary
+// integral uses. Returns (rayleigh, mie, blocked-by-ground).
+fn opticalDepth(origin: &Vec3, dir: &Vec3, steps: i64): Vec3 {
+    if hitsGround(origin, dir) {
+        return v3(1000000.0, 1000000.0, 1.0)
+    }
+    let far = atmosphereExit(origin, dir, ATMOS_R)
+    let seg = far / (steps as f64)
+    var odR = 0.0
+    var odM = 0.0
+    for i in 0..steps {
+        let p = origin + dir.scale(seg * ((i as f64) + 0.5))
+        let h = p.len() - EARTH_R
+        odR = odR + Math.exp(-h / H_RAYLEIGH) * seg
+        odM = odM + Math.exp(-h / H_MIE) * seg
+    }
+    return v3(odR, odM, 0.0)
+}
+
+// Radiance arriving from `dir` at an observer 100 m above sea level.
+pub fn skyRadiance(dir: &Vec3, sun: &Vec3, intensity: f64): Vec3 {
+    let origin = v3(0.0, EARTH_R + 100.0, 0.0)
+    var far = atmosphereExit(origin, dir, ATMOS_R)
+    // A downward ray stops at the ground; below the horizon the table holds the
+    // short slice of air between here and there, which is what the eye sees over
+    // a distant berm.
+    let b = 2.0 * origin.dot(dir)
+    let c = origin.dot(origin) - EARTH_R * EARTH_R
+    let disc = b * b - 4.0 * c
+    if disc >= 0.0 {
+        let t = (-b - Math.sqrt(disc)) * 0.5
+        if t > 0.0 && t < far {
+            far = t
+        }
+    }
+    let steps = 16
+    let seg = far / (steps as f64)
+    var sumR = v3(0.0, 0.0, 0.0)
+    var sumM = v3(0.0, 0.0, 0.0)
+    var odR = 0.0
+    var odM = 0.0
+    let mu = dir.dot(sun)
+    for i in 0..steps {
+        let p = origin + dir.scale(seg * ((i as f64) + 0.5))
+        let h = p.len() - EARTH_R
+        let hr = Math.exp(-h / H_RAYLEIGH) * seg
+        let hm = Math.exp(-h / H_MIE) * seg
+        odR = odR + hr
+        odM = odM + hm
+        let od = opticalDepth(p, sun, 8)
+        if od.z < 0.5 {
+            let tR = BETA_R_X * (odR + od.x)
+            let tG = BETA_R_Y * (odR + od.x)
+            let tB = BETA_R_Z * (odR + od.x)
+            let tM = BETA_M * 1.1 * (odM + od.y)
+            let att = v3(Math.exp(-tR - tM), Math.exp(-tG - tM), Math.exp(-tB - tM))
+            sumR = sumR + att.scale(hr)
+            sumM = sumM + att.scale(hm)
+        }
+    }
+    let g = MIE_G
+    let phaseR = 3.0 / (16.0 * Math.pi()) * (1.0 + mu * mu)
+    let denom = 1.0 + g * g - 2.0 * g * mu
+    var phaseM = 0.0
+    if denom > 0.0 {
+        phaseM = 3.0 / (8.0 * Math.pi()) * ((1.0 - g * g) * (1.0 + mu * mu)) / ((2.0 + g * g) * denom * Math.sqrt(denom))
+    }
+    let r = sumR.x * BETA_R_X * phaseR + sumM.x * BETA_M * phaseM
+    let gg = sumR.y * BETA_R_Y * phaseR + sumM.y * BETA_M * phaseM
+    let bb = sumR.z * BETA_R_Z * phaseR + sumM.z * BETA_M * phaseM
+    return v3(r, gg, bb).scale(intensity)
+}
+
+// What is left of the sun after its own path through the air. At a low elevation
+// this is where the orange comes from, and it is computed rather than dialled.
+fn sunTransmittance(sun: &Vec3, intensity: f64): Vec3 {
+    let origin = v3(0.0, EARTH_R + 100.0, 0.0)
+    let od = opticalDepth(origin, sun, 24)
+    if od.z > 0.5 {
+        return v3(0.0, 0.0, 0.0)
+    }
+    let tM = BETA_M * 1.1 * od.y
+    return v3(Math.exp(-BETA_R_X * od.x - tM), Math.exp(-BETA_R_Y * od.x - tM), Math.exp(-BETA_R_Z * od.x - tM)).scale(intensity)
+}
+
+fn dirFromLatLong(u: f64, v: f64): Vec3 {
+    let theta = v * Math.pi()
+    let phi = u * 2.0 * Math.pi()
+    let st = Math.sin(theta)
+    return v3(st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi))
+}
+
+// `elevationDeg` is the sun above the horizon, `azimuthDeg` clockwise from -Z.
+pub fn buildSky(elevationDeg: f64, azimuthDeg: f64, intensity: f64): Sky {
+    let el = elevationDeg * Math.pi() / 180.0
+    let az = azimuthDeg * Math.pi() / 180.0
+    let sun = v3(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)).norm()
+
+    var table: Vec<f32> = Vec.filled(SKY_W * SKY_H * 3, 0.0)
+    // Cosine-weighted sums over the whole sphere, split by which side of the
+    // horizon the direction is on, so one pass yields both hemispheres.
+    var upR = 0.0
+    var upG = 0.0
+    var upB = 0.0
+    var downR = 0.0
+    var downG = 0.0
+    var downB = 0.0
+    var upW = 0.0
+    var downW = 0.0
+    for j in 0..SKY_H {
+        let v = ((j as f64) + 0.5) / (SKY_H as f64)
+        let theta = v * Math.pi()
+        // Solid angle of this ring, for the irradiance sums.
+        let dOmega = Math.sin(theta) * (Math.pi() / (SKY_H as f64)) * (2.0 * Math.pi() / (SKY_W as f64))
+        for i in 0..SKY_W {
+            let u = ((i as f64) + 0.5) / (SKY_W as f64)
+            let dir = dirFromLatLong(u, v)
+            let rad = skyRadiance(dir, sun, intensity)
+            let o = (j * SKY_W + i) * 3
+            table[o] = rad.x as f32
+            table[o + 1] = rad.y as f32
+            table[o + 2] = rad.z as f32
+            let cosT = dir.y
+            if cosT > 0.0 {
+                let w = cosT * dOmega
+                upR = upR + rad.x * w
+                upG = upG + rad.y * w
+                upB = upB + rad.z * w
+                upW = upW + w
+            } else {
+                let w = -cosT * dOmega
+                downR = downR + rad.x * w
+                downG = downG + rad.y * w
+                downB = downB + rad.z * w
+                downW = downW + w
+            }
+        }
+    }
+    if upW <= 0.0 {
+        upW = 1.0
+    }
+    if downW <= 0.0 {
+        downW = 1.0
+    }
+    // Irradiance, not average radiance: the pi is the integral of the cosine
+    // over the hemisphere, and dropping it is the classic way a render comes out
+    // three times too dark in shadow.
+    let skyUp = v3(upR, upG, upB).scale(Math.pi() / upW)
+    let below = v3(downR, downG, downB).scale(Math.pi() / downW)
+    // Light bouncing back up off the dirt: the sky's own downward irradiance is
+    // negligible next to what the ground reflects, so this is the ground albedo
+    // times what falls on it.
+    let sunC = sunTransmittance(sun, intensity)
+    let groundLit = skyUp + sunC.scale(Math.maxF64(sun.y, 0.0))
+    let bounce = groundLit.scale(0.28) + below.scale(0.5)
+    return Sky {
+        table: table, sun: sun, sunColor: sunC, skyUp: skyUp, skyDown: bounce
+    }
+}

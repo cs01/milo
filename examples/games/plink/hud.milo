@@ -1,0 +1,193 @@
+// The overlay: crosshair, score, timer, and the words between rounds.
+//
+// It is built as one list of screen-space quads and drawn in a single call at
+// the real drawable size, so text stays sharp however low the scene's own
+// resolution is set. The alternative — a CPU canvas uploaded per frame — is
+// several megabytes a frame to say "SCORE 40".
+//
+// Everything indexes one 128x128 atlas: cell (0,0) is a solid white block for
+// untextured rectangles, and every other cell is a glyph.
+
+pub let ATLAS: i64 = 128
+
+pub let CELL: i64 = 8
+
+// 5x7 bitmap font. Row r occupies bits [r*5 .. r*5+4], bit 0 = leftmost column.
+pub fn fontTable(): Vec<i64> {
+    var t: Vec<i64> = Vec.filled(128, 0)
+    t[48] = 0x3A33AE62E // 0
+    t[49] = 0x3884210C4 // 1
+    t[50] = 0x7C444422E // 2
+    t[51] = 0x3A304111F // 3
+    t[52] = 0x211F4A988 // 4
+    t[53] = 0x3A3083C3F // 5
+    t[54] = 0x3A317844C // 6
+    t[55] = 0x08422221F // 7
+    t[56] = 0x3A317462E // 8
+    t[57] = 0x1910F462E // 9
+    t[65] = 0x4631FC62E // A
+    t[66] = 0x3E317C62F // B
+    t[67] = 0x3A210862E // C
+    t[68] = 0x1D318C527 // D
+    t[69] = 0x7C217843F // E
+    t[70] = 0x04217843F // F
+    t[71] = 0x7A31E862E // G
+    t[72] = 0x4631FC631 // H
+    t[73] = 0x38842108E // I
+    t[74] = 0x19284211C // J
+    t[75] = 0x452519531 // K
+    t[76] = 0x7C2108421 // L
+    t[77] = 0x4631AD771 // M
+    t[78] = 0x4631CD671 // N
+    t[79] = 0x3A318C62E // O
+    t[80] = 0x04217C62F // P
+    t[81] = 0x59358C62E // Q
+    t[82] = 0x45257C62F // R
+    t[83] = 0x3E107043E // S
+    t[84] = 0x10842109F // T
+    t[85] = 0x3A318C631 // U
+    t[86] = 0x11518C631 // V
+    t[87] = 0x4775AC631 // W
+    t[88] = 0x462A22A31 // X
+    t[89] = 0x108422A31 // Y
+    t[90] = 0x7C222221F // Z
+    t[58] = 0x008401080 // :
+    t[46] = 0x18C000000 // .
+    t[45] = 0x0000F8000 // -
+    t[33] = 0x100421084 // !
+    t[43] = 0x0084F9080 // +
+    t[47] = 0x044222110 // /
+    t[37] = 0x674222173 // %
+    t[40] = 0x208210888 // (
+    t[41] = 0x088842082 // )
+    t[39] = 0x000000084 // '
+    t[44] = 0x08C600000 // ,
+    t[63] = 0x008421006 // ?
+    t[42] = 0x000A44A00 // *
+    t[120] = 0x022A22A20 // x
+    return t
+}
+
+// The atlas as packed 0xAABBGGRR. Only the red channel is read by the shader, so
+// coverage goes there and the rest is padding.
+pub fn buildAtlas(): Vec<u32> {
+    var px: Vec<u32> = Vec.filled(ATLAS * ATLAS, 0)
+    // The white block, inset by one texel so a bilinear tap at the edge of a
+    // rectangle cannot pull in the transparent cell next door.
+    for y in 0..CELL {
+        for x in 0..CELL {
+            px[y * ATLAS + x] = 0xFFFFFFFF
+        }
+    }
+    let table = fontTable()
+    for code in 0..128 {
+        let bits = table[code]
+        if bits == 0 {
+            continue
+        }
+        let cx = (code % 16) * CELL
+        let cy = (code / 16) * CELL
+        // Cell 0 is the white block, so a glyph must never land there. Code 0
+        // has no glyph, so it cannot.
+        for row in 0..7 {
+            for col in 0..5 {
+                if ((bits >> (row * 5 + col)) & 1) == 1 {
+                    let x = cx + col + 1
+                    let y = cy + row
+                    px[y * ATLAS + x] = 0xFFFFFFFF
+                }
+            }
+        }
+    }
+    return px
+}
+
+pub struct Hud {
+    verts: Vec<f32>,
+}
+
+pub fn newHud(): Hud {
+    return Hud {
+        verts: Vec.new()
+    }
+}
+
+impl Hud {
+    fn clear(self: &mut Self) {
+        self.verts.clear()
+    }
+
+    fn corner(self: &mut Self, x: f64, y: f64, u: f64, v: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.verts.push(x as f32)
+        self.verts.push(y as f32)
+        self.verts.push(u as f32)
+        self.verts.push(v as f32)
+        self.verts.push(r as f32)
+        self.verts.push(g as f32)
+        self.verts.push(b as f32)
+        self.verts.push(a as f32)
+    }
+
+    fn quad(self: &mut Self, x: f64, y: f64, w: f64, h: f64, u0: f64, v0: f64, u1: f64, v1: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.corner(x, y, u0, v0, r, g, b, a)
+        self.corner(x + w, y, u1, v0, r, g, b, a)
+        self.corner(x + w, y + h, u1, v1, r, g, b, a)
+        self.corner(x, y, u0, v0, r, g, b, a)
+        self.corner(x + w, y + h, u1, v1, r, g, b, a)
+        self.corner(x, y + h, u0, v1, r, g, b, a)
+    }
+
+    // Solid colour, from the middle of the white cell so no mip level can drift
+    // off it.
+    fn rect(self: &mut Self, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64, a: f64) {
+        let c = 3.5 / (ATLAS as f64)
+        self.quad(x, y, w, h, c, c, c, c, r, g, b, a)
+    }
+
+    fn glyph(self: &mut Self, code: i64, x: f64, y: f64, s: f64, r: f64, g: f64, b: f64, a: f64) {
+        if code <= 0 || code >= 128 {
+            return
+        }
+        let cx = ((code % 16) * CELL) as f64
+        let cy = ((code / 16) * CELL) as f64
+        let inv = 1.0 / (ATLAS as f64)
+        self.quad(x, y, 8.0 * s, 8.0 * s, cx * inv, cy * inv, (cx + 8.0) * inv, (cy + 8.0) * inv, r, g, b, a)
+    }
+
+    // Returns the width drawn, so a caller can centre or right-align without
+    // measuring the string twice.
+    fn text(self: &mut Self, msg: &string, x: f64, y: f64, s: f64, r: f64, g: f64, b: f64, a: f64): f64 {
+        var pen = x
+        for cp in msg.codePoints() {
+            let c = cp as i64
+            if c == 32 {
+                pen = pen + 4.0 * s
+                continue
+            }
+            self.glyph(c, pen, y, s, r, g, b, a)
+            pen = pen + 6.0 * s
+        }
+        return pen - x
+    }
+
+    fn textWidth(self: &Self, msg: &string, s: f64): f64 {
+        var w = 0.0
+        for cp in msg.codePoints() {
+            w = w + (if (cp as i64) == 32 {
+                4.0 * s
+            } else {
+                6.0 * s
+            }
+            )
+        }
+        return w
+    }
+
+    fn textCentred(self: &mut Self, msg: &string, cx: f64, y: f64, s: f64, r: f64, g: f64, b: f64, a: f64) {
+        let w = self.textWidth(msg, s)
+        // A one-pixel drop shadow, because white text over a bright sky is
+        // otherwise unreadable exactly when the sky is doing its best work.
+        let _ = self.text(msg, cx - w * 0.5 + 2.0 * s, y + 2.0 * s, s, 0.0, 0.0, 0.0, a * 0.55)
+        let _ = self.text(msg, cx - w * 0.5, y, s, r, g, b, a)
+    }
+}

@@ -1,0 +1,290 @@
+// The revolver in your hands, and what firing it does to the frame.
+//
+// The view model is drawn after the world with the depth test off, in its own
+// narrow projection. That is the standard trick and it is worth saying why: a
+// gun held 30 cm from the eye is inside the near plane of any sane scene
+// projection, and rendering it in the scene's own frustum either clips it or
+// forces a near plane so close that the whole depth buffer loses precision.
+//
+// Recoil is a spring on three quantities that all recover at different rates —
+// the muzzle rises fastest, the gun slides back next, and the camera kick
+// settles slowest — which is what makes one shot read as one event rather than
+// as a single stiff bounce.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Gpu, Mesh
+}
+from "./mat4" import {
+    identity, lookAt, multiply, perspective, rotationX, rotationY, rotationZ, translation
+}
+from "./mesh" import {
+    Builder, builder
+}
+from "./render" import {
+    Gfx, Material, material, sceneAttrs
+}
+from "./textures" import {
+    TEX_PAINT, TEX_STEEL, TEX_WOOD
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub let CYLINDER_ROUNDS: i64 = 6
+
+pub struct Gun {
+    steelMesh: Mesh,
+    gripMesh: Mesh,
+    flashMesh: Mesh,
+    steelMat: Material,
+    gripMat: Material,
+    flashMat: Material,
+
+    // Recoil state, all in the gun's own frame.
+    kickBack: f64,
+    kickRise: f64,
+    // Seconds the muzzle flash stays lit. Two frames at 60 Hz is the real thing.
+    flash: f64,
+    // Cylinder rotation, one sixth per shot.
+    cylinder: f64,
+    cylinderTarget: f64,
+
+    rounds: i64,
+    reloadT: f64,
+    cooldown: f64,
+}
+
+// The gun, built once along -Z with the grip under the origin. Everything is
+// boxes and cylinders: it is seen from 30 cm away at the bottom of the screen
+// and never in silhouette, so shape reads and detail does not.
+fn steelGeometry(b: &mut Builder) {
+    b.setUvScale(9.0)
+    b.setTint(0.62, 0.63, 0.67)
+    // barrel, with a rib along the top
+    b.setXform(multiply(translation(v3(0.0, 0.012, -0.058)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.0135, 0.215, 14, true)
+    b.resetXform()
+    // top rib and front sight, which is most of what says "revolver" from the
+    // three-quarter angle the gun is actually seen at
+    b.boxSpan(v3(-0.007, 0.024, -0.273), v3(0.007, 0.032, -0.058))
+    b.boxSpan(v3(-0.004, 0.032, -0.268), v3(0.004, 0.050, -0.258))
+    // ejector rod under the barrel
+    b.setXform(multiply(translation(v3(0.0, -0.004, -0.062)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.006, 0.17, 8, true)
+    b.resetXform()
+    // frame
+    b.boxSpan(v3(-0.013, -0.010, -0.062), v3(0.013, 0.034, 0.030))
+    // cylinder housing sides
+    b.setTint(0.55, 0.56, 0.59)
+    b.boxSpan(v3(-0.023, -0.006, -0.060), v3(-0.019, 0.032, 0.010))
+    b.boxSpan(v3(0.019, -0.006, -0.060), v3(0.023, 0.032, 0.010))
+    // hammer
+    b.setTint(0.46, 0.46, 0.49)
+    b.boxSpan(v3(-0.005, 0.030, 0.024), v3(0.005, 0.052, 0.036))
+    // trigger and guard
+    b.boxSpan(v3(-0.004, -0.030, -0.004), v3(0.004, -0.012, 0.004))
+    b.boxSpan(v3(-0.008, -0.040, -0.020), v3(0.008, -0.034, 0.016))
+    b.boxSpan(v3(-0.008, -0.040, -0.024), v3(0.008, -0.012, -0.018))
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// The revolving cylinder is its own mesh so it can spin a sixth of a turn per
+// shot without the rest of the gun following it.
+fn cylinderGeometry(b: &mut Builder) {
+    b.setUvScale(9.0)
+    b.setTint(0.58, 0.59, 0.62)
+    b.setXform(multiply(translation(v3(0.0, 0.012, -0.054)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.021, 0.066, 16, true)
+    b.resetXform()
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+fn gripGeometry(b: &mut Builder) {
+    b.setUvScale(11.0)
+    b.setTint(0.78, 0.52, 0.30)
+    b.setXform(multiply(translation(v3(0.0, -0.012, 0.030)), rotationX(0.30)))
+    b.box(v3(0.0, -0.055, 0.010), 0.015, 0.058, 0.021)
+    b.box(v3(0.0, -0.105, 0.014), 0.013, 0.012, 0.019)
+    b.resetXform()
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(1.0)
+}
+
+// A short cone of light at the muzzle plus a flat star. It is emissive only —
+// no light is added to the scene from here, the composite's white flash does
+// that job for the whole frame at once.
+fn flashGeometry(b: &mut Builder) {
+    b.setTint(1.0, 1.0, 1.0)
+    let z = -0.278
+    let segs = 10
+    for i in 0..segs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+        let r0 = if i % 2 == 0 {
+            0.055
+        } else {
+            0.026
+        }
+        let r1 = if (i + 1) % 2 == 0 {
+            0.055
+        } else {
+            0.026
+        }
+        let p0 = v3(Math.cos(a0) * r0, 0.012 + Math.sin(a0) * r0, z)
+        let p1 = v3(Math.cos(a1) * r1, 0.012 + Math.sin(a1) * r1, z)
+        let c = v3(0.0, 0.012, z + 0.02)
+        b.tri(c, p0, p1, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0)
+        b.tri(c, p1, p0, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0)
+    }
+    b.setXform(multiply(translation(v3(0.0, 0.012, z)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, -0.03, 0.0), 0.014, 0.05, 8, false)
+    b.resetXform()
+}
+
+pub fn newGun(gl: &mut GlContext): Gun {
+    var sb = builder()
+    steelGeometry(sb)
+    cylinderGeometry(sb)
+    var gb = builder()
+    gripGeometry(gb)
+    var fb = builder()
+    flashGeometry(fb)
+
+    var steelMesh = Mesh.new(gl, sceneAttrs())
+    steelMesh.upload(sb.data.clone())
+    var gripMesh = Mesh.new(gl, sceneAttrs())
+    gripMesh.upload(gb.data.clone())
+    var flashMesh = Mesh.new(gl, sceneAttrs())
+    flashMesh.upload(fb.data.clone())
+
+    var flashMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 1.0, 0.0)
+    flashMat.emissive = v3(9.0, 6.4, 2.6)
+
+    return Gun {
+        steelMesh: steelMesh,
+        gripMesh: gripMesh,
+        flashMesh: flashMesh,
+        steelMat: material(TEX_STEEL, 0.60, 0.60, 0.62, 0.40, 0.55),
+        gripMat: material(TEX_WOOD, 0.52, 0.29, 0.16, 0.48, 0.0),
+        flashMat: flashMat,
+        kickBack: 0.0,
+        kickRise: 0.0,
+        flash: 0.0,
+        cylinder: 0.0,
+        cylinderTarget: 0.0,
+        rounds: CYLINDER_ROUNDS,
+        reloadT: 0.0,
+        cooldown: 0.0,
+    }
+}
+
+impl Gun {
+    fn canFire(self: &Self): bool {
+        return self.rounds > 0 && self.cooldown <= 0.0 && self.reloadT <= 0.0
+    }
+
+    fn fire(self: &mut Self) {
+        self.rounds = self.rounds - 1
+        self.cooldown = 0.16
+        self.kickBack = 0.030
+        self.kickRise = 0.075
+        self.flash = 0.045
+        self.cylinderTarget = self.cylinderTarget + 1.0472
+    }
+
+    fn beginReload(self: &mut Self) {
+        if self.reloadT <= 0.0 && self.rounds < CYLINDER_ROUNDS {
+            self.reloadT = 1.15
+        }
+    }
+
+    fn update(self: &mut Self, dt: f64) {
+        self.cooldown = Math.maxF64(0.0, self.cooldown - dt)
+        self.flash = Math.maxF64(0.0, self.flash - dt)
+        // Three different rates: the muzzle drops back fastest, the slide next.
+        self.kickRise = self.kickRise - self.kickRise * Math.minF64(dt * 16.0, 1.0)
+        self.kickBack = self.kickBack - self.kickBack * Math.minF64(dt * 10.0, 1.0)
+        self.cylinder = self.cylinder + (self.cylinderTarget - self.cylinder) * Math.minF64(dt * 14.0, 1.0)
+        if self.reloadT > 0.0 {
+            self.reloadT = self.reloadT - dt
+            if self.reloadT <= 0.0 {
+                self.reloadT = 0.0
+                self.rounds = CYLINDER_ROUNDS
+            }
+        }
+    }
+
+    // The gun's own frame: a fixed offset from the eye, rotated into the view
+    // basis, with the recoil and the reload tilt applied in gun space.
+    fn modelMatrix(self: &Self, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64): Vec<f32> {
+        var basis = identity()
+        basis[0] = right.x as f32
+        basis[1] = right.y as f32
+        basis[2] = right.z as f32
+        basis[4] = up.x as f32
+        basis[5] = up.y as f32
+        basis[6] = up.z as f32
+        basis[8] = (-fwd.x) as f32
+        basis[9] = (-fwd.y) as f32
+        basis[10] = (-fwd.z) as f32
+        // Aiming brings the gun to the middle of the screen and closer to the eye.
+        // Held about a metre out. The distance is not arbitrary: the gun is
+        // 32 cm long and the view model frustum is 54 degrees across, so a metre
+        // is what makes it about a third of the screen wide — near enough that
+        // it reads, far enough that perspective does not bend it.
+        let ox = 0.235 - 0.235 * aim
+        let oy = -0.235 + 0.050 * aim + Math.sin(bob * 2.0) * 0.014 * (1.0 - aim)
+        let oz = -1.02 + 0.30 * aim + self.kickBack * 3.0
+        // Angled across the view rather than pointed straight down it: a gun
+        // parallel to the camera shows you its back end and nothing else, and
+        // the back end of a revolver is a dark circle.
+        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + reloadTilt(self.reloadT) - 0.05 + 0.05 * aim), multiply(rotationY(0.18 - 0.18 * aim), rotationZ(-0.09 + 0.09 * aim))))
+        return multiply(translation(eye), multiply(basis, local))
+    }
+
+    fn cylinderMatrix(self: &Self, model: &Vec<f32>): Vec<f32> {
+        return multiply(model, multiply(translation(v3(0.0, 0.012, -0.052)), multiply(rotationZ(self.cylinder), translation(v3(0.0, -0.012, 0.052)))))
+    }
+
+    fn draw(self: &Self, gfx: &Gfx, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64, aspect: f64) {
+        let model = self.modelMatrix(eye, fwd, right, up, aim, bob)
+        // Its own projection: a 50-degree horizontal frustum with a 3 cm near
+        // plane, so the gun is never clipped and never fish-eyed.
+        let fovY = 2.0 * Math.atan(Math.tan(0.47) / aspect)
+        let proj = perspective(fovY, aspect, 0.02, 12.0)
+        let view = lookAt(eye, eye + fwd, up)
+        let vp = multiply(proj, view)
+        gfx.scene.bind()
+        gfx.scene.uniformMat4("uViewProj", vp)
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        gfx.sceneDraw(self.steelMesh, model, self.steelMat)
+        gfx.sceneDraw(self.gripMesh, model, self.gripMat)
+        if self.flash > 0.0 {
+            gfx.sceneDraw(self.flashMesh, model, self.flashMat)
+        }
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+    }
+
+    fn free(self: Self, gl: &mut GlContext) {
+        self.steelMesh.free(gl)
+        self.gripMesh.free(gl)
+        self.flashMesh.free(gl)
+    }
+}
+
+// The gun tips over while it is being reloaded and comes back level as the last
+// round goes in.
+fn reloadTilt(t: f64): f64 {
+    if t <= 0.0 {
+        return 0.0
+    }
+    let phase = Math.minF64(t / 1.15, 1.0)
+    return 0.75 * Math.sin(phase * 3.14159)
+}

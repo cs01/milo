@@ -1,0 +1,611 @@
+// PLINK — reflex target practice in a dead western town.
+//
+//   milo run examples/games/plink/main.milo --release
+//
+// Mouse looks, WASD walks, left button shoots. Bottles and plates snap up on
+// hinges around the town, hold for about a second and a half, and drop. Hit one
+// anywhere and it shatters.
+//
+// `--shot out.png` renders one frame to a file and exits, which is how every
+// change to the lighting in this game was actually checked.
+
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "std/fs" import {
+    writeFile
+}
+from "std/png" import {
+    encodePng
+}
+from "gl" import {
+    GlContext, Gpu, Mesh, Texture2D, Wrap, bindScreen, readPixelsRgba8
+}
+from "sdl" import {
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_GetKeyboardState,
+    SDL_GetRelativeMouseState, SDL_GetTicks, SDL_Init, SDL_PollEvent, SDL_Quit,
+    SDL_SetRelativeMouseMode, SDL_SetWindowFullscreen, SDL_ShowCursor,
+    SDL_BUTTON_LMASK, SDL_BUTTON_RMASK, SDL_INIT_VIDEO, SDL_KEYDOWN, SDL_QUIT,
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOW_ALLOW_HIGHDPI, SDL_WINDOW_FULLSCREEN_DESKTOP,
+    SDL_WINDOW_HIDDEN, SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
+}
+from "sdl/glcontext" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
+    SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_DEPTH_SIZE,
+    SDL_WINDOW_OPENGL
+}
+from "sdl/keys" import {
+    SC_A, SC_D, SC_ESCAPE, SC_F, SC_LSHIFT, SC_R, SC_S, SC_SPACE, SC_W
+}
+from "./gun" import {
+    CYLINDER_ROUNDS, Gun, newGun
+}
+from "./targets" import {
+    KIND_BOTTLE, ST_UP, Targets, newTargets
+}
+from "./camera" import {
+    Camera, newCamera
+}
+from "./hud" import {
+    Hud, buildAtlas, newHud
+}
+from "./mat4" import {
+    identity, invertViewProj, multiply
+}
+from "./render" import {
+    Gfx, Material, material, newGfx, sceneAttrs
+}
+from "./sky" import {
+    buildSky
+}
+from "./signs" import {
+    POSTER_H, POSTER_W, SIGN_H, SIGN_W, posterPixels, signPixels
+}
+from "./textures" import {
+    TEX_SIZE, makeTextures
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./world" import {
+    B_DIRT, BUCKETS, World, buildWorld, groundHeight
+}
+
+fn argValue(name: &string, fallback: &string): string {
+    let a = args()
+    for i in 0..a.len {
+        if a[i] == name && i + 1 < a.len {
+            return a[i + 1].clone()
+        }
+    }
+    return fallback.clone()
+}
+
+fn argPresent(name: &string): bool {
+    let a = args()
+    for i in 0..a.len {
+        if a[i] == name {
+            return true
+        }
+    }
+    return false
+}
+
+// GL hands back rows bottom-up and ABGR; a PNG wants top-down RGB.
+fn toRgb(px: &Vec<u32>, w: i64, h: i64): string {
+    var out = ""
+    for y in 0..h {
+        let row = (h - 1 - y) * w
+        for x in 0..w {
+            let p = px[row + x]
+            out.push((p & 0xFF) as u8)
+            out.push(((p >> 8) & 0xFF) as u8)
+            out.push(((p >> 16) & 0xFF) as u8)
+        }
+    }
+    return out
+}
+
+pub fn main(): i32 {
+    let shot = argValue("--shot", "")
+    let headless = shot.len > 0
+    var winW: i64 = 1440
+    var winH: i64 = 900
+    let sunEl = argValue("--sun", "14").parseF64() ?? 14.0
+    let sunAz = argValue("--az", "18").parseF64() ?? 18.0
+    let scalePct = argValue("--scale", "100").parseF64() ?? 100.0
+    let skipBucket = argValue("--skip", "-1").parseInt() ?? -1
+
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ctx: *u8 = 0 as *u8
+    unsafe {
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        let _ = SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24)
+        var flags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI
+        if headless {
+            flags = flags | SDL_WINDOW_HIDDEN
+        } else {
+            flags = flags | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        }
+        win = SDL_CreateWindow("PLINK", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, winW as i32, winH as i32, flags)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        ctx = SDL_GL_CreateContext(win)
+        if (ctx as i64) == 0 {
+            print("no GL 3.3 core context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+        let _ = SDL_GL_SetSwapInterval(if headless {
+            0
+        } else {
+            1
+        }
+        )
+        if !headless {
+            let _ = SDL_SetRelativeMouseMode(1)
+            let _ = SDL_ShowCursor(0)
+        }
+    }
+
+    var dw: i32 = 0
+    var dh: i32 = 0
+    unsafe {
+        SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
+    }
+    if headless {
+        dw = winW as i32
+        dh = winH as i32
+    }
+    // Every pass is per-pixel and a retina panel hands back four times the
+    // pixels of the display it is showing, so the scene has its own resolution
+    // cap; the HUD is drawn afterwards at the real size.
+    var rw = ((dw as f64) * scalePct / 100.0) as i64
+    var rh = ((dh as f64) * scalePct / 100.0) as i64
+    let cap = 2600000.0
+    if ((rw * rh) as f64) > cap {
+        let k = Math.sqrt(cap / ((rw * rh) as f64))
+        rw = ((rw as f64) * k) as i64
+        rh = ((rh as f64) * k) as i64
+    }
+
+    var gl = GlContext.new()
+    let sky = buildSky(sunEl, sunAz, 21.0)
+    var gfx = match newGfx(gl, rw, rh, sky, buildAtlas(), 128) {
+        Result.Ok(g) => g
+        Result.Err(e) => {
+            print("gfx: " + e)
+            return 4
+        }
+    }
+    // Albedo and surface for each material, uploaded in the order textures.milo
+    // declares — the TEX_* constants index this list, so the order is a contract.
+    let texes = makeTextures()
+    for t in texes {
+        let a = Texture2D.rgba8(gl, TEX_SIZE, TEX_SIZE, t.albedo.clone(), true)
+        // REPEAT, not the default clamp. Every one of these is tiled across
+        // metres of surface, and on clamp only the first repeat has any content
+        // at all — the rest is the edge texel smeared, which reads as a smooth
+        // wash and looks exactly like a texture that is simply too soft.
+        a.setWrap(Wrap.Repeat)
+        a.generateMipmaps()
+        a.setAnisotropy(16.0)
+        let s = Texture2D.rgba8(gl, TEX_SIZE, TEX_SIZE, t.surf.clone(), true)
+        s.setWrap(Wrap.Repeat)
+        s.generateMipmaps()
+        s.setAnisotropy(16.0)
+        let _ = gfx.addTexture(a)
+        let _ = gfx.addTexture(s)
+    }
+    gfx.debug = argValue("--debug", "0").parseF64() ?? 0.0
+    gfx.cloudCover = argValue("--clouds", "0.42").parseF64() ?? 0.42
+    // One-off textures: they are pictures, not surfaces, so they are clamped
+    // rather than repeated and they share a single flat surface map.
+    let poster = Texture2D.rgba8(gl, POSTER_W, POSTER_H, posterPixels(), true)
+    poster.generateMipmaps()
+    poster.setAnisotropy(16.0)
+    let posterIdx = gfx.addTexture(poster)
+    var flatPixels: Vec<u32> = Vec.filled(4, 0)
+    for i in 0..4 {
+        // A normal straight out of the surface, and a roughness of 0.5 — which
+        // the shader reads as "exactly what the material says".
+        flatPixels[i] = 0xFF8080FF
+    }
+    let flat = Texture2D.rgba8(gl, 2, 2, flatPixels, false)
+    let flatIdx = gfx.addTexture(flat)
+    let signA = Texture2D.rgba8(gl, SIGN_W, SIGN_H, signPixels("SALOON"), true)
+    signA.generateMipmaps()
+    let signAIdx = gfx.addTexture(signA)
+    let signB = Texture2D.rgba8(gl, SIGN_W, SIGN_H, signPixels("DRY GOODS"), true)
+    signB.generateMipmaps()
+    let signBIdx = gfx.addTexture(signB)
+
+    var world = buildWorld(gl, posterIdx, flatIdx, signAIdx, signBIdx)
+    var targets = newTargets(gl)
+    var gun = newGun(gl)
+    var cam = newCamera()
+    // Capture-only camera overrides, so a lighting or texture change can be
+    // judged from the same frame every time instead of from wherever the mouse
+    // happened to be.
+    cam.pitch = argValue("--pitch", "-0.02").parseF64() ?? -0.02
+    cam.yaw = argValue("--yaw", "0").parseF64() ?? 0.0
+    cam.pos.z = argValue("--z", "-4").parseF64() ?? -4.0
+    cam.pos.x = argValue("--x", "0").parseF64() ?? 0.0
+    var hud = newHud()
+
+    let model = identity()
+    var quit = false
+    var ev: [u8; 64] = [0; 64]
+    var last = SDL_GetTicks()
+
+    // Game state. One round is 60 seconds; between rounds the town is quiet and
+    // the last score stays on screen.
+    var running = false
+    var timeLeft = 0.0
+    var score: i64 = 0
+    var best: i64 = 0
+    var combo: i64 = 0
+    var hits: i64 = 0
+    var shotsFired: i64 = 0
+    var lastScore: i64 = 0
+    var hitFlash = 0.0
+    var missFlash = 0.0
+    var prevButtons: u32 = 0
+    var prevSpace = false
+    var prevR = false
+    var prevF = false
+    var fullscreen = false
+    // A capture is worthless with an empty street, so the headless path runs the
+    // wave logic forward before it reads the framebuffer.
+    var warmup = argValue("--warmup", "150").parseInt() ?? 150
+    let autoFire = argValue("--boom", "0").parseInt() ?? 0
+    if headless {
+        running = true
+        timeLeft = 45.0
+    }
+
+    while !quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        if dt > 0.05 {
+            dt = 0.05
+        }
+        if headless {
+            dt = 0.016
+        }
+        gfx.time = gfx.time + dt
+
+        var fireNow = false
+        var aiming = 0.0
+        if !headless {
+            unsafe {
+                while SDL_PollEvent(ev) != 0 {
+                    let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
+                    if evType == SDL_QUIT {
+                        quit = true
+                    }
+                }
+                var mx: i32 = 0
+                var my: i32 = 0
+                let buttons = SDL_GetRelativeMouseState(mx.addrOf(), my.addrOf())
+                let keys = SDL_GetKeyboardState(0 as *i32)
+                if keys[SC_ESCAPE] != 0 {
+                    quit = true
+                }
+                let fDown = keys[SC_F] != 0
+                if fDown && !prevF {
+                    fullscreen = !fullscreen
+                    let _ = SDL_SetWindowFullscreen(win, if fullscreen {
+                        SDL_WINDOW_FULLSCREEN_DESKTOP
+                    } else {
+                        0
+                    }
+                    )
+                }
+                prevF = fDown
+                var moveX = 0.0
+                var moveZ = 0.0
+                if keys[SC_W] != 0 {
+                    moveZ = moveZ + 1.0
+                }
+                if keys[SC_S] != 0 {
+                    moveZ = moveZ - 1.0
+                }
+                if keys[SC_D] != 0 {
+                    moveX = moveX + 1.0
+                }
+                if keys[SC_A] != 0 {
+                    moveX = moveX - 1.0
+                }
+                if (buttons & SDL_BUTTON_RMASK) != 0 {
+                    aiming = 1.0
+                }
+                // Aiming halves how far the mouse turns you, which is what an
+                // iron sight is actually for.
+                cam.look(mx as f64, my as f64, 0.0022 * (1.0 - 0.45 * aiming))
+                cam.step(moveX, moveZ, keys[SC_LSHIFT] != 0, false, dt)
+
+                let lmb = (buttons & SDL_BUTTON_LMASK) != 0
+                let lmbEdge = lmb && (prevButtons & SDL_BUTTON_LMASK) == 0
+                prevButtons = buttons
+
+                let spaceDown = keys[SC_SPACE] != 0
+                if (spaceDown && !prevSpace) || (lmbEdge && !running) {
+                    if !running {
+                        running = true
+                        timeLeft = 60.0
+                        score = 0
+                        combo = 0
+                        hits = 0
+                        shotsFired = 0
+                        gun.rounds = CYLINDER_ROUNDS
+                    }
+                }
+                prevSpace = spaceDown
+
+                let rDown = keys[SC_R] != 0
+                if rDown && !prevR {
+                    gun.beginReload()
+                }
+                prevR = rDown
+
+                if lmbEdge && running {
+                    fireNow = true
+                }
+                // An empty cylinder reloads itself rather than making you press
+                // a key to keep playing a reflex game.
+                if gun.rounds == 0 && gun.reloadT <= 0.0 {
+                    gun.beginReload()
+                }
+            }
+        }
+
+        // ── simulate ──────────────────────────────────────────────────────────
+        if running {
+            timeLeft = timeLeft - dt
+            if timeLeft <= 0.0 {
+                timeLeft = 0.0
+                running = false
+                lastScore = score
+                if score > best {
+                    best = score
+                }
+                combo = 0
+            }
+        }
+        let pressure = if running {
+            Math.clampF64((60.0 - timeLeft) / 45.0, 0.0, 1.0)
+        } else {
+            0.0
+        }
+        targets.update(dt, pressure, running)
+        gun.update(dt)
+        hitFlash = Math.maxF64(0.0, hitFlash - dt * 3.2)
+        missFlash = Math.maxF64(0.0, missFlash - dt * 2.4)
+
+        // Headless capture cannot press a mouse button, and a still of this game
+        // with nothing breaking in it is a still of a town.
+        if headless && autoFire > 0 && warmup > 0 && warmup % autoFire == 0 {
+            var k = 0
+            while k < targets.rigs.len {
+                if targets.rigs[k].state == ST_UP {
+                    targets.shatter(k, cam.eye())
+                    break
+                }
+                k = k + 1
+            }
+        }
+        if fireNow && gun.canFire() {
+            gun.fire()
+            shotsFired = shotsFired + 1
+            cam.kick(0.022 + 0.006 * ((shotsFired % 3) as f64), 0.004 * (if shotsFired % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            }
+            ))
+            let hit = targets.trace(cam.eye(), cam.forward())
+            if hit.ok {
+                targets.shatter(hit.index, cam.eye())
+                hits = hits + 1
+                combo = combo + 1
+                // Speed is what is being scored, so the multiplier is the whole
+                // reward: a chain of quick hits is worth several times the same
+                // hits taken one at a time.
+                let mult = Math.minI64(1 + combo / 3, 6)
+                let bonus = if hit.kind == KIND_BOTTLE {
+                    120
+                } else {
+                    100
+                }
+                score = score + bonus * mult
+                hitFlash = 1.0
+            } else {
+                combo = 0
+                missFlash = 1.0
+            }
+        }
+        gfx.flash = gun.flash * 3.0
+
+        // ── draw ──────────────────────────────────────────────────────────────
+        unsafe {
+            SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
+        }
+        if headless {
+            dw = winW as i32
+            dh = winH as i32
+        }
+
+        let focus = cam.pos + cam.walkForward().scale(15.0)
+        gfx.shadowBegin(v3(focus.x, 1.5, focus.z), 24.0, 90.0)
+        for i in 0..BUCKETS {
+            gfx.shadowDraw(world.meshes[i], model)
+        }
+        targets.drawRigs(gfx, true)
+
+        let aspect = (rw as f64) / (rh as f64)
+        let vp = cam.viewProj(aspect)
+        let inv = invertViewProj(vp)
+        gfx.sceneBegin(vp, inv, cam.eye())
+        for i in 0..BUCKETS {
+            gfx.sceneDraw(world.meshes[i], model, world.mats[i])
+        }
+        targets.drawRigs(gfx, false)
+        targets.drawShards(gfx)
+        let fwd = cam.forward()
+        let rightV = fwd.cross(v3(0.0, 1.0, 0.0)).norm()
+        let upV = rightV.cross(fwd).norm()
+        gun.draw(gfx, cam.eye(), fwd, rightV, upV, aiming, cam.bob, aspect)
+
+        gfx.present(dw as i64, dh as i64)
+
+        hud.clear()
+        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, gun.rounds, gun.reloadT, hitFlash, missFlash, aiming)
+        gfx.drawHud(hud.verts, dw as i64, dh as i64)
+
+        if headless && warmup > 0 {
+            warmup = warmup - 1
+            SDL_GL_SwapWindow(win)
+            continue
+        }
+        if headless {
+            let px = readPixelsRgba8(dw as i64, dh as i64)
+            match encodePng(toRgb(px, dw as i64, dh as i64), dw as i64, dh as i64, 3) {
+                Result.Ok(bytes) => {
+                    match writeFile(shot, bytes) {
+                        Result.Ok(_v) => {
+                            print($"wrote {shot}")
+                        }
+                        Result.Err(e) => {
+                            print($"write: {e}")
+                        }
+                    }
+                }
+                Result.Err(e) => {
+                    print("png: " + e)
+                }
+            }
+            quit = true
+        }
+
+        SDL_GL_SwapWindow(win)
+    }
+
+    targets.free(gl)
+    gun.free(gl)
+    world.free(gl)
+    gfx.free(gl)
+    gl.free()
+    unsafe {
+        SDL_GL_DeleteContext(ctx)
+        SDL_DestroyWindow(win)
+    }
+    SDL_Quit()
+    return 0
+}
+
+fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, rounds: i64, reloadT: f64, hitFlash: f64, missFlash: f64, aiming: f64) {
+    let s = Math.maxF64(dh / 900.0, 0.6)
+    let cx = dw * 0.5
+    let cy = dh * 0.5
+
+    // The crosshair opens up while the gun is recovering, so how ready you are
+    // is something you can see rather than something you have to count.
+    crosshair(hud, cx, cy, s, 1.0 - aiming * 0.6)
+    if hitFlash > 0.0 {
+        let d = 16.0 * s * (1.0 + (1.0 - hitFlash) * 1.6)
+        let a = hitFlash * 0.95
+        hud.rect(cx - d - 3.0 * s, cy - d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
+        hud.rect(cx + d - 4.0 * s, cy - d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
+        hud.rect(cx - d - 3.0 * s, cy + d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
+        hud.rect(cx + d - 4.0 * s, cy + d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
+    }
+    if missFlash > 0.0 {
+        hud.rect(cx - 30.0 * s, cy + 26.0 * s, 60.0 * s, 1.5 * s, 0.9, 0.25, 0.15, missFlash * 0.5)
+    }
+
+    if running {
+        let _ = hud.text($"SCORE {score}", 26.0 * s, 24.0 * s, 2.6 * s, 1.0, 0.97, 0.88, 0.95)
+        let secs = timeLeft as i64
+        let tenths = ((timeLeft - (secs as f64)) * 10.0) as i64
+        let clock = $"{secs}.{tenths}"
+        hud.textCentred(clock, cx, 24.0 * s, 3.4 * s, 1.0, 0.95, 0.80, 0.95)
+        if combo > 1 {
+            let mult = Math.minI64(1 + combo / 3, 6)
+            hud.textCentred($"{combo} IN A ROW    X{mult}", cx, 70.0 * s, 2.2 * s, 1.0, 0.78, 0.35, 0.92)
+        }
+    } else {
+        hud.textCentred("PLINK", cx, dh * 0.30, 8.0 * s, 1.0, 0.93, 0.78, 0.95)
+        if lastScore > 0 {
+            hud.textCentred($"SCORE {lastScore}", cx, dh * 0.30 + 80.0 * s, 3.4 * s, 1.0, 0.97, 0.88, 0.95)
+            let pct = if shots > 0 {
+                (hits * 100) / shots
+            } else {
+                0
+            }
+            hud.textCentred($"{hits} HITS   {pct}% ACCURATE", cx, dh * 0.30 + 118.0 * s, 2.0 * s, 0.92, 0.88, 0.80, 0.85)
+        } else {
+            hud.textCentred("SHOOT THE BOTTLES BEFORE THEY DROP", cx, dh * 0.30 + 84.0 * s, 2.0 * s, 0.95, 0.90, 0.82, 0.85)
+        }
+        if best > 0 {
+            hud.textCentred($"BEST {best}", cx, dh * 0.30 + 150.0 * s, 2.0 * s, 1.0, 0.80, 0.40, 0.85)
+        }
+        hud.textCentred("PRESS SPACE TO START", cx, dh * 0.72, 2.6 * s, 1.0, 0.97, 0.88, 0.9)
+        hud.textCentred("MOUSE LOOK   WASD MOVE   LEFT CLICK FIRE   RIGHT CLICK AIM   R RELOAD   F FULLSCREEN   ESC QUIT", cx, dh * 0.72 + 34.0 * s, 1.4 * s, 0.85, 0.82, 0.76, 0.7)
+    }
+
+    // Rounds left, as six marks that go out as they are spent.
+    let bx = dw - 40.0 * s
+    for i in 0..6 {
+        let lit = i < rounds
+        let a = if lit {
+            0.95
+        } else {
+            0.22
+        }
+        hud.rect(bx - (i as f64) * 14.0 * s, dh - 42.0 * s, 8.0 * s, 20.0 * s, if lit {
+            1.0
+        } else {
+            0.8
+        }
+        , if lit {
+            0.85
+        } else {
+            0.8
+        }
+        , if lit {
+            0.45
+        } else {
+            0.8
+        }
+        , a)
+    }
+    if reloadT > 0.0 {
+        let w = 100.0 * s
+        hud.rect(dw - 40.0 * s - w + 8.0 * s, dh - 58.0 * s, w * (1.0 - reloadT / 1.15), 4.0 * s, 1.0, 0.85, 0.45, 0.85)
+    }
+}
+
+fn crosshair(hud: &mut Hud, cx: f64, cy: f64, s: f64, spread: f64) {
+    let gap = 6.0 * s * spread
+    let len = 9.0 * s
+    let t = 2.0 * s
+    hud.rect(cx - t * 0.5, cy - gap - len, t, len, 1.0, 1.0, 1.0, 0.8)
+    hud.rect(cx - t * 0.5, cy + gap, t, len, 1.0, 1.0, 1.0, 0.8)
+    hud.rect(cx - gap - len, cy - t * 0.5, len, t, 1.0, 1.0, 1.0, 0.8)
+    hud.rect(cx + gap, cy - t * 0.5, len, t, 1.0, 1.0, 1.0, 0.8)
+    hud.rect(cx - t * 0.5, cy - t * 0.5, t, t, 1.0, 0.88, 0.45, 0.95)
+}

@@ -36,6 +36,12 @@
 // Downloads are cached under .cache/city/, so re-running to tweak the extent
 // costs nothing but the reprojection.
 
+from "std/png" import {
+    Png, PngImage, encodePng
+}
+from "std/binary" import {
+    Bytes
+}
 from "std/math" import {
     Math
 }
@@ -1158,21 +1164,28 @@ fn putBridges(buf: &mut string, br: &Bridges) {
 
 // ------------------------------------------------------------------ imagery
 
-let ORTHO_PX: i64 = 2048
+// Pixels per request. The service refuses to go higher: asking for 4096 returns
+// a 500, which is why the drape is stitched from several requests rather than
+// simply asked for at the size wanted.
+let ORTHO_TILE_PX: i64 = 2048
 
-// A square aerial photograph of exactly the asset's extent.
+// Requests per side. The finished drape is ORTHO_TILES * ORTHO_TILE_PX square.
 //
-// Written to disk exactly as the server sent it — no decode, no re-encode. The
-// game's own PNG decoder reads it at load, so a round trip here would only add a
-// place for the picture to change without anyone deciding it should.
-fn fetchOrtho(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, out: &string): bool {
-    if pathExists(out) {
-        print("  drape already at " + out.clone())
-        return true
-    }
+// Two gives 4096 over a 16 km asset, which is 3.9 m a pixel against the 7.8 m a
+// single request produced. The imagery underneath is NAIP at about a metre, so
+// four would be better again and costs sixteen requests, a 200 MB texture and a
+// download nobody asked for. Two is where the picture visibly improves and the
+// asset stays a reasonable size.
+let ORTHO_TILES: i64 = 2
+
+fn orthoTileUrl(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64): string {
     let bbox = fmt7(lonMin) + "," + fmt7(latMin) + "," + fmt7(lonMax) + "," + fmt7(latMax)
-    let url = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export?bbox=" + bbox + "&bboxSR=4326&imageSR=4326&size=" + ORTHO_PX.toString() + "," + ORTHO_PX.toString() + "&format=png24&f=image"
-    print("  fetching imagery ...")
+    return "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export?bbox=" + bbox + "&bboxSR=4326&imageSR=4326&size=" + ORTHO_TILE_PX.toString() + "," + ORTHO_TILE_PX.toString() + "&format=png24&f=image"
+}
+
+// One request, decoded, or None.
+fn fetchOrthoTile(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64): Option<PngImage> {
+    let url = orthoTileUrl(latMin, lonMin, latMax, lonMax)
     var attempt = 0
     while attempt < 3 {
         match fetch(url) {
@@ -1182,18 +1195,20 @@ fn fetchOrtho(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, out: &string):
                 // empty tile, not a photograph — that is how a place outside the
                 // imagery's coverage announces itself, with a 200.
                 if resp.ok() && body.len > 200000 {
-                    match writeFile(out.clone(), body) {
-                        Result.Ok(n) => {
-                            print("  wrote " + out.clone() + " (" + (n / 1024).toString() + " KiB)")
-                            return true
+                    match Png.decode(body) {
+                        Result.Ok(img) => {
+                            if img.width == ORTHO_TILE_PX && img.height == ORTHO_TILE_PX {
+                                return Option.Some(img)
+                            }
+                            print("  tile came back " + img.width.toString() + "x" + img.height.toString())
                         }
-                        Result.Err(_e) => {
-                            print("  could not write " + out.clone())
-                            return false
+                        Result.Err(e) => {
+                            print("  tile did not decode: " + e)
                         }
                     }
+                } else {
+                    print("  imagery service returned " + resp.status.toString() + ", " + (body.len / 1024).toString() + " KiB")
                 }
-                print("  imagery service returned " + resp.status.toString() + ", " + (body.len / 1024).toString() + " KiB")
             }
             Result.Err(_e) => {
                 print("  imagery service unreachable")
@@ -1204,7 +1219,83 @@ fn fetchOrtho(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, out: &string):
             sleepSecs(4)
         }
     }
-    return false
+    return Option.None
+}
+
+// A square aerial photograph of exactly the asset's extent, stitched from a grid
+// of requests.
+//
+// It used to be one request written to disk byte for byte, which was the right
+// shape while one request could cover the asset. It cannot: the service caps a
+// single export at 2048 pixels, so the only way to a sharper drape is several
+// exports and a seam-free join, and joining them means this function now decodes
+// and re-encodes rather than passing bytes through.
+//
+// Assembled one BAND at a time — the row of tiles across, then the next row down
+// — so only one band is ever decoded at once. Holding the whole grid would be
+// four times the memory for no benefit, and the output has to be written in
+// row order regardless.
+fn fetchOrtho(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, out: &string): bool {
+    if pathExists(out) {
+        print("  drape already at " + out.clone())
+        return true
+    }
+    let side = ORTHO_TILES * ORTHO_TILE_PX
+    print("  fetching imagery: " + ORTHO_TILES.toString() + "x" + ORTHO_TILES.toString() + " requests -> " + side.toString() + " px")
+
+    var pixels: string = ""
+    for ty in 0..ORTHO_TILES {
+        // Row 0 of a PNG is its NORTH edge, so the first band is the top of the
+        // box and latitude counts DOWN as ty increases. Getting this backwards
+        // flips the drape north-to-south, which over a city is unmistakable and
+        // over open country is not.
+        let latHi = latMax - (latMax - latMin) * (ty as f64) / (ORTHO_TILES as f64)
+        let latLo = latMax - (latMax - latMin) * ((ty + 1) as f64) / (ORTHO_TILES as f64)
+
+        var band: Vec<PngImage> = Vec.new()
+        for tx in 0..ORTHO_TILES {
+            let lonLo = lonMin + (lonMax - lonMin) * (tx as f64) / (ORTHO_TILES as f64)
+            let lonHi = lonMin + (lonMax - lonMin) * ((tx + 1) as f64) / (ORTHO_TILES as f64)
+            let Option.Some(img) = fetchOrthoTile(latLo, lonLo, latHi, lonHi) else {
+                print("  imagery tile " + tx.toString() + "," + ty.toString() + " failed; giving up")
+                return false
+            }
+            print("    tile " + tx.toString() + "," + ty.toString() + " ok")
+            band.push(img)
+        }
+
+        for row in 0..ORTHO_TILE_PX {
+            for tx in 0..ORTHO_TILES {
+                let ch = band[tx].channels
+                let base = row * ORTHO_TILE_PX * ch
+                for px in 0..ORTHO_TILE_PX {
+                    let k = base + px * ch
+                    Bytes.writeU8(pixels, band[tx].pixels[k])
+                    Bytes.writeU8(pixels, band[tx].pixels[k + 1])
+                    Bytes.writeU8(pixels, band[tx].pixels[k + 2])
+                }
+            }
+        }
+    }
+
+    match encodePng(pixels, side, side, 3) {
+        Result.Ok(enc) => {
+            match writeFile(out.clone(), enc) {
+                Result.Ok(n) => {
+                    print("  wrote " + out.clone() + " (" + (n / 1024).toString() + " KiB, " + side.toString() + "px)")
+                    return true
+                }
+                Result.Err(_e) => {
+                    print("  could not write " + out.clone())
+                    return false
+                }
+            }
+        }
+        Result.Err(e) => {
+            print("  could not encode drape: " + e)
+            return false
+        }
+    }
 }
 
 // `foo.city` -> `foo.ortho.png`, the name cityLoad looks for beside an asset.

@@ -1658,7 +1658,22 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
         // underneath was varied and the boxes standing on it were not.
         let lmx = (w.city.bMinX[b] + w.city.bMaxX[b]) * 0.5
         let lmz = (w.city.bMinZ[b] + w.city.bMaxZ[b]) * 0.5
-        let roofCol = cityOrthoLocal(w.city, lmx, lmz)
+        // Five samples across the footprint, not one at its centre.
+        //
+        // One was fine while the drape was 7.8 m a texel, because at that size a
+        // texel is already an average over most of a roof. At 3.9 m it is not: a
+        // single lookup can land on a rooftop plant room, a skylight or the
+        // building's own shadow, and that one texel then paints the entire
+        // building. Averaging over the footprint restores what the coarse drape
+        // was giving by accident, and does it on purpose.
+        let qx = (w.city.bMaxX[b] - w.city.bMinX[b]) * 0.25
+        let qz = (w.city.bMaxZ[b] - w.city.bMinZ[b]) * 0.25
+        var rs = cityOrthoLocal(w.city, lmx, lmz)
+        let s1 = cityOrthoLocal(w.city, lmx - qx, lmz - qz)
+        let s2 = cityOrthoLocal(w.city, lmx + qx, lmz - qz)
+        let s3 = cityOrthoLocal(w.city, lmx - qx, lmz + qz)
+        let s4 = cityOrthoLocal(w.city, lmx + qx, lmz + qz)
+        let roofCol = rgb((rs.r + s1.r + s2.r + s3.r + s4.r) / 5.0, (rs.g + s1.g + s2.g + s3.g + s4.g) / 5.0, (rs.b + s1.b + s2.b + s3.b + s4.b) / 5.0)
         // Lifted off the raw sample: the texel already carries the sun that lit
         // it, and it is about to be multiplied by a wall's shading term too.
         col = roofCol.scale(1.35)

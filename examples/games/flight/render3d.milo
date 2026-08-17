@@ -162,6 +162,20 @@ pub fn applyWeather(s: &mut Scene, a: Theme, b: Theme, mix: f64) {
 // about a kilometre, which is the range at which a 110 m quad starts to show.
 pub let FINE_RINGS: i64 = 9
 
+// Rings drawn at a QUARTER tile, inside the half-tile ones.
+//
+// The half-tile grid puts a corner every 55 m and the elevation data has a post
+// every 30 m, so it samples a little over half of what is there — which is
+// invisible over rolling ground and is exactly wrong on the thing worth flying
+// to. Yosemite's walls and the Grand Canyon's rim are near-vertical steps in the
+// data, and a mesh that steps over every other post rounds them into slopes.
+//
+// A quarter tile is 27.5 m, finer than the data, so nothing is skipped. It is
+// only the three rings you are sitting on: 25 tiles becoming 400 quads instead of
+// 100, about six hundred extra triangles, which is nothing against the twelve
+// thousand a city already costs.
+pub let VFINE_RINGS: i64 = 3
+
 pub fn ringCount(r: i64): i64 {
     if r == 0 {
         return 1
@@ -653,6 +667,14 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     let fineLo = 0 - 2 * (FINE_RINGS - 1)
     let fineHi = 2 * FINE_RINGS
     var fc = cornersNew(baseX * 2, baseZ * 2, tile * 0.5, FINE_RINGS * 2, fineLo, fineHi)
+    // Same construction again one level down. The boundary snap works unchanged:
+    // the corners the half-tile grid already has land on EVEN indices here, so the
+    // odd ones are the new ones and averaging their neighbours reproduces exactly
+    // what the coarser edge interpolates. That is the whole crack-prevention rule
+    // and it does not care how many levels deep it is.
+    let vfineLo = 0 - 4 * (VFINE_RINGS - 1)
+    let vfineHi = 4 * VFINE_RINGS
+    var vfc = cornersNew(baseX * 4, baseZ * 4, tile * 0.25, VFINE_RINGS * 4, vfineLo, vfineHi)
 
     // Front to back, in rings out from the camera tile. The z-buffer then rejects
     // hidden pixels with a single compare instead of shading them — near terrain
@@ -681,6 +703,21 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             // Four shared grid corners, each carrying its own height, light and
             // colour. Neighbouring quads read the SAME corner, so no attribute
             // can jump across a quad edge — this is what removes the grid.
+            if ring < VFINE_RINGS {
+                let vx = tx * 4 - baseX * 4 + VFINE_RINGS * 4
+                let vz = tz * 4 - baseZ * 4 + VFINE_RINGS * 4
+                let qtr = tile * 0.25
+                for sz in 0..4 {
+                    for sx in 0..4 {
+                        let q00 = cornerAt(vfc, s, w, vx + sx, vz + sz)
+                        let q10 = cornerAt(vfc, s, w, vx + sx + 1, vz + sz)
+                        let q01 = cornerAt(vfc, s, w, vx + sx, vz + sz + 1)
+                        let q11 = cornerAt(vfc, s, w, vx + sx + 1, vz + sz + 1)
+                        terrainQuad(s, w, v, ground, q00, q10, q01, q11, x0 + (sx as f64) * qtr, z0 + (sz as f64) * qtr, qtr, ring)
+                    }
+                }
+                continue
+            }
             if ring < FINE_RINGS {
                 // Four sub-quads off the half-size grid. Its corners at even
                 // indices are the coarse corners, so the two meshes agree

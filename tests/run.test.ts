@@ -192,7 +192,7 @@ describe("fixtures (compile + run)", () => {
     else files.push(f);
   }
   for (const [file, pkg] of blocked) {
-    test.skip(`${file.replace(".milo", "")} — needs the '${pkg}' package, which is not installed`, () => {});
+    test.skip(`${file.replace(".milo", "")} — needs the '${pkg}' package, which is not installed`, () => {}); // reason is the test name itself, and the fixture carries the debt note
   }
   const builds = new Map<string, RunResult>();
 

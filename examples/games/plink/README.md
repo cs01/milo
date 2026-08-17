@@ -1,9 +1,9 @@
 # PLINK
 
-A dead western town, a revolver, and bottles that will not stand still. Targets
-snap up on hinges along the boardwalk rails, hold for about a second and a half,
-and drop. Hit one anywhere and it shatters — there is no bullseye, only how fast
-you are.
+A dead western town, a revolver, and bottles that will not stand still. You stand
+in the street facing one boardwalk square on, and the targets snap up on hinges
+along its rail, hold a couple of seconds, and drop. Hit one anywhere and it
+shatters — there is no bullseye, only how fast you are.
 
 ```bash
 milo run examples/games/plink/main.milo --release
@@ -11,8 +11,10 @@ milo run examples/games/plink/main.milo --release
 
 Two controls: the mouse aims and the left button shoots. `SPACE` starts a round,
 right click steadies your aim, `F` is fullscreen and `ESC` quits. There is no
-walking and no reload key — you stand at the mouth of the street, the whole range
-is in front of you, and the cylinder refills itself.
+walking and no reload key — the rail is a row laid out in front of you at one
+honest distance, and the cylinder refills itself. Rigs outside the arc you can
+turn through, on the far boardwalk or down at the graveyard fence, stay down as
+scenery: a target nobody can shoot is a wasted spawn.
 
 The town is never idle: with no round running two targets stay up at a time on a
 long hold and the revolver still fires, so you can find the range before the

@@ -93,6 +93,10 @@ pub struct Shard {
 
 pub struct Targets {
     rigs: Vec<Rig>,
+    // Which rigs the player can actually see from where they stand. A rig behind
+    // you or out past the end of the arc you may turn through is scenery: raising
+    // it spends a spawn slot on a target nobody can shoot.
+    eligible: Vec<bool>,
     shards: Vec<Shard>,
     bottleMesh: Mesh,
     plateMesh: Mesh,
@@ -261,8 +265,11 @@ pub fn newTargets(gl: &mut GlContext): Targets {
     let steelMat = material(TEX_STEEL, 0.48, 0.50, 0.53, 0.36, 0.85)
     let rustMat = material(TEX_RUST, 0.40, 0.27, 0.18, 0.85, 0.30)
 
+    let rigs = placeRigs()
+    var eligible: Vec<bool> = Vec.filled(rigs.len, true)
     return Targets {
-        rigs: placeRigs(),
+        rigs: rigs,
+        eligible: eligible,
         shards: Vec.new(),
         bottleMesh: bottleMesh,
         plateMesh: plateMesh,
@@ -319,6 +326,28 @@ impl Targets {
             }
         }
         return n
+    }
+
+    // Work out which rigs are shootable from where the player stands. Called once
+    // at startup, because the player does not move: a rig is in play if it is
+    // inside the arc the camera may turn through and near enough to aim at.
+    fn setStance(self: &mut Self, eye: &Vec3, centreYaw: f64, halfAngle: f64, maxDist: f64) {
+        for i in 0..self.rigs.len {
+            let c = rigCentre(self.rigs[i])
+            let dx = c.x - eye.x
+            let dz = c.z - eye.z
+            let dist = Math.sqrt(dx * dx + dz * dz)
+            // Yaw is measured from +Z towards +X, the same convention the camera
+            // uses, and the difference is wrapped into -pi..pi before comparing.
+            var d = Math.atan2(dx, dz) - centreYaw
+            while d > Math.pi() {
+                d = d - 2.0 * Math.pi()
+            }
+            while d < -Math.pi() {
+                d = d + 2.0 * Math.pi()
+            }
+            self.eligible[i] = dist <= maxDist && Math.abs(d) <= halfAngle
+        }
     }
 
     // Call a rig up. `hold` is how long it stays there once it arrives.
@@ -403,7 +432,7 @@ impl Targets {
             var tries = 0
             while tries < 24 {
                 let k = self.rng.int(self.rigs.len)
-                if self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
+                if self.eligible[k] && self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
                     let hold = if running {
                         (2.35 - 0.85 * pressure) * self.rng.range(0.85, 1.2)
                     } else {

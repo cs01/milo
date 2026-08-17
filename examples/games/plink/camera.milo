@@ -5,8 +5,10 @@
 // position is a player not shooting. Standing still also means the range can be
 // laid out once and be the same range every round.
 //
-// Yaw is measured so that 0 looks down +Z, which is down the street, and both
-// axes are clamped to keep the rigs in front of you: turning to face an empty
+// Yaw is measured so that 0 looks down +Z. You do not look down the street: you
+// stand across it, square on to one boardwalk, so the rail of targets is a row
+// laid out in front of you rather than a line running away at a glancing angle.
+// Both axes are clamped about that facing, because turning to look at an empty
 // stretch of desert is not a decision worth offering.
 
 from "std/math" import {
@@ -21,9 +23,14 @@ from "./vec3" import {
 
 pub let EYE_HEIGHT: f64 = 1.68
 
-// How far off centre you may look, in radians. Wide enough to cover both rails
-// and the far end of the street, short of the point where the town runs out.
-pub let YAW_LIMIT: f64 = 0.62
+// How far off centre you may look, in radians. The street is only seven metres
+// across, so the rail you face is a fifteen-metre row seen from eight and a half:
+// forty-five degrees of arc to either side, and the rigs outside that arc are
+// scenery rather than targets.
+pub let YAW_LIMIT: f64 = 0.78
+
+// Which way "straight ahead" is: +X, square on to the right-hand boardwalk.
+pub let FACING: f64 = 1.5708
 
 pub let PITCH_UP: f64 = 0.30
 
@@ -43,8 +50,11 @@ pub struct Camera {
 
 pub fn newCamera(): Camera {
     return Camera {
-        pos: v3(0.0, EYE_HEIGHT, 8.0),
-        yaw: 0.0,
+        // In the street, on the far side of it, and clear of your own boardwalk:
+        // the porch posts stand at x = 3.7 and standing behind one puts a pillar
+        // through the middle of the range.
+        pos: v3(-3.0, EYE_HEIGHT, 21.0),
+        yaw: FACING,
         pitch: -0.02,
         bob: 0.0,
         kickPitch: 0.0,
@@ -73,7 +83,7 @@ impl Camera {
     }
 
     fn look(self: &mut Self, dx: f64, dy: f64, sensitivity: f64) {
-        self.yaw = Math.clampF64(self.yaw - dx * sensitivity, -YAW_LIMIT, YAW_LIMIT)
+        self.yaw = Math.clampF64(self.yaw - dx * sensitivity, FACING - YAW_LIMIT, FACING + YAW_LIMIT)
         self.pitch = Math.clampF64(self.pitch - dy * sensitivity, PITCH_DOWN, PITCH_UP)
     }
 

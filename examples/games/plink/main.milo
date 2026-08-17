@@ -49,7 +49,7 @@ from "./targets" import {
     KIND_BOTTLE, ST_UP, Targets, newTargets
 }
 from "./camera" import {
-    Camera, newCamera
+    Camera, YAW_LIMIT, newCamera
 }
 from "./hud" import {
     ATLAS, Hud, buildAtlas, newHud
@@ -116,11 +116,13 @@ pub fn main(): i32 {
     let headless = shot.len > 0
     var winW: i64 = 1440
     var winH: i64 = 900
-    // A sun this low is the prettier picture, but it puts both boardwalks in
-    // deep shade, and a bottle you cannot pick out of the shade is not a target.
-    // 22 degrees keeps the warm light and lets the rigs read.
-    let sunEl = argValue("--sun", "22").parseF64() ?? 22.0
-    let sunAz = argValue("--az", "34").parseF64() ?? 34.0
+    // The sun has to come in over your shoulder and under the porch roof, or the
+    // rail you are shooting at sits in its own shade all round. Azimuth is
+    // clockwise from -Z, so a negative one puts it behind the left of the street:
+    // it rakes the storefronts you face and lights every target on them. Lower
+    // than about thirty degrees and the porch roof takes the rail back.
+    let sunEl = argValue("--sun", "33").parseF64() ?? 33.0
+    let sunAz = argValue("--az", "-58").parseF64() ?? -58.0
     let scalePct = argValue("--scale", "100").parseF64() ?? 100.0
     // --skip N drops one geometry bucket from the scene pass, which is how you
     // find out which bucket a surface belongs to.
@@ -249,13 +251,18 @@ pub fn main(): i32 {
     // judged from the same frame every time instead of from wherever the mouse
     // happened to be.
     cam.pitch = argValue("--pitch", "-0.02").parseF64() ?? -0.02
-    cam.yaw = argValue("--yaw", "0").parseF64() ?? 0.0
-    // The rigs run from z=11.6 to z=31 along the two rails. Standing at z=-4 put
-    // every one of them fifteen to forty-five metres out, where a bottle is a
-    // couple of pixels wide: the game was not hard, it was unreadable. You stand
-    // at the mouth of the street instead, with the whole range in front of you.
-    cam.pos.z = argValue("--z", "8").parseF64() ?? 8.0
-    cam.pos.x = argValue("--x", "0").parseF64() ?? 0.0
+    cam.yaw = argValue("--yaw", "1.5708").parseF64() ?? 1.5708
+    // The rigs run from z=11.6 to z=31 along the two rails. Standing at the mouth
+    // of the street put that rail edge-on: a row of targets running away from you
+    // at a glancing angle, the near one three metres off and the far one thirty.
+    // You stand across the street from the right-hand boardwalk instead, square on
+    // to it, so the whole rail is a row at one honest distance.
+    cam.pos.z = argValue("--z", "21").parseF64() ?? 21.0
+    cam.pos.x = argValue("--x", "-3.0").parseF64() ?? -3.0
+    // Only the rail you are square on to is in play. Everything else — the far
+    // fence, the wagon, the whole opposite boardwalk — stays down as scenery.
+    targets.setStance(cam.eye(), cam.yaw, YAW_LIMIT, 26.0)
+
     var hud = newHud()
 
     let model = identity()
@@ -579,7 +586,10 @@ fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score:
             contentH = contentH + 32.0
         }
         let panelH = contentH * s
-        let top = dh * 0.5 - panelH * 0.5
+        // Sat a little above centre: the rail of targets crosses the middle of
+        // the screen now, and the point of keeping the rigs up on this screen is
+        // that you can see them.
+        let top = dh * 0.42 - panelH * 0.5
         hud.rect(cx - panelW * 0.5, top, panelW, panelH, 0.04, 0.03, 0.02, 0.62)
 
         var y = top + 28.0 * s

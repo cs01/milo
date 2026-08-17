@@ -52,6 +52,25 @@ pub let TILE: f64 = 110.0 // world units per terrain quad
 
 pub let VIEW_TILES: i64 = 40 // radius of the drawn terrain grid -> 4.4 km
 
+// The elevation the weather is measured from: the ground at the middle of the
+// map, in metres above sea level.
+//
+// One number for a whole map is a simplification a real ceiling does not make —
+// over Yosemite the valley floor and the rim are 900 m apart and the cloud base
+// is flat in neither frame. It is right at the centre, which is where the flying
+// happens, and it is enormously better than measuring from sea level over a
+// place that is nowhere near it.
+pub fn cityGroundRef(c: &City): f64 {
+    if !c.loaded {
+        return 0.0
+    }
+    let h = heightAt(c, 0.0, 0.0)
+    if h < 0.0 {
+        return 0.0
+    }
+    return h
+}
+
 // How big a terrain quad is, given how high the camera is. The scale itself
 // lives in gfx3d, next to the `viewOf` that has to agree with it.
 pub fn terrainTile(camY: f64): f64 {
@@ -531,7 +550,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
     }
     var w = World {
         rng: Rng.new(seed),
-        env: envNew(head.originLat, head.originLon, head.reach),
+        env: envNew(head.originLat, head.originLon, head.reach, cityGroundRef(head)),
         city: head,
         easy: easy,
         plane: Plane {
@@ -660,7 +679,7 @@ fn rotatePlace(w: &mut World) {
 // time; the caller decodes the next on demand.
 pub fn worldSetPlace(w: &mut World, c: City) {
     w.city = c
-    envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach)
+    envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach, cityGroundRef(w.city))
     w.marks = marksFor(w.city.name)
     w.markIdx = 0
     w.markName = ""
@@ -733,7 +752,7 @@ pub fn stepPlace(w: &mut World, dir: i64) {
         w.nextIdx = (k + 1) % w.next.len
     }
     // The tour belongs to the place, so it is rebuilt whenever the place moves.
-    envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach)
+    envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach, cityGroundRef(w.city))
     w.marks = marksFor(w.city.name)
     computeFence(w)
     w.markIdx = 0

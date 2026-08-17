@@ -66,6 +66,16 @@ pub struct LiveEnv {
 
     sunSource: EnvSource,
 
+    // Ground elevation the cloud base is measured from, metres above sea level.
+    //
+    // A reported ceiling is ABOVE GROUND, because that is the number a pilot
+    // needs and the ceilometer points straight up. The renderer works in absolute
+    // world height. At sea level the two agree and the difference is invisible;
+    // over the Grand Canyon, whose rim is 2100 m up, treating an 980 m ceiling as
+    // an absolute altitude buries the entire cloud layer inside the rock, which is
+    // exactly what it did.
+    groundM: f64,
+
     // The sky over this place: coverage and cloud-top height on a grid, with one
     // base for the layer. Synthetic until a fetch replaces it, and honest about
     // which it is — see `cloudSource`.
@@ -126,7 +136,7 @@ pub fn envF64(name: string, fallback: f64): f64 {
     }
 }
 
-pub fn envNew(lat: f64, lon: f64, reach: f64): LiveEnv {
+pub fn envNew(lat: f64, lon: f64, reach: f64, groundM: f64): LiveEnv {
     let frozen = envI64("FLYBY_UTC", 0 - 1)
     let scale = envF64("FLYBY_TIMESCALE", 1.0)
     let now = epochSecs()
@@ -143,6 +153,7 @@ pub fn envNew(lat: f64, lon: f64, reach: f64): LiveEnv {
         timeScale: scale,
         baseEpoch: now,
         sunSource: EnvSource.Synthetic,
+        groundM: groundM,
         clouds: cloudEmpty(),
         cloudSource: EnvSource.Synthetic,
         obs: obsEmpty(),
@@ -172,7 +183,8 @@ pub fn envSynthWeather(e: &mut LiveEnv, reachIn: f64) {
     // comes off the coordinates, so San Francisco and Honolulu get different
     // weather and each one gets the SAME weather every run.
     let seed = e.lat * 3.7 + e.lon * 1.9
-    var f = cloudSynthetic(reach, 0.42, 980.0, 1150.0, seed)
+    // 980 m ABOVE THE GROUND here, not above the sea.
+    var f = cloudSynthetic(reach, 0.42, e.groundM + 980.0, 1150.0, seed)
     // Test hook: FLYBY_FAKE_RAIN puts one storm cell on the map so the shaft
     // renderer can be checked when nothing is raining over any real city.
     let fake = envF64("FLYBY_FAKE_RAIN", 0.0)
@@ -223,6 +235,8 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
     if base < 150.0 {
         base = 150.0
     }
+    // The observation is above ground; the renderer is above sea level.
+    base = base + e.groundM
     let coverage = o.coverOktas / 8.0
 
     var structure: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 1.0)
@@ -371,9 +385,10 @@ pub fn envWeatherLabel(e: &LiveEnv): string {
 }
 
 // Point the environment at a new place without losing the clock.
-pub fn envSetPlace(e: &mut LiveEnv, lat: f64, lon: f64, reach: f64) {
+pub fn envSetPlace(e: &mut LiveEnv, lat: f64, lon: f64, reach: f64, groundM: f64) {
     e.lat = lat
     e.lon = lon
+    e.groundM = groundM
     envRetime(e, 0.0)
     envSynthWeather(e, reach)
 }

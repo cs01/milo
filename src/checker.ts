@@ -3764,6 +3764,28 @@ export class TypeChecker {
           this.error(`method '${m.name}' is not defined in trait '${impl.traitName}'`, impl.span);
           continue;
         }
+        // A trait method with its OWN type parameters is a template, exactly as an inherent
+        // one is. Keyed without the trait name so the call site — which knows only the
+        // receiver type and the method name — can find it; two traits declaring the same
+        // generic method on one type is the ambiguity `resolveMethod` already rejects, and
+        // it is rejected here too rather than letting one silently win.
+        if (m.typeParams && m.typeParams.length > 0) {
+          const key = `${typeName}$${m.name}`;
+          if (this.genericMethods.has(key)) {
+            this.error(`ambiguous generic method '${m.name}' on '${typeName}' — implemented by more than one trait`, m.span ?? impl.span);
+          } else {
+            this.genericMethods.set(key, {
+              decl: {
+                ...m,
+                name: `${typeName}$${impl.traitName}$${m.name}`,
+                params: m.params.map(p => ({ name: p.name, type: this.substituteSelfInMiloType(declaredType(p), typeName) })),
+                retType: this.substituteSelfInMiloType(m.retType, typeName),
+              },
+              owner: typeName,
+            });
+          }
+          continue;
+        }
         const mangled = `${typeName}$${impl.traitName}$${m.name}`;
         const concreteFn: Function = {
           ...m,

@@ -1,0 +1,33 @@
+// A generic method declared in a TRAIT, not just an inherent impl.
+//
+// Inherent impls got method-level type parameters first, and the trait side was a hole in
+// that work rather than a separate feature: `trait Mapper { fn apply<R>(…) }` did not even
+// parse. Worth closing because a generic method is most useful as part of an interface a
+// caller programs against, not only as a one-off on a concrete type.
+//
+// The template is keyed by receiver type and method name, with no trait in the key, because
+// that is all a call site knows.
+// @expect: 15
+// @expect: n=5
+
+trait Mapper {
+    fn apply<R>(self: &Self, f: (&i64) => R): R
+}
+
+struct Holder {
+    n: i64,
+}
+
+impl Mapper for Holder {
+    fn apply<R>(self: &Self, f: (&i64) => R): R {
+        return f(self.n)
+    }
+}
+
+fn main() {
+    let h = Holder {
+        n: 5
+    }
+    print(h.apply((x: &i64): i64 => x * 3))
+    print(h.apply((x: &i64): string => $"n={x}"))
+}

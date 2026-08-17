@@ -74,8 +74,12 @@ extern_struct = "struct" IDENT "{" { [ attribute ] IDENT ":" type [ "," ] } "}" 
 extern_type = "type" IDENT ;                                 (* opaque handle *)
 
 trait_decl  = "trait" IDENT [ ":" IDENT { "+" IDENT } ] "{" { trait_method } "}" ;
-trait_method = "fn" IDENT "(" [ param_list ] ")" [ ":" type ] [ block ] ;
-interface_decl = "interface" IDENT "{" { trait_method } "}" ;
+(* A trait method may carry its own type parameters; an interface method may not —
+   an interface dispatches through a vtable, and a generic method has one address per
+   instantiation rather than one to put in a slot. *)
+trait_method = "fn" IDENT [ type_params ] "(" [ param_list ] ")" [ ":" type ] [ block ] ;
+interface_method = "fn" IDENT "(" [ param_list ] ")" [ ":" type ] [ block ] ;
+interface_decl = "interface" IDENT "{" { interface_method } "}" ;
 impl_decl   = [ "unsafe" ] "impl" IDENT [ "for" IDENT ] "{" { fn_decl } "}" ;
 
 type_alias  = "type" IDENT "=" type ;

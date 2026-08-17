@@ -693,9 +693,15 @@ export class Parser {
     return { kind: "TraitDecl", name, typeParams, supertraits, methods, span: this.span(tok) };
   }
 
-  private parseTraitMethod(): TraitMethod {
+  private parseTraitMethod(isInterface = false): TraitMethod {
     const tok = this.expect(TokenKind.Fn);
     const name = this.expect(TokenKind.Ident).value;
+    // The method's own type parameters. Rejected for an interface, whose dispatch is a
+    // vtable: a generic method has one address per instantiation and no slot can hold them.
+    const typeParams = this.parseTypeParams();
+    if (typeParams.length > 0 && isInterface) {
+      this.error(`interface method '${name}' cannot take type parameters — an interface dispatches through a vtable, and a generic method has one address per instantiation`, tok);
+    }
     const { params } = this.parseParamList();
     const retType = this.parseReturnType();
     let body: Stmt[] | null = null;
@@ -704,7 +710,7 @@ export class Parser {
       body = this.parseStmts();
       this.expect(TokenKind.RBrace);
     }
-    return { name, params, retType, body, span: this.span(tok) };
+    return { name, ...(typeParams.length > 0 && { typeParams }), params, retType, body, span: this.span(tok) };
   }
 
   private parseInterfaceDecl(): InterfaceDecl {
@@ -713,7 +719,7 @@ export class Parser {
     this.expect(TokenKind.LBrace);
     const methods: TraitMethod[] = [];
     while (!this.at(TokenKind.RBrace) && !this.at(TokenKind.Eof)) {
-      methods.push(this.parseTraitMethod());
+      methods.push(this.parseTraitMethod(true));
     }
     this.expect(TokenKind.RBrace);
     return { kind: "InterfaceDecl", name, methods, span: this.span(tok) };

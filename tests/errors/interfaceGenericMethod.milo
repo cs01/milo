@@ -1,0 +1,13 @@
+// An interface dispatches through a vtable: one slot per method, holding one address. A
+// method with its own type parameter has one address PER INSTANTIATION, so there is no
+// single function to put in the slot. Traits are static dispatch and can carry these;
+// interfaces cannot, and saying so at the declaration beats failing later at the call.
+// @error: cannot take type parameters
+
+interface Bad {
+    fn apply<R>(self: &Self, f: (&i64) => R): R
+}
+
+fn main() {
+    print(1)
+}

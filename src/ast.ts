@@ -234,6 +234,10 @@ export interface ImportDecl {
 
 export interface TraitMethod {
   name: string;
+  // A method may carry its OWN type parameters (`fn map<R>(…)`), distinct from any on the
+  // implementing type. An interface may not: dynamic dispatch needs one vtable slot per
+  // method, and a per-instantiation method has no single address to put in one.
+  typeParams?: TypeParam[];
   params: Param[];
   retType: MiloType;
   body: Stmt[] | null;

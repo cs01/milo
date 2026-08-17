@@ -76,6 +76,13 @@ pub struct LiveEnv {
     // exactly what it did.
     groundM: f64,
 
+    // Whether this run asked for the real sky. Sampled once at startup and then
+    // carried, because a place change has to make the same choice the startup did
+    // — otherwise only the FIRST city is live and every city after it silently
+    // falls back to invented weather, which is the exact failure this whole file
+    // is written to avoid.
+    liveWanted: bool,
+
     // The sky over this place: coverage and cloud-top height on a grid, with one
     // base for the layer. Synthetic until a fetch replaces it, and honest about
     // which it is — see `cloudSource`.
@@ -154,6 +161,7 @@ pub fn envNew(lat: f64, lon: f64, reach: f64, groundM: f64): LiveEnv {
         baseEpoch: now,
         sunSource: EnvSource.Synthetic,
         groundM: groundM,
+        liveWanted: false,
         clouds: cloudEmpty(),
         cloudSource: EnvSource.Synthetic,
         obs: obsEmpty(),
@@ -370,6 +378,12 @@ pub fn envLiveRequested(): bool {
     return envF64("FLYBY_LIVE", 0.0) > 0.5
 }
 
+// Ask for the real sky here and at every place this run visits afterwards.
+pub fn envGoLive(e: &mut LiveEnv, reach: f64): bool {
+    e.liveWanted = true
+    return envFetchLive(e, reach)
+}
+
 // One line describing where the sky came from, for the HUD and the console.
 pub fn envWeatherLabel(e: &LiveEnv): string {
     if (e.cloudSource as i32) == (EnvSource.Live as i32) {
@@ -390,7 +404,13 @@ pub fn envSetPlace(e: &mut LiveEnv, lat: f64, lon: f64, reach: f64, groundM: f64
     e.lon = lon
     e.groundM = groundM
     envRetime(e, 0.0)
+    // Synthetic first so the new place always has A sky, then the real one over
+    // the top if it can be had. A fetch that fails on arrival leaves invented
+    // weather rather than no weather, and the HUD says which it is.
     envSynthWeather(e, reach)
+    if e.liveWanted {
+        let _ = envFetchLive(e, reach)
+    }
 }
 
 // Recompute everything time-dependent. `elapsed` is seconds of wall clock since

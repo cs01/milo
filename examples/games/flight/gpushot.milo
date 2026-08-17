@@ -57,7 +57,7 @@ from "./world3d" import {
     World, heightAt
 }
 from "./live" import {
-    envF64, envLiveRequested, envFetchLive, envWeatherLabel
+    envF64, envLiveRequested, envGoLive, envWeatherLabel
 }
 from "./world3d" import {
     marksFor, worldIn, worldUpdate, SEED
@@ -172,7 +172,7 @@ pub fn main(): i32 {
     // Before the render loop, never inside it: this is several network round
     // trips and the frame path must not be able to block on a public API.
     if envLiveRequested() {
-        if envFetchLive(w.env, w.city.reach) {
+        if envGoLive(w.env, w.city.reach) {
             print("weather: " + envWeatherLabel(w.env))
         } else {
             print("weather: fetch failed, keeping synthetic sky")

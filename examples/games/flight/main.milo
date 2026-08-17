@@ -40,6 +40,9 @@ from "./sound" import {
 from "./textures" import {
     groundTexture, planeTexture, facadeTexture
 }
+from "./live" import {
+    envLiveRequested, envGoLive, envWeatherLabel
+}
 from "./world3d" import {
     worldIn, worldUpdate, worldSetPlace, resetTour, SEED
 }
@@ -347,6 +350,17 @@ pub fn main(): i32 {
     }
     var places = placesFor(o, placeIdx)
     var w = worldIn(SEED, places, easy)
+    // Before the window opens and long before the first frame: this is several
+    // network round trips and nothing on the frame path may ever wait on a public
+    // API. Every place visited afterwards refetches at the place change, which is
+    // already a pause for decoding the next city.
+    if envLiveRequested() {
+        if envGoLive(w.env, w.city.reach) {
+            print("weather: " + envWeatherLabel(w.env))
+        } else {
+            print("weather: fetch failed, using synthetic sky")
+        }
+    }
     if placeIdx >= 0 {
         w.nextName = placeTitle((placeIdx + 1) % PLACE_COUNT)
     }

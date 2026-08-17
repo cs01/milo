@@ -99,6 +99,81 @@ export type Source =
 
 const KNOWN_HOSTS = new Set(["github.com", "gitlab.com", "codeberg.org", "sr.ht"]);
 
+// Does compiler version `version` satisfy a manifest's `milo` constraint?
+//
+// The field existed and NOTHING read it: a package could declare `"milo": ">=0.4.0"`,
+// the manifest would parse, and the compiler would build it anyway. A version bound the
+// author believes is protecting them and that is not checked is worse than no field —
+// it is the silent-success shape, and the whole point of the field is to be the thing
+// that stops a language breaking its users on a Tuesday.
+//
+// Syntax is deliberately small, and anything outside it THROWS rather than being
+// ignored. A constraint that cannot be understood must not silently pass; that is the
+// same failure the field already had.
+//
+//   ">=0.4.0"            a single comparator: >= > <= < = (bare "0.4.0" means =)
+//   "^0.4.0"             caret, npm's pre-1.0 reading: >=0.4.0 <0.5.0
+//                        (below 1.0 the MINOR is the breaking position, so ^0.4.0 does
+//                        NOT admit 0.5.0 — getting this backwards would let a package
+//                        accept the very release that broke it)
+//   ">=0.4.0 <0.6.0"     space- or comma-separated terms, all of which must hold
+//
+// Pre-release and build metadata are not accepted: Milo has never published one, and
+// guessing at precedence rules for a spelling that does not exist would be inventing
+// behaviour rather than implementing it.
+export function satisfiesMiloConstraint(version: string, constraint: string): boolean {
+  const target = parseSemver(version, `compiler version '${version}'`);
+  const terms = constraint.trim().split(/[\s,]+/).filter(Boolean);
+  if (terms.length === 0) throw new Error(`milo.json: 'milo' constraint is empty`);
+  for (const term of terms) {
+    const m = /^(>=|<=|>|<|=|\^)?(\d+\.\d+\.\d+)$/.exec(term);
+    if (!m) {
+      throw new Error(
+        `milo.json: cannot understand the 'milo' constraint ${JSON.stringify(term)} — ` +
+        `use a comparator and a full X.Y.Z version (">=0.4.0", "^0.4.0", "<0.6.0"), ` +
+        `separated by spaces for an AND`);
+    }
+    const op = m[1] ?? "=";
+    const bound = parseSemver(m[2]!, `constraint ${JSON.stringify(term)}`);
+    const c = compareSemver(target, bound);
+    if (op === ">=" && !(c >= 0)) return false;
+    if (op === ">" && !(c > 0)) return false;
+    if (op === "<=" && !(c <= 0)) return false;
+    if (op === "<" && !(c < 0)) return false;
+    if (op === "=" && c !== 0) return false;
+    if (op === "^") {
+      if (c < 0) return false;
+      // Below 1.0 the minor is the breaking position; at or above it, the major is.
+      const upper = bound[0] === 0 ? [bound[0], bound[1] + 1, 0] : [bound[0] + 1, 0, 0];
+      if (compareSemver(target, upper as [number, number, number]) >= 0) return false;
+    }
+  }
+  return true;
+}
+
+function parseSemver(v: string, what: string): [number, number, number] {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v.trim());
+  if (!m) throw new Error(`${what} is not a X.Y.Z version`);
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i]! !== b[i]!) return a[i]! < b[i]! ? -1 : 1;
+  }
+  return 0;
+}
+
+// Throw unless this compiler satisfies `m.milo`. `where` names the package in the
+// message — a failure inside a transitive dependency is useless without it.
+export function checkMiloConstraint(m: Manifest, version: string, where: string): void {
+  if (m.milo === undefined) return;
+  if (satisfiesMiloConstraint(version, m.milo)) return;
+  throw new Error(
+    `${where} requires milo ${m.milo}, but this is milo ${version}\n` +
+    `  upgrade the compiler, or relax the 'milo' constraint in its milo.json`);
+}
+
 // Classify a dependency spec (a milo.json `deps` value) into a tagged Source.
 export function parseSource(spec: string): Source {
   const s = spec.trim();

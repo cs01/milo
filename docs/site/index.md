@@ -120,7 +120,7 @@ fn main() {
 <div class="showcase">
   <div class="showcase-head">
     <h2>Built with Milo</h2>
-    <p>Milo is young (still a puppy 🐶) but we have built a lot with it already. We dogfood the language by writing a variety of real-world programs to prove it works. When we run into expressiveness, correctness, or ergonomics problems, we change the language — that is how we stay on the mission of correct, readable programs.</p>
+    <p>Milo is young - still a puppy 🐶 - but we have built a lot with it already! We dogfood the language by writing a variety of real-world programs to prove it works. This allows for maximum contact with reality, and rapid iteration on things that need improvement. It's ready for you to try today, feedback is appreciated.</p>
   </div>
   <div class="cat cat-emu">
     <h3 class="cat-head">Emulators</h3>

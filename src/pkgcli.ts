@@ -22,9 +22,10 @@ import { randomUUID } from "crypto";
 import {
   parseManifest, stringifyManifest, isPublishable, parseSource, parseLock, stringifyLock,
   sha256Tree, cacheDirForSpec, specUrl, specVersion, fetchLocal, fetchRemote,
-  binRoot, dataRoot, listRemoteTags,
+  binRoot, dataRoot, listRemoteTags, checkMiloConstraint,
   type Manifest, type Lockfile, type LockPackage,
 } from "./pkg";
+import { MILO_VERSION } from "./version";
 
 // What the CLI needs from the compiler. Passed in rather than imported so this
 // module never pulls in main.ts (which would re-run its top-level main()).
@@ -68,6 +69,14 @@ export function findProject(startDir: string): Project | null {
 function requireProject(cwd: string): Project {
   const p = findProject(cwd);
   if (!p) fail("no milo.json found in this directory or any parent — run 'milo init' to create one");
+  // The project's own `milo` bound, checked before any command acts on it. Until this
+  // existed the field parsed and was never read, so a bound the author wrote to protect
+  // themselves did nothing at all.
+  try {
+    checkMiloConstraint(p.manifest, MILO_VERSION, "this project");
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
   return p;
 }
 
@@ -199,6 +208,17 @@ async function resolveGraph(root: Project, existing: Lockfile | null, opts: Reso
     const force = opts.refresh === "all" || opts.refresh.has(name);
     const { dir, commit } = await ensurePresent(spec, root.dir, force);
     const manifest = readManifestAt(dir);
+    if (manifest) {
+      // A dependency's bound is checked here rather than at build time: this is where the
+      // tree is first known, and the message can name which package objected. Discovering
+      // it later, as a type error inside code the user never wrote, is the bad version of
+      // this failure.
+      try {
+        checkMiloConstraint(manifest, MILO_VERSION, `package '${name}'`);
+      } catch (e) {
+        fail(e instanceof Error ? e.message : String(e));
+      }
+    }
     if (manifest && manifest.lib === undefined && manifest.bin !== undefined) {
       fail(binOnlyMessage(manifest.name, spec));
     }

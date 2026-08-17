@@ -305,9 +305,20 @@ pub extern fn makecontext(ucp: *u8, func: *u8, argc: i32,...): void
 
 pub extern fn swapcontext(oucp: *u8, ucp: *u8): i32
 
-// sizeof(ucontext_t) on linux x86_64
+// An UPPER BOUND on sizeof(ucontext_t) across Linux architectures, not the exact
+// size on any one of them. This buffer is what getcontext() fills in, so too
+// small is a heap overflow: 968 is x86_64's size, and on aarch64 the same struct
+// is 4560 bytes because its mcontext_t carries a 4096-byte __reserved area for
+// FP/SVE state. Every aarch64 Linux binary therefore wrote ~3.6KB past a
+// malloc'd block and aborted with glibc's "free(): invalid next size (fast)" at
+// teardown — after running correctly, which is what made it look like an
+// unrelated crash.
+//
+// The three offsets below are the same on x86_64 and aarch64, so only the
+// allocation needed fixing. Over-allocating is free here: one of these accompanies
+// an 8MB task stack.
 pub fn uctxSize(): i64 {
-    return 968
+    return 8192
 }
 
 pub fn uctxStackPtrOffset(): i64 {

@@ -5,6 +5,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSyn
 import { tmpdir } from "os";
 import { join } from "path";
 import {
+  satisfiesMiloConstraint,
+  checkMiloConstraint,
   parseManifest,
   stringifyManifest,
   isPublishable,
@@ -248,5 +250,63 @@ describe("fetchLocal", () => {
     expect(readFileSync(join(dest, "src", "extra.milo"), "utf-8")).toBe("fn helper() {}");
     // a valid manifest survives the copy
     expect(parseManifest(readFileSync(join(dest, "milo.json"), "utf-8")).name).toBe("bar");
+  });
+});
+
+// The `milo` constraint — a manifest's compiler-version bound.
+//
+// It existed as a parsed-and-ignored field: a package could declare `">=0.4.0"` and be
+// built by any compiler at all. A bound the author believes is protecting them and that
+// nothing checks is worse than no field, so these pin both halves — that it holds, and
+// that a spelling we cannot read is an ERROR rather than a pass.
+describe("milo compiler constraint", () => {
+  test("comparators", () => {
+    expect(satisfiesMiloConstraint("0.4.0", ">=0.4.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.3.9", ">=0.4.0")).toBe(false);
+    expect(satisfiesMiloConstraint("0.4.1", ">0.4.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.4.0", ">0.4.0")).toBe(false);
+    expect(satisfiesMiloConstraint("0.4.0", "<=0.4.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.4.1", "<0.5.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.5.0", "<0.5.0")).toBe(false);
+  });
+
+  test("a bare version means exactly that version", () => {
+    expect(satisfiesMiloConstraint("0.4.0", "0.4.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.4.1", "0.4.0")).toBe(false);
+  });
+
+  test("caret below 1.0 treats the MINOR as the breaking position", () => {
+    // The one that matters, and the one easy to get backwards. npm's pre-1.0 reading:
+    // ^0.4.0 is >=0.4.0 <0.5.0. Admitting 0.5.0 would let a package accept the very
+    // release that broke it, which is the opposite of what the field is for.
+    expect(satisfiesMiloConstraint("0.4.0", "^0.4.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.4.9", "^0.4.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.5.0", "^0.4.0")).toBe(false);
+    expect(satisfiesMiloConstraint("0.3.9", "^0.4.0")).toBe(false);
+    // At or above 1.0 the major is the breaking position again.
+    expect(satisfiesMiloConstraint("1.9.0", "^1.2.0")).toBe(true);
+    expect(satisfiesMiloConstraint("2.0.0", "^1.2.0")).toBe(false);
+  });
+
+  test("space- or comma-separated terms are an AND", () => {
+    expect(satisfiesMiloConstraint("0.5.0", ">=0.4.0 <0.6.0")).toBe(true);
+    expect(satisfiesMiloConstraint("0.6.0", ">=0.4.0 <0.6.0")).toBe(false);
+    expect(satisfiesMiloConstraint("0.5.0", ">=0.4.0,<0.6.0")).toBe(true);
+  });
+
+  test("a constraint we cannot read is an error, never a silent pass", () => {
+    // Failing open here would recreate the original bug with extra steps.
+    for (const bad of ["~0.4", "0.4", ">=0.4", "latest", "*", ">= 0.4.0 || <0.2.0", ""]) {
+      expect(() => satisfiesMiloConstraint("0.4.0", bad)).toThrow();
+    }
+  });
+
+  test("checkMiloConstraint is a no-op when the field is absent", () => {
+    expect(() => checkMiloConstraint({ name: "p", version: "1.0.0" }, "0.1.0", "p")).not.toThrow();
+  });
+
+  test("checkMiloConstraint names the package and both versions", () => {
+    expect(() => checkMiloConstraint({ name: "p", version: "1.0.0", milo: ">=9.0.0" }, "0.1.0", "package 'p'"))
+      .toThrow(/package 'p' requires milo >=9\.0\.0, but this is milo 0\.1\.0/);
   });
 });

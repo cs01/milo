@@ -310,15 +310,35 @@ float cloudNoise3(vec3 p) {
                mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
 }
 
-// Three octaves. A fourth is visible only from inside a cloud and costs as much
-// as the first three together.
+// Two octaves. It was three; the third went to pay for the domain warp below,
+// which buys far more apparent detail per sample than another octave does.
 float cloudFbm3(vec3 p) {
     float v = 0.5 * cloudNoise3(p);
     p *= 2.03;
     v += 0.25 * cloudNoise3(p);
-    p *= 2.11;
-    v += 0.125 * cloudNoise3(p);
-    return v / 0.875;
+    return v / 0.75;
+}
+
+// Where to READ the coverage grid for a point, which is not quite where the point
+// is.
+//
+// The grid is a square lattice about 150 m on a side. Sampled straight, every
+// feature in the sky inherits that lattice: coverage changes across a cell
+// boundary, so the cloud has a vertical wall there, and the walls are all
+// parallel to two axes. From inside a layer that reads as a room full of boxes,
+// and no amount of eroding the surface fixes it, because the erosion is riding on
+// top of a fundamentally rectangular field.
+//
+// Warping the lookup with low-frequency noise bends those boundaries into curves
+// before anything is read, so the lattice stops being expressible in the output at
+// all. The displacement is a few hundred metres, which is well under the 2-4 km
+// the satellite actually resolves — it moves cloud within the uncertainty of the
+// measurement, not away from it.
+vec2 cloudWarp(vec3 p) {
+    vec3 w = p * 0.00045;
+    float a = cloudNoise3(w);
+    float b = cloudNoise3(w + vec3(23.7, 11.3, 5.9));
+    return (vec2(a, b) - 0.5) * 700.0;
 }
 
 // How much cloud is at a point, 0 to 1.
@@ -331,7 +351,7 @@ float cloudFbm3(vec3 p) {
 // overcast layer is a flat grey lid, and that flatness is what makes it read as
 // overcast rather than as a lot of separate clouds.
 float cloudDensity(vec3 p) {
-    vec3 c = texture(uCloudTex, cloudUv(p.xz)).rgb;
+    vec3 c = texture(uCloudTex, cloudUv(p.xz + cloudWarp(p))).rgb;
     float cover = c.r;
     float top = max(c.g, uCloudBase + 40.0);
 
@@ -348,21 +368,62 @@ float cloudDensity(vec3 p) {
         float rain = c.b;
         if (rain <= 0.01) { return 0.0; }
         float f = clamp(p.y / max(uCloudBase, 1.0), 0.0, 1.0);
-        return rain * 0.42 * (0.30 + 0.70 * f) * uCloudDensity;
+        // Eroded in 3D, for the same reason the cloud above it is.
+        //
+        // This was the radar cell times a height ramp and nothing else, which is
+        // separable and therefore a box — the identical mistake made below the
+        // base as above it, and the more obvious of the two because a shaft is
+        // seen against open sky. Rain is streaky rather than billowy, so the noise
+        // is stretched vertically: sampled at a higher frequency across than
+        // along, which is what makes falling water read as falling.
+        vec3 rq = vec3(p.x, p.y * 0.35, p.z) * 0.0019
+                + vec3(uCloudWind.x, 0.0, uCloudWind.y) * uTime * 0.0007;
+        float d = rain * (0.30 + 0.70 * f) - 0.50 * cloudFbm3(rq);
+        return clamp(d, 0.0, 1.0) * 0.65 * uCloudDensity;
     }
     if (cover <= 0.002) { return 0.0; }
-    if (p.y > top) { return 0.0; }
+    // Generous early-out before the noise, since the real top is about to be
+    // pushed around by it.
+    if (p.y > top * 1.20 + 200.0) { return 0.0; }
 
-    float h = (p.y - uCloudBase) / max(top - uCloudBase, 1.0);
+    vec3 q = p * 0.0011 + vec3(uCloudWind.x, 0.0, uCloudWind.y) * uTime * 0.0004;
+    float detail = cloudFbm3(q);
+
+    // The top wanders within the cell instead of sitting flat at the grid value.
+    //
+    // The grid stores one cloud-top height per cell. Taken literally that is a
+    // plateau a hundred and fifty metres across with a vertical drop to the next
+    // one, and a layer of those is a field of BOXES — which is exactly what it
+    // looked like from inside an overcast.
+    float thick = max(top - uCloudBase, 1.0);
+    float topN = top + (detail - 0.5) * thick * 0.55;
+    if (p.y > topN) { return 0.0; }
+
+    float h = (p.y - uCloudBase) / max(topN - uCloudBase, 1.0);
     // Flat bottom, rounded top. A cumulus base is a sharp plane — it is the
     // altitude where rising air reaches its dew point, and that altitude is the
     // same everywhere the air came from the same place — while the top is where
     // the rising parcel ran out of buoyancy, which is gradual.
-    float prof = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.45, 1.0, h));
+    float prof = smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(0.30, 1.0, h));
 
-    vec3 q = p * 0.0011 + vec3(uCloudWind.x, 0.0, uCloudWind.y) * uTime * 0.0004;
-    float detail = cloudFbm3(q);
-    float d = cover * prof - (1.0 - cover) * detail * 0.85;
+    // The height profile shapes the COVERAGE, and the noise is then subtracted
+    // from that — not from the density afterwards.
+    //
+    // This is the difference between a cloud and a box, and it took three attempts
+    // to see. The old form was `cover(x,z) * profile(y) - noise`, which is
+    // SEPARABLE: the horizontal outline is whatever the coverage grid says at
+    // every altitude equally, so every cloud is a prism with vertical walls and a
+    // flat lid. Eroding its surface cannot help, because the shape underneath is
+    // rectangular by construction — which is why chewing the edges and warping the
+    // lookup both left the boxes standing.
+    //
+    // Multiplying the profile INTO the coverage before the subtraction makes the
+    // outline shrink toward the base and the top, so the silhouette is a different
+    // shape at every height, and the 3D noise then bites hardest exactly where the
+    // coverage has been thinned. That is what produces a billow instead of a wall.
+    float shaped = cover * prof;
+    float erode = mix(0.42, 0.95, 1.0 - cover);
+    float d = shaped - erode * detail;
     return clamp(d, 0.0, 1.0) * uCloudDensity;
 }
 
@@ -402,7 +463,7 @@ float cloudPhase(float ct, float g) {
 // samples of three-octave noise against the main march's one, so it was doing
 // four fifths of the work to compute a number that is deliberately blurry.
 float cloudDensityLite(vec3 p) {
-    vec3 c = texture(uCloudTex, cloudUv(p.xz)).rgb;
+    vec3 c = texture(uCloudTex, cloudUv(p.xz + cloudWarp(p))).rgb;
     float cover = c.r;
     if (cover <= 0.002) { return 0.0; }
     float top = max(c.g, uCloudBase + 40.0);

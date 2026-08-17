@@ -3893,9 +3893,8 @@ export class TypeChecker {
   // freeze taken while checking the RHS onto the binding (VarInfo.freezes), released when
   // its scope pops — this only has to mark the root.
   private freezeViewSource(obj: Expr, sp?: Span, viewFields?: string[]) {
-    let root = obj;
-    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-    if (root.kind !== "Ident") {
+    const rootName = this.rootNameOf(obj);
+    if (rootName === null) {
       // No binding to freeze: `makeRing().items()` views storage owned by a temporary.
       // That only survives today because temporaries are never dropped (they leak) —
       // it becomes a use-after-free the moment they get drop glue.
@@ -3903,7 +3902,7 @@ export class TypeChecker {
         `the '&[T]' would outlive the value it points into — bind the receiver first ('let r = makeRing()') and take the view from that`);
       return;
     }
-    const info = this.lookup(root.name);
+    const info = this.lookup(rootName);
     if (info) {
       // freeze the receiver path extended by the field the method views, so a view of
       // `r.items()` that returns `self.data[..]` blocks writes to `r.data` and nothing else
@@ -5485,10 +5484,9 @@ export class TypeChecker {
   // mutated in place, record that so the value isn't move-captured out from
   // under the caller (which still needs to see the mutation / drop it).
   private markCaptureMutated(expr: Expr) {
-    let e: Expr = expr;
-    while (e.kind === "FieldAccess" || e.kind === "IndexAccess") e = e.object;
-    if (e.kind === "Ident" && this.closureScopeDepth !== null) {
-      const cap = this.currentClosureCaptures?.get(e.name);
+    const capRoot = this.rootNameOf(expr);
+    if (capRoot !== null && this.closureScopeDepth !== null) {
+      const cap = this.currentClosureCaptures?.get(capRoot);
       if (cap) cap.mutatedInClosure = true;
     }
   }
@@ -5812,6 +5810,14 @@ export class TypeChecker {
   // grammar and fails closed, so a new `Expr` kind inherits this rule instead of escaping
   // it. Returns null when the place has no single named root, which is the honest answer
   // and leaves the caller no worse off than the hand-rolled walk did.
+  // The root binding a place is reached from, resolved through the place walker. Replaces
+  // the hand-rolled `while (kind === "FieldAccess" || kind === "IndexAccess")` loops, each
+  // of which knew exactly two ways to step toward a root and silently answered "no root"
+  // for anything spelled otherwise.
+  private rootNameOf(e: Expr): string | null {
+    return this.accessPath(e)?.root ?? null;
+  }
+
   private freezeRootOf(place: Expr, kind: BorrowKind = "view"): import("./checker").VarInfo | null {
     const ap = this.accessPath(place);
     if (!ap) return null;
@@ -5888,6 +5894,7 @@ export class TypeChecker {
   // the honest answer is that the value cannot be taken apart.
   private dropTypeInPath(e: Expr): string | null {
     let cur: Expr = e;
+    // ident-ok: inspects the TYPE at each step, not just the root, so it needs the walk itself; a root-only resolver would lose the intermediate types this rule is about
     while (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") {
       cur = cur.object;
       const t = this.exprTypes.get(cur);
@@ -6014,10 +6021,9 @@ export class TypeChecker {
   // realloc hazard as for-in. Returns the VarInfo to release afterward, or null
   // if an outer borrow already owns the freeze.
   private borrowDuringCallback(obj: Expr): VarInfo | null {
-    let e = obj;
-    while (e.kind === "FieldAccess" || e.kind === "IndexAccess") e = e.object;
-    if (e.kind !== "Ident") return null;
-    const info = this.lookup(e.name);
+    const cbRoot = this.rootNameOf(obj);
+    if (cbRoot === null) return null;
+    const info = this.lookup(cbRoot);
     if (!info || info.borrowed) return null;
     this.freeze(info, obj);
     return info;
@@ -9072,13 +9078,12 @@ export class TypeChecker {
   // through. Only copy binds are refused: a moved (non-Copy) binding owns its value, so
   // its writes are real — six shipped programs rely on that.
   private errorIfCopyBind(recv: Expr, method: string, sp?: Span): void {
-    let root: Expr = recv;
-    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-    if (root.kind !== "Ident") return;
-    const info = this.lookup(root.name);
+    const cbindRoot = this.rootNameOf(recv);
+    if (cbindRoot === null) return;
+    const info = this.lookup(cbindRoot);
     if (!info?.copyBind) return;
     this.error(
-      `'${method}' takes '&mut self', but '${root.name}' is a copy of the matched payload — the write would be discarded`,
+      `'${method}' takes '&mut self', but '${cbindRoot}' is a copy of the matched payload — the write would be discarded`,
       sp,
       `a pattern binding of a Copy type is a snapshot, not a view into the enum. Match on a reference, or rebuild the enum from the method's result.`);
   }
@@ -9145,9 +9150,7 @@ export class TypeChecker {
   }
 
   private isPlaceExpr(e: Expr): boolean {
-    let root: Expr = e;
-    while (root.kind === "FieldAccess" || root.kind === "IndexAccess") root = root.object;
-    return root.kind === "Ident";
+    return this.rootNameOf(e) !== null;
   }
 
   private payloadBindType(bt: TypeKind, subjBorrows: boolean): TypeKind {
@@ -9512,6 +9515,7 @@ export class TypeChecker {
   // If `e` is an identifier bound to a still-flexible const-int `let`, return
   // its VarInfo (so a use site can widen it); otherwise null.
   private flexIntBinding(e: Expr): VarInfo | null {
+    // ident-ok: asks whether a NAME is bound to a still-flexible const-int literal, which is a property of the binding rather than of storage
     if (e.kind !== "Ident") return null;
     const info = this.lookup(e.name);
     return info?.flexInt ? info : null;

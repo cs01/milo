@@ -29,12 +29,26 @@ test("resolving a variable by matching Ident is exempted only with a written rea
   const unexplained: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    if (!/\.kind === "Ident"/.test(lines[i])) continue;
-    // The pattern that matters is "decide which variable this is, then look it up".
-    // A bare kind test that never reaches a binding is not this bug.
-    if (!lines.slice(i, i + 4).join("\n").includes("this.lookup(")) continue;
+    // Two spellings of the same habit, and the first version of this gate caught only the
+    // first — which is the very defect it exists to prevent, committed in the gate:
+    //
+    //   1. deciding WHICH variable an expression names, then looking it up
+    //   2. hand-rolling the walk to a root by stepping over the node kinds someone
+    //      remembered — `while (e.kind === "FieldAccess" || e.kind === "IndexAccess")`
+    //
+    // The second is the one that produced the use-after-free: such a walk knows exactly
+    // two ways to reach a place, so anything spelled differently (an unwrap, a cast, the
+    // tail of a fork) resolves to no root and the rule silently does not run. Note both
+    // `===` and `!==` count: `if (root.kind !== "Ident") return` is the same decision.
+    const identTest = /\.kind (===|!==) "Ident"/.test(lines[i])
+      && lines.slice(i, i + 4).join("\n").includes("this.lookup(");
+    const handRolledWalk = /while \([^)]*kind === "FieldAccess"[^)]*kind === "IndexAccess"/.test(lines[i]);
+    if (!identTest && !handRolledWalk) continue;
+    // A line that only DESCRIBES the pattern (this file's own prose lives in checker.ts's
+    // comments too) is not an instance of it.
+    if (/^\s*(\/\/|\*)/.test(lines[i])) continue;
     // The reason may sit on the line itself or in the comment block just above it.
-    const window = lines.slice(Math.max(0, i - 4), i + 1).join("\n");
+    const window = lines.slice(Math.max(0, i - 5), i + 1).join("\n");
     if (window.includes("ident-ok:")) continue;
     unexplained.push(`checker.ts:${i + 1}: ${lines[i].trim().slice(0, 90)}`);
   }

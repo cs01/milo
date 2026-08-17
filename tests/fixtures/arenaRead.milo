@@ -1,0 +1,52 @@
+// `Arena.read` — the borrowing read, and the reason it exists.
+//
+// `a.get(h)` returns `Option<T>` by value, which for any T that owns heap is an
+// allocation on EVERY read: measured at 20ms per 200k reads of the node below, against
+// ~0 for this path. That gap is not academic — it is why real programs (milojs's whole
+// object graph is `JSValue.Obj(i64)`, a bare index into a Vec) reach past generational
+// handles for an unchecked integer. The blessed idiom has to be the fast one or it does
+// not get used.
+//
+// `arenaWith` is the more natural spelling and cannot be a method: its result type is a
+// parameter of the METHOD rather than of Arena, and a method's own type parameter is
+// never inferred at the call site. `read` returns bool and takes the value out through a
+// captured var, so it has no such parameter and gets a method form today.
+// @expect: true
+// @expect: 42
+// @expect: false
+// @expect: 42
+
+from "std/arena" import {
+    Arena, Handle
+}
+
+struct Node {
+    a: i64,
+    tag: string,
+    kids: Vec<i64>,
+}
+
+fn main() {
+    var ar: Arena<Node> = Arena<Node>.new()
+    var kids: Vec<i64> = Vec.new()
+    kids.push(9)
+    let h = ar.alloc(Node {
+        a: 41, tag: "n", kids: kids
+    }
+    )
+
+    var out = 0
+    print(ar.read(h, (v: &Node) => {
+        out = v.a + 1
+    }
+    ))
+    print(out)
+
+    // A stale handle does not call the closure, so `out` keeps its old value.
+    ar.free(h)
+    print(ar.read(h, (v: &Node) => {
+        out = 999
+    }
+    ))
+    print(out)
+}

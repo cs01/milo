@@ -41,14 +41,21 @@ fn Arena.get(self: &Arena, h: Handle<T>): Option<T>
 
 A COPY of the value at `h`, or None if `h` is stale.
 
-This copies the whole T out of the slot every call — reading one field of
-a large T clones the rest with it. To read without copying, use the free
-function arenaWith(self, h, f), which lends `&T` to a closure:
+This copies the whole T out of the slot every call, and for any T that owns
+heap that copy is an ALLOCATION, not a few words — 20ms per 200k reads of a
+node with one Vec field, against ~0 for the borrowing paths. Reach for it
+only when T is plain scalars or you genuinely want an owned copy.
 
-    let n = arenaWith(a, h, (v: &Node): i64 => v.edges.len)
+To read without copying, use `read`, which lends `&T` to a closure and
+takes the answer out through a captured var:
 
-It has no method form because a method with its own type parameter (the
-closure's return type) cannot infer it at the call site today.
+    var edges = 0
+    a.read(h, (v: &Node) => { edges = v.edges.len })
+
+The more natural `let n = arenaWith(a, h, (v: &Node): i64 => v.edges.len)`
+exists as a free function only: its result is a type parameter of the
+METHOD rather than of Arena, and a method's own type parameter is never
+inferred at the call site.
 
 ### `Arena.handles`
 
@@ -85,9 +92,7 @@ is large or you touch only a field or two.
 fn Arena.modifyMut(self: &mut Arena, h: Handle<T>, f: (&mut T) => void): bool
 ```
 
-Mutate the live value in place through `&mut T`. No copy in, no copy out.
-False (and `f` not called) if `h` is stale. This is the write counterpart
-to arenaWith and the right default for large T.
+_Undocumented._
 
 ### `Arena.new`
 
@@ -97,6 +102,20 @@ fn Arena.new(): Arena<T>
 
 A new empty arena with a fresh identity. Spell the type argument
 (`Arena<Node>.new()`); a bare `Arena.new()` cannot infer T.
+
+### `Arena.read`
+
+```milo
+fn Arena.read(self: &Arena, h: Handle<T>, f: (&T) => void): bool
+```
+
+Mutate the live value in place through `&mut T`. No copy in, no copy out.
+False (and `f` not called) if `h` is stale. This is the write counterpart
+to arenaWith and the right default for large T.
+Read the value at `h` by BORROW — no copy. Prefer this to `get` for any T
+that owns heap (a string, a Vec, a nested struct): `get` clones the whole
+value out of the slot on every call. False (and `f` not called) if `h` is
+stale. Take the result out through a captured `var`.
 
 ### `Arena.set`
 
@@ -203,6 +222,31 @@ pub fn arenaNew<T>(): Arena<T>
 ```
 
 Create a new empty arena.
+
+### `arenaRead`
+
+```milo
+pub fn arenaRead<T>(a: &Arena<T>, h: Handle<T>, f: (&T) => void): bool
+```
+
+Read via borrow with a VOID callback — the same zero-copy read as arenaWith,
+in the one shape that also has a method form (`a.read(h, f)`).
+
+arenaWith is the more natural spelling and cannot be a method: its result type
+is a type parameter of the METHOD rather than of Arena, and a method's own type
+parameter is never inferred at the call site — `a.with(h, f)` reports
+"type 'Arena_Node' has no method 'with'". This one returns bool, so it has no
+such parameter. Take the value out through a captured `var`:
+
+    var name = ""
+    a.read(h, (v: &Node) => { name = v.name.clone() })
+
+Why this matters more than it looks: `a.get(h)` COPIES the whole T out of the
+slot, which for any T with an owning field is a heap allocation per read —
+measured at 20ms per 200k reads of a node with one Vec field, against ~0 for
+the borrowing paths. That gap is why real programs reach for a bare index into
+a Vec instead of a Handle, so the ergonomic read path is the one that decides
+whether generational safety gets used at all.
 
 ### `arenaSet`
 

@@ -146,14 +146,25 @@ float sunVisibility(vec3 world, vec3 n, float ndl) {
     float bias = 0.00035;
     float sum = 0.0;
     float texel = 1.0 / 2048.0;
-    for (int y = -1; y <= 1; y++) {
-        for (int x = -1; x <= 1; x++) {
-            vec2 o = vec2(float(x), float(y)) * texel * 1.15;
-            float d = decodeDepth(texture(uShadow, proj.xy + o).rg);
-            sum += (proj.z - bias <= d) ? 1.0 : 0.0;
-        }
+    // A twelve-tap Poisson disc, rotated per pixel. A 3x3 box at one texel is
+    // three pixels of gradient and reads as a hard edge with stair steps on it;
+    // spreading the same idea over a disc and dithering the rotation turns the
+    // steps into noise the eye reads as a soft edge.
+    vec2 disc[12] = vec2[12](
+        vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696,  0.457),
+        vec2(-0.203,  0.621), vec2( 0.962, -0.195), vec2( 0.473, -0.480),
+        vec2( 0.519,  0.767), vec2( 0.185, -0.893), vec2( 0.507,  0.064),
+        vec2( 0.896,  0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));
+    float ang = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    float cs = cos(ang);
+    float sn = sin(ang);
+    for (int i = 0; i < 12; i++) {
+        vec2 d2 = vec2(disc[i].x * cs - disc[i].y * sn, disc[i].x * sn + disc[i].y * cs);
+        vec2 o = d2 * texel * 2.1;
+        float d = decodeDepth(texture(uShadow, proj.xy + o).rg);
+        sum += (proj.z - bias <= d) ? 1.0 : 0.0;
     }
-    return sum / 9.0;
+    return sum / 12.0;
 }
 "
 
@@ -239,6 +250,43 @@ void main() {
 }
 "
 
+// ── depth + normal prepass ────────────────────────────────────────────────────
+
+// SSAO needs to know, for every pixel, where the surface is and which way it
+// faces. The scene pass cannot supply that: it is forward-lit into an HDR colour
+// buffer, and the gl package attaches depth as a renderbuffer, which is not
+// sampleable. So the geometry is drawn once more, cheaply, into a buffer holding
+// view-space distance in the red channel and the view-space normal in the rest.
+pub let DEPTH_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aUv;
+layout (location = 3) in vec3 aTint;
+layout (location = 4) in float aAo;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uModel;
+out vec3 vViewPos;
+out vec3 vViewNormal;
+void main() {
+    vec4 vp = uView * uModel * vec4(aPos, 1.0);
+    vViewPos = vp.xyz;
+    vViewNormal = mat3(uView) * (mat3(uModel) * aNormal);
+    gl_Position = uProj * vp;
+}
+"
+
+pub let DEPTH_FRAG: string = "#version 330 core
+in vec3 vViewPos;
+in vec3 vViewNormal;
+out vec4 fragColor;
+void main() {
+    // Distance along the view axis, positive in front of the eye. Zero means
+    // nothing was drawn here, which is how the AO pass recognises the sky.
+    fragColor = vec4(-vViewPos.z, normalize(vViewNormal));
+}
+"
+
 pub fn sceneFrag(): string {
     return "#version 330 core
 in vec3 vWorld;
@@ -259,6 +307,9 @@ uniform float uAlpha;
 uniform float uNormalStrength;
 uniform float uDetail;
 uniform float uDebug;
+uniform sampler2D uAo;
+uniform vec2 uAoTexel;
+uniform float uAoAmount;
 "
 
     + CHUNK_SKY + CHUNK_LIGHT + CHUNK_SHADOW + "
@@ -341,6 +392,12 @@ void main() {
     // Ambient: diffuse from the sky's irradiance, specular from the sky itself
     // in the mirror direction, blurred by roughness through the mip chain.
     float ao = clamp(vAo * (0.35 + 0.65 * surf.a * 0.0 + 0.65), 0.0, 1.0);
+    // Screen-space occlusion, on top of the AO baked into the mesh. It only
+    // touches ambient: the sun is a single direction and is already occluded by
+    // the shadow map, and darkening direct sunlight with a screen-space guess is
+    // what makes an SSAO pass look like dirt sprayed on the frame.
+    float ssao = texture(uAo, gl_FragCoord.xy * uAoTexel).r;
+    ao *= mix(1.0, ssao, uAoAmount);
     vec3 amb = ambientIrradiance(n) * albedo * (1.0 - metal) * ao / PI;
     vec3 r = reflect(-v, n);
     vec3 envSpec = skyLookup(r, rough * 7.0) * fresnel(ndv, f0);
@@ -359,6 +416,12 @@ void main() {
     col = mix(col, skyLookup(-v, 2.0), ext * 0.9);
 
     fragColor = vec4(col, uAlpha);
+    // --debug 3 shows the occlusion buffer on its own, which is the only way to
+    // tell a working AO pass from a pass that is silently returning white.
+    if (uDebug > 2.5) {
+        fragColor = vec4(vec3(ssao), 1.0);
+        return;
+    }
     if (uDebug > 0.5) {
         // uv sanity: the raw coordinate as colour, and the mip level the driver
         // picks for it. A ground that blurs where it should be sharp is one of

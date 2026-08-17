@@ -137,6 +137,98 @@ void main() {
 }
 "
 
+// ── screen-space ambient occlusion ────────────────────────────────────────────
+
+// How much light a point can see of the sky, estimated from the depth buffer
+// alone: sample a hemisphere of points around it, and count how many of them are
+// behind geometry the camera can see. It is a guess, but it is the guess that
+// puts a dark line where a post meets a boardwalk, and that line is most of what
+// separates a rendered box from a photographed one.
+pub let SSAO_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uDN;
+uniform vec2 uTanHalf;
+uniform float uRadius;
+uniform float uStrength;
+
+// View position from the packed distance: the direction through this pixel,
+// scaled to the recorded distance.
+vec3 viewPos(vec2 uv, float vz) {
+    vec2 ndc = uv * 2.0 - 1.0;
+    return vec3(ndc.x * uTanHalf.x * vz, ndc.y * uTanHalf.y * vz, -vz);
+}
+
+vec2 project(vec3 p) {
+    float vz = max(-p.z, 1e-4);
+    return vec2(p.x / (uTanHalf.x * vz), p.y / (uTanHalf.y * vz)) * 0.5 + 0.5;
+}
+
+void main() {
+    vec4 dn = texture(uDN, vUv);
+    float vz = dn.r;
+    // Sky. Nothing occludes it, and reconstructing a position from a zero
+    // distance would put the samples on top of the eye.
+    if (vz <= 0.0001) { fragColor = vec4(1.0); return; }
+    vec3 p = viewPos(vUv, vz);
+    vec3 n = normalize(dn.gba);
+
+    vec3 kernel[12] = vec3[12](
+        vec3( 0.539,  0.316,  0.290), vec3(-0.288,  0.611,  0.334),
+        vec3(-0.472, -0.402,  0.482), vec3( 0.190, -0.716,  0.201),
+        vec3( 0.766, -0.156,  0.484), vec3(-0.712,  0.196,  0.610),
+        vec3( 0.117,  0.324,  0.834), vec3(-0.135, -0.246,  0.706),
+        vec3( 0.396,  0.585,  0.548), vec3(-0.606, -0.549,  0.276),
+        vec3( 0.028, -0.487,  0.556), vec3( 0.335, -0.104,  0.286));
+
+    // A per-pixel rotation of the kernel. Twelve fixed samples show up as twelve
+    // bands; the same twelve turned by a different angle at each pixel show up as
+    // noise, and the blur pass after this one eats noise.
+    float ang = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    vec3 rv = vec3(cos(ang), sin(ang), 0.0);
+    vec3 t = normalize(rv - n * dot(rv, n));
+    vec3 b = cross(n, t);
+    mat3 tbn = mat3(t, b, n);
+
+    float occ = 0.0;
+    for (int i = 0; i < 12; i++) {
+        float sc = 0.25 + 0.75 * float(i) / 12.0;
+        vec3 sp = p + (tbn * kernel[i]) * (uRadius * sc * sc);
+        vec2 su = project(sp);
+        if (su.x < 0.0 || su.x > 1.0 || su.y < 0.0 || su.y > 1.0) continue;
+        float sz = texture(uDN, su).r;
+        if (sz <= 0.0001) continue;
+        float sampleZ = -sp.z;
+        // The range check is what stops a near object from carving a shadow into
+        // a wall ten metres behind it: a sample only counts if the surface it
+        // lands on is within the radius of the point being shaded.
+        float range = smoothstep(0.0, 1.0, uRadius / max(abs(sampleZ - sz), 1e-4));
+        occ += (sz < sampleZ - 0.02) ? range : 0.0;
+    }
+    float ao = 1.0 - (occ / 12.0) * uStrength;
+    fragColor = vec4(clamp(ao, 0.0, 1.0));
+}
+"
+
+// A box blur wide enough to erase the sample noise, in one pass because the AO
+// buffer is a quarter of the scene's pixels and separability is not worth a
+// second target.
+pub let AO_BLUR_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+void main() {
+    float sum = 0.0;
+    for (int y = -2; y <= 2; y++) {
+        for (int x = -2; x <= 2; x++) {
+            sum += texture(uSrc, vUv + vec2(float(x), float(y)) * uTexel).r;
+        }
+    }
+    fragColor = vec4(sum / 25.0);
+}
+"
+
 // Screen-space quads for the HUD: position in pixels, uv into the font atlas,
 // and a colour per vertex. One draw call for the whole overlay.
 pub let HUD_VERT: string = "#version 330 core

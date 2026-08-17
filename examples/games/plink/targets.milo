@@ -219,10 +219,14 @@ fn placeRigs(): Vec<Rig> {
             hold: 0.0,
             broken: false,
             cooldown: 0.0,
+            // A little wider than the mesh. The targets stand ten to twenty
+            // metres off, where a bottle is a few pixels across, and a shot that
+            // visibly clipped the glass reading as a miss is what made this feel
+            // unfair rather than hard.
             hitRadius: if kind == KIND_BOTTLE {
-                0.17
+                0.22
             } else {
-                0.21
+                0.26
             }
             ,
         }
@@ -376,26 +380,40 @@ impl Targets {
             }
         }
 
-        if running {
-            self.sinceSpawn = self.sinceSpawn + dt
-            let want = 3 + (pressure * 3.2) as i64
-            let gap = 0.80 - 0.48 * pressure
-            if self.liveCount() < want && self.sinceSpawn > gap {
-                self.sinceSpawn = 0.0
-                // Pick among the rigs that are down and off cooldown. Rejection
-                // sampling over a list of seventeen is cheaper than building the
-                // candidate list every time.
-                var tries = 0
-                while tries < 24 {
-                    let k = self.rng.int(self.rigs.len)
-                    if self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
-                        let hold = (1.85 - 0.75 * pressure) * self.rng.range(0.85, 1.2)
-                        self.raise(k, hold)
-                        self.rigs[k].cooldown = 1.4
-                        break
+        // The street is never empty. With no round running the rigs still come
+        // up, two at a time and for a long hold, so someone who has just
+        // launched the game can see what a target is and shoot a few before the
+        // clock ever starts.
+        self.sinceSpawn = self.sinceSpawn + dt
+        let want = if running {
+            3 + (pressure * 2.6) as i64
+        } else {
+            2
+        }
+        let gap = if running {
+            0.85 - 0.45 * pressure
+        } else {
+            1.30
+        }
+        if self.liveCount() < want && self.sinceSpawn > gap {
+            self.sinceSpawn = 0.0
+            // Pick among the rigs that are down and off cooldown. Rejection
+            // sampling over a list of seventeen is cheaper than building the
+            // candidate list every time.
+            var tries = 0
+            while tries < 24 {
+                let k = self.rng.int(self.rigs.len)
+                if self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
+                    let hold = if running {
+                        (2.35 - 0.85 * pressure) * self.rng.range(0.85, 1.2)
+                    } else {
+                        5.0
                     }
-                    tries = tries + 1
+                    self.raise(k, hold)
+                    self.rigs[k].cooldown = 1.4
+                    break
                 }
+                tries = tries + 1
             }
         }
 
@@ -566,6 +584,23 @@ impl Targets {
                 } else {
                     gfx.sceneDraw(self.plateMesh, fm, self.plateMat)
                 }
+            }
+        }
+    }
+
+    // The rigs in the depth prepass. Shards are left out: they are in the air
+    // for half a second and nothing occludes anything through them.
+    fn drawRigsDepth(self: &Self, gfx: &Gfx) {
+        for i in 0..self.rigs.len {
+            gfx.prepassDraw(self.baseMesh, baseMatrix(self.rigs[i]))
+            gfx.prepassDraw(self.flapMesh, flapMatrix(self.rigs[i]))
+            if self.rigs[i].broken {
+                continue
+            }
+            if self.rigs[i].kind == KIND_BOTTLE {
+                gfx.prepassDraw(self.bottleMesh, flapMatrix(self.rigs[i]))
+            } else {
+                gfx.prepassDraw(self.plateMesh, flapMatrix(self.rigs[i]))
             }
         }
     }

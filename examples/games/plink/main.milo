@@ -2,9 +2,9 @@
 //
 //   milo run examples/games/plink/main.milo --release
 //
-// Mouse looks, WASD walks, left button shoots. Bottles and plates snap up on
-// hinges around the town, hold for about a second and a half, and drop. Hit one
-// anywhere and it shatters.
+// You stand at the mouth of the street and do not move: the mouse aims, the left
+// button shoots. Bottles and plates snap up on hinges along both boardwalks,
+// hold for a couple of seconds, and drop. Hit one anywhere and it shatters.
 //
 // `--shot out.png` renders one frame to a file and exits, which is how every
 // change to the lighting in this game was actually checked.
@@ -40,7 +40,7 @@ from "sdl/glcontext" import {
     SDL_WINDOW_OPENGL
 }
 from "sdl/keys" import {
-    SC_A, SC_D, SC_ESCAPE, SC_F, SC_LSHIFT, SC_R, SC_S, SC_SPACE, SC_W
+    SC_ESCAPE, SC_F, SC_SPACE
 }
 from "./gun" import {
     CYLINDER_ROUNDS, Gun, newGun
@@ -52,7 +52,7 @@ from "./camera" import {
     Camera, newCamera
 }
 from "./hud" import {
-    Hud, buildAtlas, newHud
+    ATLAS, Hud, buildAtlas, newHud
 }
 from "./mat4" import {
     identity, invertViewProj, multiply
@@ -116,9 +116,14 @@ pub fn main(): i32 {
     let headless = shot.len > 0
     var winW: i64 = 1440
     var winH: i64 = 900
-    let sunEl = argValue("--sun", "14").parseF64() ?? 14.0
-    let sunAz = argValue("--az", "18").parseF64() ?? 18.0
+    // A sun this low is the prettier picture, but it puts both boardwalks in
+    // deep shade, and a bottle you cannot pick out of the shade is not a target.
+    // 22 degrees keeps the warm light and lets the rigs read.
+    let sunEl = argValue("--sun", "22").parseF64() ?? 22.0
+    let sunAz = argValue("--az", "34").parseF64() ?? 34.0
     let scalePct = argValue("--scale", "100").parseF64() ?? 100.0
+    // --skip N drops one geometry bucket from the scene pass, which is how you
+    // find out which bucket a surface belongs to.
     let skipBucket = argValue("--skip", "-1").parseInt() ?? -1
 
     if SDL_Init(SDL_INIT_VIDEO) != 0 {
@@ -174,7 +179,11 @@ pub fn main(): i32 {
     // cap; the HUD is drawn afterwards at the real size.
     var rw = ((dw as f64) * scalePct / 100.0) as i64
     var rh = ((dh as f64) * scalePct / 100.0) as i64
-    let cap = 2600000.0
+    // The scene's pixel budget. It was 2.6 MP, which on a retina panel meant the
+    // whole frame was rendered at about seventy per cent and stretched — soft
+    // edges everywhere. At 400 frames in two seconds on this hardware there was
+    // no reason for it; 4.6 MP renders a 2880x1800 drawable at nine tenths.
+    let cap = 4600000.0
     if ((rw * rh) as f64) > cap {
         let k = Math.sqrt(cap / ((rw * rh) as f64))
         rw = ((rw as f64) * k) as i64
@@ -183,7 +192,7 @@ pub fn main(): i32 {
 
     var gl = GlContext.new()
     let sky = buildSky(sunEl, sunAz, 21.0)
-    var gfx = match newGfx(gl, rw, rh, sky, buildAtlas(), 128) {
+    var gfx = match newGfx(gl, rw, rh, sky, buildAtlas(), ATLAS) {
         Result.Ok(g) => g
         Result.Err(e) => {
             print("gfx: " + e)
@@ -241,7 +250,11 @@ pub fn main(): i32 {
     // happened to be.
     cam.pitch = argValue("--pitch", "-0.02").parseF64() ?? -0.02
     cam.yaw = argValue("--yaw", "0").parseF64() ?? 0.0
-    cam.pos.z = argValue("--z", "-4").parseF64() ?? -4.0
+    // The rigs run from z=11.6 to z=31 along the two rails. Standing at z=-4 put
+    // every one of them fifteen to forty-five metres out, where a bottle is a
+    // couple of pixels wide: the game was not hard, it was unreadable. You stand
+    // at the mouth of the street instead, with the whole range in front of you.
+    cam.pos.z = argValue("--z", "8").parseF64() ?? 8.0
     cam.pos.x = argValue("--x", "0").parseF64() ?? 0.0
     var hud = newHud()
 
@@ -264,14 +277,15 @@ pub fn main(): i32 {
     var missFlash = 0.0
     var prevButtons: u32 = 0
     var prevSpace = false
-    var prevR = false
     var prevF = false
     var fullscreen = false
     // A capture is worthless with an empty street, so the headless path runs the
     // wave logic forward before it reads the framebuffer.
     var warmup = argValue("--warmup", "150").parseInt() ?? 150
     let autoFire = argValue("--boom", "0").parseInt() ?? 0
-    if headless {
+    // `--attract` captures the title screen instead; without it a capture of a
+    // quiet town is what you get.
+    if headless && !argPresent("--attract") {
         running = true
         timeLeft = 45.0
     }
@@ -289,7 +303,13 @@ pub fn main(): i32 {
         gfx.time = gfx.time + dt
 
         var fireNow = false
-        var aiming = 0.0
+        // `--aim` holds the iron sights up for a capture, which is the only way
+        // to look at the aimed pose without a mouse.
+        var aiming = if headless && argPresent("--aim") {
+            1.0
+        } else {
+            0.0
+        }
         if !headless {
             unsafe {
                 while SDL_PollEvent(ev) != 0 {
@@ -316,34 +336,20 @@ pub fn main(): i32 {
                     )
                 }
                 prevF = fDown
-                var moveX = 0.0
-                var moveZ = 0.0
-                if keys[SC_W] != 0 {
-                    moveZ = moveZ + 1.0
-                }
-                if keys[SC_S] != 0 {
-                    moveZ = moveZ - 1.0
-                }
-                if keys[SC_D] != 0 {
-                    moveX = moveX + 1.0
-                }
-                if keys[SC_A] != 0 {
-                    moveX = moveX - 1.0
-                }
                 if (buttons & SDL_BUTTON_RMASK) != 0 {
                     aiming = 1.0
                 }
                 // Aiming halves how far the mouse turns you, which is what an
                 // iron sight is actually for.
                 cam.look(mx as f64, my as f64, 0.0022 * (1.0 - 0.45 * aiming))
-                cam.step(moveX, moveZ, keys[SC_LSHIFT] != 0, false, dt)
+                cam.settle(dt)
 
                 let lmb = (buttons & SDL_BUTTON_LMASK) != 0
                 let lmbEdge = lmb && (prevButtons & SDL_BUTTON_LMASK) == 0
                 prevButtons = buttons
 
                 let spaceDown = keys[SC_SPACE] != 0
-                if (spaceDown && !prevSpace) || (lmbEdge && !running) {
+                if spaceDown && !prevSpace {
                     if !running {
                         running = true
                         timeLeft = 60.0
@@ -356,17 +362,15 @@ pub fn main(): i32 {
                 }
                 prevSpace = spaceDown
 
-                let rDown = keys[SC_R] != 0
-                if rDown && !prevR {
-                    gun.beginReload()
-                }
-                prevR = rDown
-
-                if lmbEdge && running {
+                // Firing is not gated on a round being live: the attract
+                // screen keeps rigs up, and being able to shoot them is how you
+                // learn the gun before the clock is against you.
+                if lmbEdge {
                     fireNow = true
                 }
-                // An empty cylinder reloads itself rather than making you press
-                // a key to keep playing a reflex game.
+                // The cylinder refills itself. A reload key in a game about how
+                // fast you can point is a key that only ever punishes you for
+                // not having pressed it earlier.
                 if gun.rounds == 0 && gun.reloadT <= 0.0 {
                     gun.beginReload()
                 }
@@ -410,7 +414,9 @@ pub fn main(): i32 {
         }
         if fireNow && gun.canFire() {
             gun.fire()
-            shotsFired = shotsFired + 1
+            if running {
+                shotsFired = shotsFired + 1
+            }
             cam.kick(0.022 + 0.006 * ((shotsFired % 3) as f64), 0.004 * (if shotsFired % 2 == 0 {
                 1.0
             } else {
@@ -420,22 +426,26 @@ pub fn main(): i32 {
             let hit = targets.trace(cam.eye(), cam.forward())
             if hit.ok {
                 targets.shatter(hit.index, cam.eye())
-                hits = hits + 1
-                combo = combo + 1
-                // Speed is what is being scored, so the multiplier is the whole
-                // reward: a chain of quick hits is worth several times the same
-                // hits taken one at a time.
-                let mult = Math.minI64(1 + combo / 3, 6)
-                let bonus = if hit.kind == KIND_BOTTLE {
-                    120
-                } else {
-                    100
-                }
-                score = score + bonus * mult
                 hitFlash = 1.0
+                if running {
+                    hits = hits + 1
+                    combo = combo + 1
+                    // Speed is what is being scored, so the multiplier is the
+                    // whole reward: a chain of quick hits is worth several times
+                    // the same hits taken one at a time.
+                    let mult = Math.minI64(1 + combo / 3, 6)
+                    let bonus = if hit.kind == KIND_BOTTLE {
+                        120
+                    } else {
+                        100
+                    }
+                    score = score + bonus * mult
+                }
             } else {
-                combo = 0
                 missFlash = 1.0
+                if running {
+                    combo = 0
+                }
             }
         }
         gfx.flash = gun.flash * 3.0
@@ -449,6 +459,18 @@ pub fn main(): i32 {
             dh = winH as i32
         }
 
+        let aspect = (rw as f64) / (rh as f64)
+        // Depth and normals first: the scene pass samples the AO they produce.
+        gfx.prepassBegin(cam.viewM(), cam.projM(aspect))
+        for i in 0..BUCKETS {
+            if i == skipBucket {
+                continue
+            }
+            gfx.prepassDraw(world.meshes[i], model)
+        }
+        targets.drawRigsDepth(gfx)
+        gfx.aoResolve(cam.tanHalfX(), cam.tanHalfX() / aspect)
+
         let focus = cam.pos + cam.walkForward().scale(15.0)
         gfx.shadowBegin(v3(focus.x, 1.5, focus.z), 24.0, 90.0)
         for i in 0..BUCKETS {
@@ -456,11 +478,13 @@ pub fn main(): i32 {
         }
         targets.drawRigs(gfx, true)
 
-        let aspect = (rw as f64) / (rh as f64)
         let vp = cam.viewProj(aspect)
         let inv = invertViewProj(vp)
         gfx.sceneBegin(vp, inv, cam.eye())
         for i in 0..BUCKETS {
+            if i == skipBucket {
+                continue
+            }
             gfx.sceneDraw(world.meshes[i], model, world.mats[i])
         }
         targets.drawRigs(gfx, false)
@@ -473,7 +497,7 @@ pub fn main(): i32 {
         gfx.present(dw as i64, dh as i64)
 
         hud.clear()
-        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, gun.rounds, gun.reloadT, hitFlash, missFlash, aiming)
+        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, gun.rounds, gun.reloadT, hitFlash, missFlash, aiming, gfx.time)
         gfx.drawHud(hud.verts, dw as i64, dh as i64)
 
         if headless && warmup > 0 {
@@ -509,22 +533,17 @@ pub fn main(): i32 {
     world.free(gl)
     gfx.free(gl)
     gl.free()
-    unsafe {
-        SDL_GL_DeleteContext(ctx)
-        SDL_DestroyWindow(win)
-    }
+    SDL_GL_DeleteContext(ctx)
+    SDL_DestroyWindow(win)
     SDL_Quit()
     return 0
 }
 
-fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, rounds: i64, reloadT: f64, hitFlash: f64, missFlash: f64, aiming: f64) {
+fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, rounds: i64, reloadT: f64, hitFlash: f64, missFlash: f64, aiming: f64, time: f64) {
     let s = Math.maxF64(dh / 900.0, 0.6)
     let cx = dw * 0.5
     let cy = dh * 0.5
 
-    // The crosshair opens up while the gun is recovering, so how ready you are
-    // is something you can see rather than something you have to count.
-    crosshair(hud, cx, cy, s, 1.0 - aiming * 0.6)
     if hitFlash > 0.0 {
         let d = 16.0 * s * (1.0 + (1.0 - hitFlash) * 1.6)
         let a = hitFlash * 0.95
@@ -548,24 +567,61 @@ fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score:
             hud.textCentred($"{combo} IN A ROW    X{mult}", cx, 70.0 * s, 2.2 * s, 1.0, 0.78, 0.35, 0.92)
         }
     } else {
-        hud.textCentred("PLINK", cx, dh * 0.30, 8.0 * s, 1.0, 0.93, 0.78, 0.95)
+        // Sand under a midday sun is nearly white, and pale text on it is
+        // unreadable — the panel is what makes the only screen that states the
+        // rules actually legible.
+        let panelW = Math.minF64(dw * 0.9, 660.0 * s)
+        var contentH = 404.0
         if lastScore > 0 {
-            hud.textCentred($"SCORE {lastScore}", cx, dh * 0.30 + 80.0 * s, 3.4 * s, 1.0, 0.97, 0.88, 0.95)
+            contentH = contentH + 74.0
+        }
+        if best > 0 {
+            contentH = contentH + 32.0
+        }
+        let panelH = contentH * s
+        let top = dh * 0.5 - panelH * 0.5
+        hud.rect(cx - panelW * 0.5, top, panelW, panelH, 0.04, 0.03, 0.02, 0.62)
+
+        var y = top + 28.0 * s
+        hud.textCentred("PLINK", cx, y, 8.0 * s, 1.0, 0.93, 0.78, 0.95)
+        y = y + 96.0 * s
+        if lastScore > 0 {
+            hud.textCentred($"SCORE {lastScore}", cx, y, 3.4 * s, 1.0, 0.97, 0.88, 0.95)
             let pct = if shots > 0 {
                 (hits * 100) / shots
             } else {
                 0
             }
-            hud.textCentred($"{hits} HITS   {pct}% ACCURATE", cx, dh * 0.30 + 118.0 * s, 2.0 * s, 0.92, 0.88, 0.80, 0.85)
-        } else {
-            hud.textCentred("SHOOT THE BOTTLES BEFORE THEY DROP", cx, dh * 0.30 + 84.0 * s, 2.0 * s, 0.95, 0.90, 0.82, 0.85)
+            hud.textCentred($"{hits} HITS   {pct}% ACCURATE", cx, y + 38.0 * s, 2.0 * s, 0.92, 0.88, 0.80, 0.85)
+            y = y + 74.0 * s
         }
+        hud.textCentred("SHOOT THE BOTTLES AND PLATES BEFORE THEY DROP", cx, y, 2.0 * s, 0.98, 0.94, 0.86, 0.9)
+        y = y + 34.0 * s
+        hud.textCentred("60 SECONDS.  HITS IN A ROW MULTIPLY THE SCORE UP TO X6", cx, y, 1.7 * s, 0.90, 0.86, 0.78, 0.8)
+        y = y + 50.0 * s
+        // Two controls. You do not walk and you do not reload, so there is
+        // nothing else to put here.
+        hud.textCentred("MOVE THE MOUSE TO AIM", cx, y, 2.2 * s, 0.95, 0.93, 0.88, 0.9)
+        y = y + 32.0 * s
+        hud.textCentred("CLICK TO SHOOT", cx, y, 2.2 * s, 0.95, 0.93, 0.88, 0.9)
+        y = y + 44.0 * s
+        hud.textCentred("THE RIGS ARE ALREADY UP.  NOTHING IS COUNTED YET", cx, y, 1.6 * s, 0.75, 0.85, 0.70, 0.75)
+        y = y + 26.0 * s
+        hud.textCentred("RIGHT CLICK STEADIES      F FULLSCREEN      ESC QUITS", cx, y, 1.4 * s, 0.72, 0.70, 0.66, 0.6)
         if best > 0 {
-            hud.textCentred($"BEST {best}", cx, dh * 0.30 + 150.0 * s, 2.0 * s, 1.0, 0.80, 0.40, 0.85)
+            y = y + 32.0 * s
+            hud.textCentred($"BEST {best}", cx, y, 2.0 * s, 1.0, 0.80, 0.40, 0.85)
         }
-        hud.textCentred("PRESS SPACE TO START", cx, dh * 0.72, 2.6 * s, 1.0, 0.97, 0.88, 0.9)
-        hud.textCentred("MOUSE LOOK   WASD MOVE   LEFT CLICK FIRE   RIGHT CLICK AIM   R RELOAD   F FULLSCREEN   ESC QUIT", cx, dh * 0.72 + 34.0 * s, 1.4 * s, 0.85, 0.82, 0.76, 0.7)
+        // A pulse, because a still line of text on a screen with bottles
+        // snapping up behind it is the thing an eye skips.
+        let pulse = 0.62 + 0.38 * Math.sin(time * 3.4)
+        hud.textCentred("PRESS SPACE TO START", cx, top + panelH - 42.0 * s, 2.8 * s, 1.0, 0.97, 0.88, pulse)
     }
+
+    // The crosshair opens up while the gun is recovering, so how ready you are
+    // is something you can see rather than something you have to count. Drawn
+    // after the attract panel, which sits over the middle of the screen.
+    crosshair(hud, cx, cy, s, 1.0 - aiming * 0.6)
 
     // Rounds left, as six marks that go out as they are spent.
     let bx = dw - 40.0 * s

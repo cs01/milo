@@ -1,8 +1,13 @@
-// The player: where the camera is, where it points, and how it walks.
+// The player: where the camera stands and where it points.
 //
-// Yaw is measured so that 0 looks down +Z, which is down the street. Pitch is
-// clamped just short of vertical — a camera that reaches straight up has an
-// undefined right vector and the whole view rolls as it passes through.
+// You do not walk. This is a shooting gallery: the whole game is where the
+// muzzle is pointing when a target snaps up, and a player hunting for a firing
+// position is a player not shooting. Standing still also means the range can be
+// laid out once and be the same range every round.
+//
+// Yaw is measured so that 0 looks down +Z, which is down the street, and both
+// axes are clamped to keep the rigs in front of you: turning to face an empty
+// stretch of desert is not a decision worth offering.
 
 from "std/math" import {
     Math
@@ -13,18 +18,21 @@ from "./mat4" import {
 from "./vec3" import {
     Vec3, v3
 }
-from "./world" import {
-    STREET_HALF, WALK_TOP, groundHeight
-}
 
 pub let EYE_HEIGHT: f64 = 1.68
+
+// How far off centre you may look, in radians. Wide enough to cover both rails
+// and the far end of the street, short of the point where the town runs out.
+pub let YAW_LIMIT: f64 = 0.62
+
+pub let PITCH_UP: f64 = 0.30
+
+pub let PITCH_DOWN: f64 = -0.42
 
 pub struct Camera {
     pos: Vec3,
     yaw: f64,
     pitch: f64,
-    velY: f64,
-    onGround: bool,
     bob: f64,
     // Recoil is applied to the view, not to the gun model alone: a shot that
     // does not move the camera does not feel like a shot.
@@ -35,11 +43,9 @@ pub struct Camera {
 
 pub fn newCamera(): Camera {
     return Camera {
-        pos: v3(0.0, EYE_HEIGHT, -4.0),
+        pos: v3(0.0, EYE_HEIGHT, 8.0),
         yaw: 0.0,
         pitch: -0.02,
-        velY: 0.0,
-        onGround: true,
         bob: 0.0,
         kickPitch: 0.0,
         kickYaw: 0.0,
@@ -67,73 +73,41 @@ impl Camera {
     }
 
     fn look(self: &mut Self, dx: f64, dy: f64, sensitivity: f64) {
-        self.yaw = self.yaw - dx * sensitivity
-        self.pitch = self.pitch - dy * sensitivity
-        let limit = 1.52
-        self.pitch = Math.clampF64(self.pitch, -limit, limit)
+        self.yaw = Math.clampF64(self.yaw - dx * sensitivity, -YAW_LIMIT, YAW_LIMIT)
+        self.pitch = Math.clampF64(self.pitch - dy * sensitivity, PITCH_DOWN, PITCH_UP)
     }
 
     // `fov` is HORIZONTAL. A vertical fov looks correct on one aspect ratio and
     // claustrophobic on a wide monitor, which is the wrong way round: what a
     // player notices is how much of the street is in view side to side.
     fn viewProj(self: &Self, aspect: f64): Vec<f32> {
-        let e = self.eye()
-        let at = e + self.forward()
-        let view = lookAt(e, at, v3(0.0, 1.0, 0.0))
-        let fovY = 2.0 * Math.atan(Math.tan(self.fov * 0.5) / aspect)
-        let proj = perspective(fovY, aspect, 0.06, 14000.0)
-        return multiply(proj, view)
+        return multiply(self.projM(aspect), self.viewM())
     }
 
-    fn step(self: &mut Self, moveX: f64, moveZ: f64, run: bool, jump: bool, dt: f64) {
-        let speed = if run {
-            5.6
-        } else {
-            2.9
-        }
-        let f = self.walkForward()
-        let rt = self.right()
-        var wish = f.scale(moveZ) + rt.scale(moveX)
-        if wish.len2() > 0.0001 {
-            wish = wish.norm().scale(speed)
-            self.bob = self.bob + dt * speed * 1.5
-        } else {
-            // Settle the bob back to level rather than freezing mid-step.
-            let target = Math.round(self.bob / Math.pi()) * Math.pi()
-            self.bob = self.bob + (target - self.bob) * Math.minF64(dt * 8.0, 1.0)
-        }
-        self.pos = self.pos + wish.scale(dt)
+    fn viewM(self: &Self): Vec<f32> {
+        let e = self.eye()
+        return lookAt(e, e + self.forward(), v3(0.0, 1.0, 0.0))
+    }
 
-        if jump && self.onGround {
-            self.velY = 4.2
-            self.onGround = false
-        }
-        self.velY = self.velY - 15.0 * dt
-        self.pos = self.pos + v3(0.0, self.velY * dt, 0.0)
+    fn projM(self: &Self, aspect: f64): Vec<f32> {
+        let fovY = 2.0 * Math.atan(Math.tan(self.fov * 0.5) / aspect)
+        return perspective(fovY, aspect, 0.06, 14000.0)
+    }
 
-        // The town is a corridor, and the only thing worth colliding with is the
-        // step up onto a boardwalk. Everything else is kept out of reach by the
-        // bounds below rather than by a collision system nobody would notice.
-        var floor = groundHeight(self.pos.x, self.pos.z)
-        if Math.abs(self.pos.x) > STREET_HALF - 2.1 && Math.abs(self.pos.x) < STREET_HALF
-        && self.pos.z > 9.0 && self.pos.z < 35.0 {
-            floor = WALK_TOP
-        }
-        let want = floor + EYE_HEIGHT
-        if self.pos.y <= want {
-            self.pos.y = want
-            self.velY = 0.0
-            self.onGround = true
-        }
+    // The tangent of the half field of view on each axis. The AO pass rebuilds a
+    // view position from a pixel and a distance out of exactly these two numbers.
+    fn tanHalfX(self: &Self): f64 {
+        return Math.tan(self.fov * 0.5)
+    }
 
-        // Stay in the street. Wandering into a building is not interesting and
-        // walking behind the targets is worse.
-        self.pos.x = Math.clampF64(self.pos.x, -STREET_HALF + 0.35, STREET_HALF - 0.35)
-        self.pos.z = Math.clampF64(self.pos.z, -9.0, 7.0)
-
-        // Recoil recovers on a spring, faster than it was applied.
+    // Recoil recovers on a spring, faster than it was applied.
+    fn settle(self: &mut Self, dt: f64) {
         self.kickPitch = self.kickPitch - self.kickPitch * Math.minF64(dt * 11.0, 1.0)
         self.kickYaw = self.kickYaw - self.kickYaw * Math.minF64(dt * 11.0, 1.0)
+        // The bob is a breathing sway now rather than a footfall: a shooter
+        // standing still is not perfectly still, and a viewmodel that is
+        // perfectly still is the tell that it is a picture.
+        self.bob = self.bob + dt * 0.9
     }
 
     fn kick(self: &mut Self, pitch: f64, yaw: f64) {

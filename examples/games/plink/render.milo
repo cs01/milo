@@ -22,10 +22,11 @@ from "./sky" import {
     SKY_H, SKY_W, Sky
 }
 from "./shaders" import {
-    SCENE_VERT, SHADOW_FRAG, SHADOW_VERT, SKY_VERT, sceneFrag, skyFrag
+    SCENE_VERT, SHADOW_FRAG, SHADOW_VERT, SKY_VERT, sceneFrag, skyFrag, DEPTH_FRAG, DEPTH_VERT
 }
 from "./post" import {
-    BLUR_FRAG, BRIGHT_FRAG, COMPOSITE_FRAG, HUD_FRAG, HUD_VERT, QUAD_VERT
+    AO_BLUR_FRAG, BLUR_FRAG, BRIGHT_FRAG, COMPOSITE_FRAG, HUD_FRAG, HUD_VERT,
+    QUAD_VERT, SSAO_FRAG
 }
 
 pub let SHADOW_SIZE: i64 = 2048
@@ -85,6 +86,9 @@ pub fn materialTex(albedoTex: i64, surfTex: i64, r: f64, g: f64, b: f64, rough: 
 pub struct Gfx {
     scene: Shader,
     shadowSh: Shader,
+    depthSh: Shader,
+    ssaoSh: Shader,
+    aoBlurSh: Shader,
     skySh: Shader,
     bright: Shader,
     blur: Shader,
@@ -93,6 +97,9 @@ pub struct Gfx {
 
     sceneTgt: Target,
     shadowTgt: Target,
+    dnTgt: Target,
+    aoTgt: Target,
+    aoBlurTgt: Target,
     bloomA: Target,
     bloomB: Target,
 
@@ -113,6 +120,8 @@ pub struct Gfx {
 
     rw: i64,
     rh: i64,
+    aoStrength: f64,
+    aoRadius: f64,
     debug: f64,
     exposure: f64,
     bloomAmount: f64,
@@ -184,6 +193,24 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
             return Result.Err("composite: " + e)
         }
     }
+    let depthSh = match Shader.compile(gl, DEPTH_VERT, DEPTH_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("depth: " + e)
+        }
+    }
+    let ssaoSh = match Shader.compile(gl, QUAD_VERT, SSAO_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("ssao: " + e)
+        }
+    }
+    let aoBlurSh = match Shader.compile(gl, QUAD_VERT, AO_BLUR_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("ao blur: " + e)
+        }
+    }
     let hudSh = match Shader.compile(gl, HUD_VERT, HUD_FRAG) {
         Result.Ok(s) => s
         Result.Err(e) => {
@@ -200,6 +227,29 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
         Result.Ok(t) => t
         Result.Err(e) => {
             return Result.Err("shadow target: " + e)
+        }
+    }
+    // The prepass buffer is full resolution — AO reads neighbouring depths, and
+    // halving it halves the distance a sample can tell apart. The AO itself is
+    // half, because it is blurred anyway.
+    let dnTgt = match Target.new(gl, rw, rh, true, false) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("depth target: " + e)
+        }
+    }
+    let aw = rw / 2
+    let ah = rh / 2
+    let aoTgt = match Target.new(gl, aw, ah, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("ao target: " + e)
+        }
+    }
+    let aoBlurTgt = match Target.new(gl, aw, ah, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("ao blur target: " + e)
         }
     }
     let bw = rw / 4
@@ -233,9 +283,15 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
         bright: bright,
         blur: blur,
         composite: composite,
+        depthSh: depthSh,
+        ssaoSh: ssaoSh,
+        aoBlurSh: aoBlurSh,
         hudSh: hudSh,
         sceneTgt: sceneTgt,
         shadowTgt: shadowTgt,
+        dnTgt: dnTgt,
+        aoTgt: aoTgt,
+        aoBlurTgt: aoBlurTgt,
         bloomA: bloomA,
         bloomB: bloomB,
         quad: quadMesh(gl),
@@ -252,6 +308,10 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
         cloudCover: 0.42,
         rw: rw,
         rh: rh,
+        // Tuned by eye against the porch posts and the boardwalk edge, which are
+        // the only contacts in this scene big enough to judge from a screenshot.
+        aoStrength: 1.7,
+        aoRadius: 0.95,
         debug: 0.0,
         exposure: 1.0,
         bloomAmount: 0.06,
@@ -276,6 +336,55 @@ impl Gfx {
         sh.uniformF("uTime", self.time)
         sh.uniformF("uCloudCover", self.cloudCover)
         sh.sampler("uSky", self.skyTex, 2)
+    }
+
+    // ── depth prepass and ambient occlusion ───────────────────────────────────
+
+    // Geometry only, into the view-space depth+normal buffer. Runs before the
+    // shadow pass because the scene pass needs the AO texture it feeds.
+    fn prepassBegin(self: &mut Self, view: &Vec<f32>, proj: &Vec<f32>) {
+        self.dnTgt.bind()
+        // Zero red means "no geometry here", which the AO pass reads as sky, so
+        // the clear colour is part of the contract.
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(true)
+        self.depthSh.bind()
+        self.depthSh.uniformMat4("uView", view)
+        self.depthSh.uniformMat4("uProj", proj)
+    }
+
+    fn prepassDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>) {
+        self.depthSh.uniformMat4("uModel", model)
+        mesh.draw()
+    }
+
+    // Resolve the prepass into a blurred AO buffer. `tanHalfX`/`tanHalfY` are the
+    // tangents of the half field of view, which is all the AO pass needs of the
+    // projection to turn a pixel and a distance back into a position.
+    fn aoResolve(self: &mut Self, tanHalfX: f64, tanHalfY: f64) {
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+
+        self.aoTgt.bind()
+        self.ssaoSh.bind()
+        self.dnTgt.bindTexture(0)
+        self.ssaoSh.uniformI("uDN", 0)
+        self.ssaoSh.uniform2F("uTanHalf", tanHalfX, tanHalfY)
+        self.ssaoSh.uniformF("uRadius", self.aoRadius)
+        self.ssaoSh.uniformF("uStrength", self.aoStrength)
+        self.quad.draw()
+
+        self.aoBlurTgt.bind()
+        self.aoBlurSh.bind()
+        self.aoTgt.bindTexture(0)
+        self.aoBlurSh.uniformI("uSrc", 0)
+        self.aoBlurSh.uniform2F("uTexel", 1.0 / (self.aoTgt.w as f64), 1.0 / (self.aoTgt.h as f64))
+        self.quad.draw()
     }
 
     // ── shadow pass ───────────────────────────────────────────────────────────
@@ -340,6 +449,17 @@ impl Gfx {
         self.scene.uniformF("uShadowTexel", self.shadowTexel)
         self.shadowTgt.bindTexture(3)
         self.scene.uniformI("uShadow", 3)
+        self.aoBlurTgt.bindTexture(4)
+        self.scene.uniformI("uAo", 4)
+        self.scene.uniform2F("uAoTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
+        self.scene.uniformF("uAoAmount", 1.0)
+    }
+
+    // The view model is drawn through the same shader but is not in the prepass,
+    // so it must not read the AO buffer: at its screen position that buffer holds
+    // the occlusion of whatever the gun is covering up.
+    fn setAoAmount(self: &Self, amount: f64) {
+        self.scene.uniformF("uAoAmount", amount)
     }
 
     fn sceneDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>, m: &Material) {
@@ -429,6 +549,9 @@ impl Gfx {
     fn free(self: Self, gl: &mut GlContext) {
         self.scene.free(gl)
         self.shadowSh.free(gl)
+        self.depthSh.free(gl)
+        self.ssaoSh.free(gl)
+        self.aoBlurSh.free(gl)
         self.skySh.free(gl)
         self.bright.free(gl)
         self.blur.free(gl)
@@ -436,6 +559,9 @@ impl Gfx {
         self.hudSh.free(gl)
         self.sceneTgt.free(gl)
         self.shadowTgt.free(gl)
+        self.dnTgt.free(gl)
+        self.aoTgt.free(gl)
+        self.aoBlurTgt.free(gl)
         self.bloomA.free(gl)
         self.bloomB.free(gl)
         self.quad.free(gl)

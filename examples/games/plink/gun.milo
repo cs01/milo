@@ -37,6 +37,7 @@ pub let CYLINDER_ROUNDS: i64 = 6
 
 pub struct Gun {
     steelMesh: Mesh,
+    cylMesh: Mesh,
     gripMesh: Mesh,
     flashMesh: Mesh,
     steelMat: Material,
@@ -57,61 +58,105 @@ pub struct Gun {
     cooldown: f64,
 }
 
-// The gun, built once along -Z with the grip under the origin. Everything is
-// boxes and cylinders: it is seen from 30 cm away at the bottom of the screen
-// and never in silhouette, so shape reads and detail does not.
+// The gun, built once along -Z with the grip under the origin. It is a
+// single-action revolver, and what makes one recognisable at a glance is the
+// proportion rather than the detail: a thin barrel about eight times its own
+// diameter, a fat but short cylinder behind it, a narrow frame, and a grip that
+// curves back and down at about sixty degrees. Boxes are enough if those are
+// right, and no amount of geometry saves them if they are wrong.
+//
+// Nothing here is textured finely. A 9x repeat of the steel map across a part
+// two centimetres wide is noise, and noise at this distance is what made the
+// old gun read as a lump rather than as metal.
 fn steelGeometry(b: &mut Builder) {
-    b.setUvScale(9.0)
-    b.setTint(0.62, 0.63, 0.67)
-    // barrel, with a rib along the top
-    b.setXform(multiply(translation(v3(0.0, 0.012, -0.058)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.0135, 0.215, 14, true)
+    b.setUvScale(3.0)
+    b.setTint(1.0, 1.0, 1.0)
+    // barrel
+    b.setXform(multiply(translation(v3(0.0, 0.016, -0.048)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.0104, 0.170, 16, true)
     b.resetXform()
-    // top rib and front sight, which is most of what says "revolver" from the
-    // three-quarter angle the gun is actually seen at
-    b.boxSpan(v3(-0.007, 0.024, -0.273), v3(0.007, 0.032, -0.058))
-    b.boxSpan(v3(-0.004, 0.032, -0.268), v3(0.004, 0.050, -0.258))
-    // ejector rod under the barrel
-    b.setXform(multiply(translation(v3(0.0, -0.004, -0.062)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.006, 0.17, 8, true)
+    // a step at the crown, so the end reads as a muzzle and not as a cut pipe
+    b.setXform(multiply(translation(v3(0.0, 0.016, -0.219)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.0122, 0.010, 16, true)
     b.resetXform()
-    // frame
-    b.boxSpan(v3(-0.013, -0.010, -0.062), v3(0.013, 0.034, 0.030))
-    // cylinder housing sides
-    b.setTint(0.55, 0.56, 0.59)
-    b.boxSpan(v3(-0.023, -0.006, -0.060), v3(-0.019, 0.032, 0.010))
-    b.boxSpan(v3(0.019, -0.006, -0.060), v3(0.023, 0.032, 0.010))
-    // hammer
-    b.setTint(0.46, 0.46, 0.49)
-    b.boxSpan(v3(-0.005, 0.030, 0.024), v3(0.005, 0.052, 0.036))
-    // trigger and guard
-    b.boxSpan(v3(-0.004, -0.030, -0.004), v3(0.004, -0.012, 0.004))
-    b.boxSpan(v3(-0.008, -0.040, -0.020), v3(0.008, -0.034, 0.016))
-    b.boxSpan(v3(-0.008, -0.040, -0.024), v3(0.008, -0.012, -0.018))
+    // ejector rod housing, slung under the barrel and stopping short of it
+    b.setXform(multiply(translation(v3(0.0, 0.0025, -0.052)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.0064, 0.130, 10, true)
+    b.resetXform()
+    // front sight blade
+    b.boxSpan(v3(-0.0028, 0.0255, -0.207), v3(0.0028, 0.0385, -0.197))
+    // frame: a narrow box with the top strap running back to the hammer
+    b.boxSpan(v3(-0.0112, -0.008, -0.046), v3(0.0112, 0.0245, 0.032))
+    b.boxSpan(v3(-0.0112, 0.0245, -0.046), v3(-0.0040, 0.0300, 0.032))
+    b.boxSpan(v3(0.0040, 0.0245, -0.046), v3(0.0112, 0.0300, 0.032))
+    // the round shield the cylinder turns against
+    b.setXform(multiply(translation(v3(0.0, 0.016, 0.002)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.0198, 0.011, 16, true)
+    b.resetXform()
+    // loading gate, on the right of the frame only
+    b.setTint(0.85, 0.85, 0.88)
+    b.boxSpan(v3(0.0112, 0.004, -0.010), v3(0.0138, 0.024, 0.006))
+    // hammer: body and the spur the thumb pulls
+    b.boxSpan(v3(-0.0048, 0.0250, 0.026), v3(0.0048, 0.0430, 0.036))
+    b.setXform(multiply(translation(v3(0.0, 0.0425, 0.034)), rotationX(0.66)))
+    b.box(v3(0.0, 0.005, 0.0), 0.0068, 0.006, 0.0085)
+    b.resetXform()
+    // trigger, inside a guard bow in three pieces
+    b.setTint(0.92, 0.92, 0.94)
+    b.boxSpan(v3(-0.0030, -0.026, 0.004), v3(0.0030, -0.006, 0.012))
+    b.boxSpan(v3(-0.0055, -0.030, -0.008), v3(0.0055, -0.023, 0.000))
+    b.boxSpan(v3(-0.0055, -0.036, -0.004), v3(0.0055, -0.028, 0.022))
+    b.boxSpan(v3(-0.0055, -0.030, 0.018), v3(0.0055, -0.010, 0.026))
     b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(1.0)
 }
 
 // The revolving cylinder is its own mesh so it can spin a sixth of a turn per
-// shot without the rest of the gun following it.
+// shot without the rest of the gun following it. The flutes are what make the
+// spin visible at all: a smooth drum turning about its own axis is a drum that
+// is not turning.
 fn cylinderGeometry(b: &mut Builder) {
-    b.setUvScale(9.0)
-    b.setTint(0.58, 0.59, 0.62)
-    b.setXform(multiply(translation(v3(0.0, 0.012, -0.054)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.021, 0.066, 16, true)
+    b.setUvScale(3.0)
+    b.setTint(1.0, 1.0, 1.0)
+    b.setXform(multiply(translation(v3(0.0, 0.016, -0.044)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.0188, 0.044, 18, true)
     b.resetXform()
+    b.setTint(0.62, 0.62, 0.65)
+    for i in 0..6 {
+        let a = 2.0 * Math.pi() * (i as f64) / 6.0
+        let cx = Math.cos(a) * 0.0158
+        let cy = 0.016 + Math.sin(a) * 0.0158
+        b.setXform(multiply(translation(v3(cx, cy, -0.024)), rotationZ(a)))
+        b.box(v3(0.0, 0.0, 0.0), 0.0048, 0.0048, 0.016)
+        b.resetXform()
+    }
     b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(1.0)
 }
 
+// The grip, as five tapering blocks along a curve. A revolver grip is not a
+// handle sticking out of the frame at an angle; it is a curve that starts under
+// the hammer and finishes pointing forward, and the curve is what a straight box
+// cannot fake.
 fn gripGeometry(b: &mut Builder) {
-    b.setUvScale(11.0)
-    b.setTint(0.78, 0.52, 0.30)
-    b.setXform(multiply(translation(v3(0.0, -0.012, 0.030)), rotationX(0.30)))
-    b.box(v3(0.0, -0.055, 0.010), 0.015, 0.058, 0.021)
-    b.box(v3(0.0, -0.105, 0.014), 0.013, 0.012, 0.019)
-    b.resetXform()
+    b.setUvScale(1.2)
     b.setTint(1.0, 1.0, 1.0)
+    // Eight overlapping blocks rather than five spaced ones: at five the grip is
+    // a staircase, and a staircase is the first thing the eye picks out of a
+    // shape it already knows.
+    for i in 0..8 {
+        let t = (i as f64) / 7.0
+        let ang = 0.34 + t * 0.26
+        let cz = 0.028 + t * 0.024
+        let cy = -0.012 - t * 0.044
+        b.setXform(multiply(translation(v3(0.0, cy, cz)), rotationX(ang)))
+        b.box(v3(0.0, 0.0, 0.0), 0.0140 - t * 0.0016, 0.0075, 0.0185 - t * 0.0032)
+        b.resetXform()
+    }
+    // the butt cap, square across the bottom of the curve
+    b.setXform(multiply(translation(v3(0.0, -0.058, 0.053)), rotationX(0.60)))
+    b.box(v3(0.0, -0.004, 0.0), 0.0122, 0.0035, 0.0150)
+    b.resetXform()
     b.setUvScale(1.0)
 }
 
@@ -149,7 +194,8 @@ fn flashGeometry(b: &mut Builder) {
 pub fn newGun(gl: &mut GlContext): Gun {
     var sb = builder()
     steelGeometry(sb)
-    cylinderGeometry(sb)
+    var cb = builder()
+    cylinderGeometry(cb)
     var gb = builder()
     gripGeometry(gb)
     var fb = builder()
@@ -157,6 +203,8 @@ pub fn newGun(gl: &mut GlContext): Gun {
 
     var steelMesh = Mesh.new(gl, sceneAttrs())
     steelMesh.upload(sb.data.clone())
+    var cylMesh = Mesh.new(gl, sceneAttrs())
+    cylMesh.upload(cb.data.clone())
     var gripMesh = Mesh.new(gl, sceneAttrs())
     gripMesh.upload(gb.data.clone())
     var flashMesh = Mesh.new(gl, sceneAttrs())
@@ -167,10 +215,14 @@ pub fn newGun(gl: &mut GlContext): Gun {
 
     return Gun {
         steelMesh: steelMesh,
+        cylMesh: cylMesh,
         gripMesh: gripMesh,
         flashMesh: flashMesh,
-        steelMat: material(TEX_STEEL, 0.60, 0.60, 0.62, 0.40, 0.55),
-        gripMat: material(TEX_WOOD, 0.52, 0.29, 0.16, 0.48, 0.0),
+        // Case-hardened blue, not grey plastic: a real gun is a dark metal that
+        // is almost entirely reflection, so the albedo goes down and the metal
+        // and gloss go up. Most of what you see on it is the sky.
+        steelMat: material(TEX_STEEL, 0.33, 0.34, 0.37, 0.42, 0.75),
+        gripMat: material(TEX_WOOD, 0.058, 0.030, 0.018, 0.54, 0.0),
         flashMat: flashMat,
         kickBack: 0.0,
         kickRise: 0.0,
@@ -237,18 +289,20 @@ impl Gun {
         // 32 cm long and the view model frustum is 54 degrees across, so a metre
         // is what makes it about a third of the screen wide — near enough that
         // it reads, far enough that perspective does not bend it.
-        let ox = 0.235 - 0.235 * aim
-        let oy = -0.235 + 0.050 * aim + Math.sin(bob * 2.0) * 0.014 * (1.0 - aim)
-        let oz = -1.02 + 0.30 * aim + self.kickBack * 3.0
+        let ox = 0.215 - 0.215 * aim
+        // Aimed, the barrel axis sits on the view axis so the front sight lands
+        // under the crosshair; from the hip it drops to the corner of the frame.
+        let oy = -0.170 + 0.150 * aim + Math.sin(bob * 2.0) * 0.011 * (1.0 - aim)
+        let oz = -0.94 + 0.32 * aim + self.kickBack * 3.0
         // Angled across the view rather than pointed straight down it: a gun
         // parallel to the camera shows you its back end and nothing else, and
         // the back end of a revolver is a dark circle.
-        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + reloadTilt(self.reloadT) - 0.05 + 0.05 * aim), multiply(rotationY(0.18 - 0.18 * aim), rotationZ(-0.09 + 0.09 * aim))))
+        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + reloadTilt(self.reloadT) + 0.04 - 0.04 * aim), multiply(rotationY(0.44 - 0.44 * aim), rotationZ(-0.07 + 0.07 * aim))))
         return multiply(translation(eye), multiply(basis, local))
     }
 
     fn cylinderMatrix(self: &Self, model: &Vec<f32>): Vec<f32> {
-        return multiply(model, multiply(translation(v3(0.0, 0.012, -0.052)), multiply(rotationZ(self.cylinder), translation(v3(0.0, -0.012, 0.052)))))
+        return multiply(model, multiply(translation(v3(0.0, 0.016, -0.044)), multiply(rotationZ(self.cylinder), translation(v3(0.0, -0.016, 0.044)))))
     }
 
     fn draw(self: &Self, gfx: &Gfx, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64, aspect: f64) {
@@ -261,19 +315,23 @@ impl Gun {
         let vp = multiply(proj, view)
         gfx.scene.bind()
         gfx.scene.uniformMat4("uViewProj", vp)
+        gfx.setAoAmount(0.0)
         Gpu.depthTest(false)
         Gpu.depthWrite(false)
         gfx.sceneDraw(self.steelMesh, model, self.steelMat)
+        gfx.sceneDraw(self.cylMesh, self.cylinderMatrix(model), self.steelMat)
         gfx.sceneDraw(self.gripMesh, model, self.gripMat)
         if self.flash > 0.0 {
             gfx.sceneDraw(self.flashMesh, model, self.flashMat)
         }
         Gpu.depthTest(true)
         Gpu.depthWrite(true)
+        gfx.setAoAmount(1.0)
     }
 
     fn free(self: Self, gl: &mut GlContext) {
         self.steelMesh.free(gl)
+        self.cylMesh.free(gl)
         self.gripMesh.free(gl)
         self.flashMesh.free(gl)
     }

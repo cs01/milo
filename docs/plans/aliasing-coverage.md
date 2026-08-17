@@ -245,6 +245,28 @@ That is worth stating plainly: a fix applied across N sites is itself an enumera
 inherits exactly the defect it was fixing. The gate has to land in the same change as the
 fix, not after it.
 
+## The gates inherit the defect too
+
+Three ticks in a row, the thing that turned out to be incomplete was the most recently
+*finished* piece of work:
+
+1. Callback signature checking was applied at 20 sites; nothing forced the 21st. `fold`
+   was already broken, because its callback is `args[1]` and the fix had matched `args[0]`.
+2. `placeRuleCoverage` was written to catch "match `Ident`, then look it up". It matched
+   one spelling and missed two others: `!== "Ident"`, and hand-rolled root walks that never
+   call `lookup`. Generalizing it surfaced **9 sites the gate had been passing**, three of
+   them real aliasing rules (`freezeViewSource`, `borrowDuringCallback`, `errorIfCopyBind`).
+3. The scan WINDOWS were themselves fixed constants. `ownedTempCoverage` read 4200
+   characters of a body already 3834 long — 91% consumed — so the next case label added
+   past that point would have fallen outside the scan silently. Now brace-matched to the
+   method's real end; `callbackSigCoverage` is bounded by the arm rather than by 14 lines.
+
+The rule this yields, and it is the useful one: **an enumeration inherits the defect it
+enumerates, and a gate is an enumeration.** A fix applied across N sites, and the gate
+written to protect that fix, are both lists someone wrote from memory. Neither is finished
+until something mechanical says what is missing — which means the gate has to land in the
+same change as the fix, and the gate's own reach has to be derived rather than guessed.
+
 ## Grade criteria
 
 The compiler is at **B** because of this class alone. What **A** requires, concretely:

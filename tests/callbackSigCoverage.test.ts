@@ -32,9 +32,14 @@ test("every cbHint site checks the callback's signature", () => {
 
   for (let i = 0; i < lines.length; i++) {
     if (!/const cbHint(:| =)/.test(lines[i])) continue;
-    // The check may sit anywhere in the arm that consumes the hint. 14 lines covers the
-    // longest of them (fold, which validates its accumulator as well).
-    const window = lines.slice(i, i + 14).join("\n");
+    // Bounded by the ARM, not by a line count. The check may sit anywhere in the block
+    // that consumes the hint, and the widest today is 8 lines — but a fixed window is a
+    // constant nobody rechecks, and one that silently stops reaching is how a site goes
+    // unnoticed. The next `expr.method === "…"` starts a different combinator, so it is
+    // the honest end of this one.
+    let end = i + 1;
+    while (end < lines.length && end < i + 60 && !/expr\.method === "/.test(lines[end])) end++;
+    const window = lines.slice(i, end).join("\n");
     if (window.includes("checkCallbackSig(")) continue;
     if (window.includes("cbhint-ok:")) continue;
     // Name the method so the failure says which combinator, not just a line number.

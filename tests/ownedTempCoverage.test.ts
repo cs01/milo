@@ -34,7 +34,20 @@ function classified(): { owned: Set<string>; neutral: Set<string> } {
   const src = readFileSync(join(ROOT, "src", "codegen.ts"), "utf8");
   const start = src.indexOf("private isOwnedTempExpr");
   if (start < 0) throw new Error("could not find isOwnedTempExpr in src/codegen.ts");
-  const body = src.slice(start, start + 4200);
+  // Brace-matched to the method's real end rather than sliced at a fixed width. The
+  // window was 4200 characters against a body already 3834 long: the first case label
+  // added past that point would have fallen outside the scan, been read as unclassified,
+  // and — because the neutral list is the other half of this comparison — could equally
+  // have been read as classified when it was not. A gate whose reach depends on a
+  // constant nobody rechecks is the same silent-coverage failure it exists to catch.
+  const body = (() => {
+    let depth = 0, seen = false;
+    for (let i = start; i < src.length; i++) {
+      if (src[i] === "{") { depth++; seen = true; }
+      else if (src[i] === "}") { depth--; if (seen && depth === 0) return src.slice(start, i + 1); }
+    }
+    throw new Error("isOwnedTempExpr is not brace-balanced; the scan cannot be trusted");
+  })();
   const owned = new Set([
     ...[...body.matchAll(/case "([A-Za-z]+)":/g)].map(x => x[1]),
     ...[...body.matchAll(/expr\.kind === "([A-Za-z]+)"/g)].map(x => x[1]),

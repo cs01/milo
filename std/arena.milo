@@ -16,6 +16,20 @@
 // and be returned, and each slot's generation counter turns a use-after-free into
 // a None instead of silent aliasing.
 //
+// **Do NOT reach for it for an APPEND-ONLY pool.** If nothing is ever freed, no slot
+// is ever reused, so the generation check can never fire — it is pure cost on every
+// dispatch. What that shape wants is a distinct newtype per index family (`ExprId`,
+// `StmtId`, …) so the type system stops you passing one where another belongs; the
+// bounds check happens once, where the index is constructed. milojs does exactly this
+// for its AST and measured +4.4% on a loop benchmark against generational handles
+// (`docs/milojs-arena-safety.md`). Generational checking answers "is this slot still
+// the one I meant?", and an append-only pool has already answered that.
+//
+// Worth knowing what handles do NOT answer: they catch a STALE reference, not a
+// MISSING ROOT. If you build a collector on top of an arena, a value reachable only
+// from a local — never handed to the arena — is invisible to a sweep no matter how
+// its handles are typed. That is a different bug and needs a different mechanism.
+//
 // `get` and `modify` move whole values in and out of the slot, and that copy is a
 // heap ALLOCATION for any T that owns heap — 20ms per 200k reads of a node with
 // one Vec field, against ~0 for the borrowing forms. Unless T is plain scalars,

@@ -20,6 +20,9 @@ from "gl" import {
 from "std/png" import {
     encodePng
 }
+from "std/strconv" import {
+    formatFloat
+}
 from "std/args" import {
     args
 }
@@ -54,7 +57,7 @@ from "./world3d" import {
     World, heightAt
 }
 from "./live" import {
-    envF64
+    envF64, envLiveRequested, envFetchLive, envWeatherLabel
 }
 from "./world3d" import {
     marksFor, worldIn, worldUpdate, SEED
@@ -166,6 +169,15 @@ pub fn main(): i32 {
     var places: Vec<City> = Vec.new()
     places.push(loadPlace(place))
     var w = worldIn(SEED, places, true)
+    // Before the render loop, never inside it: this is several network round
+    // trips and the frame path must not be able to block on a public API.
+    if envLiveRequested() {
+        if envFetchLive(w.env, w.city.reach) {
+            print("weather: " + envWeatherLabel(w.env))
+        } else {
+            print("weather: fetch failed, keeping synthetic sky")
+        }
+    }
     let groundTex = groundTexture()
     let skinTex = planeTexture()
     let facadeTex = facadeTexture()

@@ -335,14 +335,30 @@ vec4 cloudMarch(vec3 ro, vec3 rd, float maxT, float jitter) {
     float ph = cloudPhase(ct, 0.72) * 0.75 + cloudPhase(ct, -0.22) * 0.25;
 
     vec3 sunCol = sunLight();
-    // Ambient is not a fudge here — a cloud sits under the whole sky dome and
-    // most of what lights its flanks is that dome, not the sun. It is scaled well
-    // above the zenith radiance because the dome covers a hemisphere and
-    // `skyColor` answers for one direction in it.
-    vec3 ambCol = skyColor(vec3(0.0, 1.0, 0.0), false) * 2.4 + vec3(0.03);
+    // What lights a cloud the sun cannot reach is NEARLY WHITE, not blue.
+    //
+    // This was the sky colour, on the reasoning that a cloud sits under the sky
+    // dome — and it produced an overcast whose underside was the same blue as the
+    // clear sky beside it, so a fully opaque 8/8 layer was invisible. The march
+    // was working the whole time and painting the ceiling sky-blue. Inside a cloud
+    // light has scattered off water droplets many times over, and water droplets
+    // are neutral; little of the dome's blue survives that. Hence a mostly neutral
+    // ambient at the day's illumination LEVEL, with a minority of sky tint left in.
+    float dayLevel = max(max(sunCol.r, sunCol.g), sunCol.b);
+    vec3 ambCol = mix(vec3(0.94, 0.95, 1.00) * dayLevel,
+                      skyColor(vec3(0.0, 1.0, 0.0), false) * 1.6, 0.28) + vec3(0.02);
 
     float trans = 1.0;
     vec3 scat = vec3(0.0);
+    // Where the cloud actually IS along this ray, weighted by how much light each
+    // step contributed. The slab's midpoint is not that distance and is not close
+    // to it: looking up at an overcast from just below its base, the cloud starts
+    // a few hundred metres away and the slab keeps going for kilometres at a
+    // grazing angle, so the midpoint sits far out in the haze. Hazing the cloud at
+    // that distance erased an 8/8 overcast into clear blue sky.
+    float tSum = 0.0;
+    float wSum = 0.0;
+    float ySum = 0.0;
     for (int i = 0; i < STEPS; i++) {
         float t = t0 + (float(i) + jitter) * dt;
         if (t > t1) { break; }
@@ -354,25 +370,45 @@ vec4 cloudMarch(vec3 ro, vec3 rd, float maxT, float jitter) {
             // whole sky, the bottom sees almost none of it, and that gradient is
             // why the underside of a cloud is grey.
             float hf = clamp((p.y - uCloudBase) / max(uCloudTopMax - uCloudBase, 1.0), 0.0, 1.0);
-            vec3 lum = sunCol * lt * ph * 14.0 + ambCol * (0.30 + 0.62 * hf);
+            // The vertical gradient is most of what makes a deck read as a deck.
+            // The underside of an overcast is genuinely dark — the light reaching
+            // it has come through the whole depth of the layer — while the top is
+            // brilliant. Compressing that range is what makes rendered cloud look
+            // like cotton wool.
+            vec3 lum = sunCol * lt * ph * 14.0 + ambCol * (0.11 + 0.85 * hf * hf);
             float ext = d * dt * CLOUD_SIGMA;
             float a = 1.0 - exp(-ext);
-            scat += trans * lum * a;
+            float w = trans * a;
+            scat += w * lum;
+            tSum += t * w;
+            ySum += p.y * w;
+            wSum += w;
             trans *= 1.0 - a;
             if (trans < 0.012) { break; }
         }
     }
     // Put the cloud behind the same air everything else is behind.
     //
-    // Without this the layer keeps full contrast all the way to the horizon while
-    // the terrain under it fades out, so the slab ends in a hard horizontal band
-    // where it runs out of march distance — a straight edge across the sky, which
-    // is the one thing a sky never has.
-    float tMid = t0 + (t1 - t0) * 0.4;
-    float hazeF = 1.0 - exp(-uHaze * tMid * 0.85);
-    vec3 hz = skyColor(rd, false);
-    scat = mix(scat, hz * (1.0 - trans), hazeF);
-    trans = mix(trans, 1.0, hazeF * 0.55);
+    // Without this the layer keeps full contrast to the horizon while the terrain
+    // under it fades out, and the slab ends in a straight horizontal edge where it
+    // runs out of march distance — the one thing a sky never has.
+    //
+    // The air is applied at the cloud's own optical centre and only to the cloud's
+    // own contribution. The pixel behind it already had aerial perspective applied
+    // by whichever pass drew it, so hazing the whole pixel again here would count
+    // the same air twice.
+    if (wSum > 0.0001) {
+        float tCloud = tSum / wSum;
+        float yCloud = ySum / wSum;
+        // Airlight over the top, without also filtering the cloud's own light
+        // by the full amount: at the few hundred metres a low ceiling actually
+        // sits at, the air between is a wash across it rather than a filter that
+        // removes most of it. Taking the full two-way effect dissolved the
+        // ceiling into the haze.
+        vec3 airT = hazeTransmittance(tCloud, uEye.y, yCloud);
+        vec3 airLight = skyColor(rd, false) * (1.0 - airT);
+        scat = scat * (0.35 + 0.65 * airT) + airLight * (1.0 - trans) * 0.65;
+    }
 
     return vec4(scat, trans);
 }

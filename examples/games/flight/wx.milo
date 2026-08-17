@@ -1,0 +1,449 @@
+// The weather that is actually happening, fetched from public feeds.
+//
+// Three sources, each answering the thing it is actually good at. Picking which
+// source answers which question is most of the engineering here, because the
+// obvious assignment is wrong in a way that would quietly produce a clear sky
+// over a fogged-in city.
+//
+//   - **Surface observation (NWS/METAR)** — how much sky is covered, the height
+//     of the cloud base, visibility, wind, temperature and dewpoint. Measured, at
+//     one point, updated hourly-ish. This is the AUTHORITY on coverage and base.
+//
+//   - **Satellite infrared (GOES, via the Iowa Mesonet WMS)** — where the cloud
+//     is, as a picture. Gives the spatial structure a single station cannot: which
+//     half of the map is under cloud and which is in the clear.
+//
+//   - **NEXRAD base reflectivity (same WMS)** — where it is raining, and how hard.
+//
+// **Why infrared is not trusted for coverage.** Infrared sees cloud by how COLD
+// its top is compared with the ground. That works beautifully for a thunderstorm
+// anvil at 12 km and fails completely for the case this game actually has to get
+// right: San Francisco's summer marine layer sits at 120 m with a top a couple of
+// kelvin colder than the sea under it, and no threshold on an infrared image can
+// separate those. Measured while writing this: KSFO reporting FEW at 122 m under
+// a sky the infrared composite calls clear. So the station says how much cloud
+// there is and how low it is; the satellite only says where the structure is.
+//
+// **What is measured and what is estimated**, because the difference matters and
+// gets lost otherwise:
+//   - coverage, cloud base, wind, visibility, temperature: MEASURED.
+//   - horizontal structure: measured, at 4 km resolution, when the cloud is cold
+//     enough for infrared to see it at all.
+//   - cloud TOP: estimated. The greyscale-to-temperature calibration of the
+//     public composite is not published, and the conversion from temperature to
+//     altitude needs a lapse rate. Both assumptions are named below.
+
+from "std/math" import {
+    Math
+}
+from "std/fetch" import {
+    fetch
+}
+from "std/json" import {
+    Json
+}
+from "std/png" import {
+    Png
+}
+from "std/strconv" import {
+    formatFloat
+}
+
+// Metres per degree of latitude. The same constant `tools/fetchcity.milo` builds
+// the map with, so the weather square and the map square are the same square.
+let M_PER_DEG_LAT: f64 = 111320.0
+
+// A surface observation, in SI, with every field explicitly absent rather than
+// zero when the station did not report it. A calm wind and a missing wind are
+// both "0.0" and they are not the same thing.
+pub struct Obs {
+    ok: bool,
+    station: string,
+    tempC: f64,
+    dewC: f64,
+    hasTemp: bool,
+    windDirDeg: f64,
+    windMps: f64,
+    hasWind: bool,
+    visibilityM: f64,
+    hasVis: bool,
+    // Lowest reported layer base, metres above ground. Negative when nothing was
+    // reported, which means clear rather than unknown-and-assume-clear: a station
+    // that sees no cloud reports no layers.
+    baseM: f64,
+    // Sky cover in eighths, the unit the observation is actually made in.
+    coverOktas: f64,
+    desc: string,
+}
+
+pub fn obsEmpty(): Obs {
+    return Obs {
+        ok: false,
+        station: "",
+        tempC: 15.0,
+        dewC: 9.0,
+        hasTemp: false,
+        windDirDeg: 270.0,
+        windMps: 4.0,
+        hasWind: false,
+        visibilityM: 20000.0,
+        hasVis: false,
+        baseM: 0.0 - 1.0,
+        coverOktas: 0.0,
+        desc: "",
+    }
+}
+
+fn getF64(j: &Json, path: &string): Option<f64> {
+    return j.f64Path(path)
+}
+
+// FEW/SCT/BKN/OVC are the observation's own units: eighths of the sky.
+fn oktasOf(amount: &string): f64 {
+    if amount == "SKC" || amount == "CLR" || amount == "NCD" || amount == "NSC" {
+        return 0.0
+    }
+    if amount == "FEW" {
+        return 1.5
+    }
+    if amount == "SCT" {
+        return 3.5
+    }
+    if amount == "BKN" {
+        return 6.0
+    }
+    if amount == "OVC" || amount == "VV" {
+        return 8.0
+    }
+    return 0.0
+}
+
+fn httpJson(url: &string): Option<Json> {
+    match fetch(url) {
+        Result.Ok(r) => {
+            if !r.ok() {
+                return Option.None
+            }
+            match Json.parse(r.text()) {
+                Result.Ok(j) => {
+                    return Option.Some(j)
+                }
+                Result.Err(_) => {
+                    return Option.None
+                }
+            }
+        }
+        Result.Err(_) => {
+            return Option.None
+        }
+    }
+}
+
+// Read one station's latest observation. Returns not-ok when the station has no
+// temperature, which is the marker for "this one is a river gauge, try the next".
+fn readStation(stationUrl: &string): Obs {
+    var o = obsEmpty()
+    let url = stationUrl.clone() + "/observations/latest"
+    // Returning a FRESH empty rather than `o` on this path: `o` is owned, so
+    // handing it to the early return moves it, and every later write to it is
+    // then a use-after-move the checker rejects.
+    let Option.Some(j) = httpJson(url) else {
+        return obsEmpty()
+    }
+    match getF64(j, "properties.temperature.value") {
+        Option.Some(t) => {
+            o.tempC = t
+            o.hasTemp = true
+        }
+        Option.None => {
+            return o
+        }
+    }
+    match getF64(j, "properties.dewpoint.value") {
+        Option.Some(d) => {
+            o.dewC = d
+        }
+        Option.None => {
+        }
+    }
+    match getF64(j, "properties.windDirection.value") {
+        Option.Some(d) => {
+            o.windDirDeg = d
+            o.hasWind = true
+        }
+        Option.None => {
+        }
+    }
+    match getF64(j, "properties.windSpeed.value") {
+        Option.Some(s) => {
+            // The feed reports km/h whatever the unit code suggests.
+            o.windMps = s / 3.6
+        }
+        Option.None => {
+            o.hasWind = false
+        }
+    }
+    match getF64(j, "properties.visibility.value") {
+        Option.Some(v) => {
+            o.visibilityM = v
+            o.hasVis = true
+        }
+        Option.None => {
+        }
+    }
+    match j.strPath("properties.textDescription") {
+        Option.Some(d) => {
+            o.desc = d
+        }
+        Option.None => {
+        }
+    }
+
+    // Layers, lowest base and greatest amount. The lowest base is what the sky
+    // looks like from underneath; the greatest amount is how much of it there is.
+    // A ceiling in the aviation sense is the lowest BROKEN layer, which is a
+    // different and stricter question than the one being asked here.
+    let cur = j.curPath("properties.cloudLayers")
+    if cur >= 0 {
+        let n = j.curLen(cur)
+        var lowest = 0.0 - 1.0
+        var most = 0.0
+        for i in 0..n {
+            let layer = j.curChild(cur, i)
+            let amt = j.curStr(j.curField(layer, "amount")) ?? ""
+            let ok = oktasOf(amt)
+            if ok > most {
+                most = ok
+            }
+            match j.curFloat(j.curField(j.curField(layer, "base"), "value")) {
+                Option.Some(b) => {
+                    if lowest < 0.0 || b < lowest {
+                        lowest = b
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
+        o.baseM = lowest
+        o.coverOktas = most
+    }
+    o.ok = true
+    return o
+}
+
+// The nearest station that is actually a weather station.
+//
+// The list comes back sorted by distance and its head is frequently a tide gauge
+// or a stream sensor that reports water level and nothing else. Walking down it
+// until something reports a temperature is what finds the airport, and the
+// airport is the only thing that reports cloud.
+pub fn fetchObs(lat: f64, lon: f64): Obs {
+    let pt = "https://api.weather.gov/points/" + formatFloat(lat, 4) + "," + formatFloat(lon, 4)
+    let Option.Some(pj) = httpJson(pt) else {
+        return obsEmpty()
+    }
+    let Option.Some(stationsUrl) = pj.strPath("properties.observationStations") else {
+        return obsEmpty()
+    }
+    let Option.Some(sj) = httpJson(stationsUrl) else {
+        return obsEmpty()
+    }
+    let cur = sj.curPath("observationStations")
+    if cur < 0 {
+        return obsEmpty()
+    }
+    let n = sj.curLen(cur)
+    var tried = 0
+    var best = obsEmpty()
+    // Airports first, everything else second.
+    //
+    // The list is sorted by distance and the nearest entries are routinely tide
+    // gauges and stream sensors — over San Francisco the first six are, and the
+    // two airports that actually report a sky are seventh and eighth. Distance
+    // order alone therefore finds a thermometer in the bay and concludes the sky
+    // is clear. A four-letter identifier beginning with K (continental US) or P
+    // (Pacific and Alaska) is an ICAO airport code, and an airport is the thing
+    // with a ceilometer on it.
+    for pass in 0..2 {
+        for i in 0..n {
+            if tried >= 10 {
+                break
+            }
+            let u = sj.curStr(j2cur(sj, cur, i)) ?? ""
+            if u.len == 0 {
+                continue
+            }
+            let id = stationIdOf(u)
+            if isIcao(id) != (pass == 0) {
+                continue
+            }
+            tried = tried + 1
+            let o = readStation(u)
+            if o.ok {
+                // Keep the first station that reports anything, but keep LOOKING
+                // for one that reports cloud — its silence about cloud is not the
+                // same as a report of no cloud.
+                //
+                // The test is read out before either branch moves `o`: an Obs owns
+                // its strings, so assigning it hands them over and the fields
+                // cannot be consulted afterwards.
+                let reportsSky = o.coverOktas > 0.0 || o.baseM >= 0.0
+                if reportsSky {
+                    var got = o
+                    got.station = stationIdOf(u)
+                    return got
+                }
+                if !best.ok {
+                    best = o
+                }
+            }
+        }
+    }
+    if best.ok {
+        best.station = "nearest"
+    }
+    return best
+}
+
+fn j2cur(j: &Json, cur: i64, i: i64): i64 {
+    return j.curChild(cur, i)
+}
+
+// A four-letter ICAO identifier for a US or Pacific airport.
+fn isIcao(id: &string): bool {
+    if id.len != 4 {
+        return false
+    }
+    let c = id[0]
+    return c == 75 as u8 || c == 80 as u8
+}
+
+fn stationIdOf(url: &string): string {
+    var cut = 0
+    for i in 0..url.len {
+        if url[i] == 47 as u8 {
+            cut = i + 1
+        }
+    }
+    return url.slice(cut, url.len).clone()
+}
+
+// A square of a WMS layer, as one scalar per cell.
+//
+// Both the radar and the satellite come through the same call because they are
+// the same request with a different layer name: a bounding box, a pixel count and
+// a PNG back. That is exactly what a map service is for, and it is why neither
+// of these needs a projection library — the server reprojects into the box that
+// was asked for.
+fn fetchWms(base: &string, layer: &string, lat: f64, lon: f64, reach: f64, n: i64, transparent: bool): Option<Vec<f32>> {
+    let mPerLon = M_PER_DEG_LAT * Math.cos(lat * 3.14159265358979 / 180.0)
+    let latMin = lat - reach / M_PER_DEG_LAT
+    let latMax = lat + reach / M_PER_DEG_LAT
+    let lonMin = lon - reach / mPerLon
+    let lonMax = lon + reach / mPerLon
+    var tr = "FALSE"
+    if transparent {
+        tr = "TRUE"
+    }
+    let url = base.clone()
+    + "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=" + layer.clone()
+    + "&STYLES=&SRS=EPSG:4326&BBOX="
+    + formatFloat(lonMin, 5) + "," + formatFloat(latMin, 5) + ","
+    + formatFloat(lonMax, 5) + "," + formatFloat(latMax, 5)
+    + "&WIDTH=" + n.toString() + "&HEIGHT=" + n.toString()
+    + "&FORMAT=image/png&TRANSPARENT=" + tr
+
+    match fetch(url) {
+        Result.Ok(r) => {
+            if !r.ok() {
+                return Option.None
+            }
+            match Png.decode(r.text()) {
+                Result.Ok(img) => {
+                    return Option.Some(gridOf(img.width, img.height, img.channels, img.pixels, n))
+                }
+                Result.Err(_) => {
+                    return Option.None
+                }
+            }
+        }
+        Result.Err(_) => {
+            return Option.None
+        }
+    }
+}
+
+// Luminance per cell, 0..1, with fully transparent texels reported as 0.
+//
+// Row 0 of a PNG is the TOP, which is the NORTH edge of the bounding box, while
+// the world's +z is north — so the row index is flipped on the way in. Getting
+// this wrong mirrors the weather north-to-south, which over a uniform overcast is
+// invisible and over a squall line is completely wrong.
+fn gridOf(w: i64, h: i64, ch: i64, px: &string, n: i64): Vec<f32> {
+    var out: Vec<f32> = Vec.filled(n * n, 0.0)
+    if w <= 0 || h <= 0 {
+        return out
+    }
+    for j in 0..n {
+        // j runs south to north in world order; row 0 of the image is north.
+        let sy = (h - 1) - (j * h / n)
+        for i in 0..n {
+            let sx = i * w / n
+            let k = (sy * w + sx) * ch
+            if k + ch - 1 < px.len {
+                var a = 255.0
+                if ch == 4 {
+                    a = (px[k + 3] as f64)
+                }
+                let r = px[k] as f64
+                let g = px[k + 1] as f64
+                let b = px[k + 2] as f64
+                let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+                out[j * n + i] = ((lum * (a / 255.0)) as f32)
+            }
+        }
+    }
+    return out
+}
+
+// Infrared brightness over the map square, 0 (warm) to 1 (cold).
+//
+// Bright is cold. That is not an assumption: the composite's colour enhancement
+// takes over at the cold end, and the greyscale values immediately bordering
+// coloured pixels measure around 197 of 255 against a field median of 95 — so the
+// ramp runs dark-warm to bright-cold. Checked against a live CONUS frame rather
+// than taken from documentation, because the service publishes none.
+pub fn fetchIr(lat: f64, lon: f64, reach: f64, n: i64): Option<Vec<f32>> {
+    return fetchWms("https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ir.cgi", "goes_conus_ir", lat, lon, reach, n, false)
+}
+
+// Radar base reflectivity over the map square, 0 (nothing) to 1 (violent).
+//
+// The single-site composite is requested for the map's own bounding box rather
+// than by cropping the national mosaic. The mosaic is 0.005 degrees a pixel,
+// about 500 m, so a 16 km city is thirty pixels of it — enough to answer "is it
+// raining" and useless for anything with an edge. Asking the WMS for the box
+// directly gets the underlying radar gates resampled to whatever grid is wanted.
+pub fn fetchRadar(lat: f64, lon: f64, reach: f64, n: i64): Option<Vec<f32>> {
+    return fetchWms("https://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0q.cgi", "nexrad-n0q", lat, lon, reach, n, true)
+}
+
+// The lifting condensation level, metres above the surface.
+//
+// Espy's equation: about 125 m for every kelvin the surface temperature is above
+// its dewpoint. It is the altitude a parcel of surface air has to rise to before
+// it condenses, which is exactly what the base of a convective cloud is, and it
+// agrees with reality to a degree that is hard to believe until it is checked —
+// KSFO measured while writing this reported 14 C over a 13 C dewpoint and a base
+// at 122 m; the formula says 125.
+//
+// It is the fallback, not the primary: when the station reports a base, that
+// number is a measurement and this one is a model.
+pub fn lclMetres(tempC: f64, dewC: f64): f64 {
+    var d = tempC - dewC
+    if d < 0.0 {
+        d = 0.0
+    }
+    return 125.0 * d
+}

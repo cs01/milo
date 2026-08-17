@@ -30,7 +30,10 @@ from "./solar" import {
     SunDir, sunAt
 }
 from "./cloud" import {
-    CloudField, cloudEmpty, cloudSynthetic
+    CLOUD_N, CloudField, cloudEmpty, cloudSynthetic
+}
+from "./wx" import {
+    Obs, obsEmpty, fetchObs, fetchIr, fetchRadar, lclMetres
 }
 
 // How the environment was arrived at, so the HUD can say so rather than implying
@@ -39,6 +42,7 @@ from "./cloud" import {
 pub enum EnvSource: i32 {
     Synthetic = 0,
     Computed = 1,
+    Live = 2,
 }
 
 pub struct LiveEnv {
@@ -67,6 +71,17 @@ pub struct LiveEnv {
     // which it is — see `cloudSource`.
     clouds: CloudField,
     cloudSource: EnvSource,
+    // The observation the sky was built from, kept so the HUD can name the
+    // station and the hour. A live sky that cannot say where its numbers came
+    // from is indistinguishable from an invented one.
+    obs: Obs,
+    // Extinction per metre, from the reported visibility. Koschmieder: the
+    // meteorological range is where contrast falls to 2%, which is an optical
+    // depth of ln(1/0.02) = 3.912.
+    hazeK: f64,
+    // Peak radar reflectivity anywhere on the map, 0..1. Drives whether it is
+    // raining at all.
+    rainPeak: f64,
     // Set when the field has changed and the GPU copy is stale. The renderer
     // clears it after uploading; nothing else writes it.
     cloudsDirty: bool,
@@ -130,6 +145,9 @@ pub fn envNew(lat: f64, lon: f64, reach: f64): LiveEnv {
         sunSource: EnvSource.Synthetic,
         clouds: cloudEmpty(),
         cloudSource: EnvSource.Synthetic,
+        obs: obsEmpty(),
+        hazeK: 0.00013,
+        rainPeak: 0.0,
         cloudsDirty: true,
     }
     envRetime(e, 0.0)
@@ -157,6 +175,175 @@ pub fn envSynthWeather(e: &mut LiveEnv, reachIn: f64) {
     e.clouds = cloudSynthetic(reach, 0.42, 980.0, 1150.0, seed)
     e.cloudSource = EnvSource.Synthetic
     e.cloudsDirty = true
+}
+
+// Build the sky over this place from what is actually being measured over it.
+//
+// Composition rule, and the reason this is not just "draw the satellite image":
+// the STATION sets the level and the SATELLITE sets the pattern. A METAR is a
+// precise measurement of one point — it knows the sky is six eighths covered with
+// a base at 300 m, and it has no idea which six eighths. An infrared image is the
+// exact opposite: it resolves the shape of the field across the whole map and
+// systematically under-reads low cloud. Using either alone gets one of those two
+// halves wrong. Normalising the satellite field to unit mean and multiplying the
+// station's coverage through it takes the half each one is good at.
+//
+// Returns false and changes nothing if the observation could not be fetched,
+// which leaves whatever sky was there before rather than clearing it: a dropped
+// request is not a report of clear skies.
+pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
+    var reach = reachIn
+    if reach < 1000.0 {
+        reach = 8000.0
+    }
+    let o = fetchObs(e.lat, e.lon)
+    if !o.ok {
+        return false
+    }
+
+    // Measured where reported, modelled where not. A station that sees cloud
+    // reports its base; one that sees none reports no layers at all, and the
+    // condensation level is then the honest guess at where cloud WOULD form.
+    var base = o.baseM
+    if base < 0.0 {
+        base = lclMetres(o.tempC, o.dewC)
+    }
+    if base < 60.0 {
+        base = 60.0
+    }
+    let coverage = o.coverOktas / 8.0
+
+    var structure: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 1.0)
+    var haveIr = false
+    match fetchIr(e.lat, e.lon, reach, CLOUD_N) {
+        Option.Some(g) => {
+            structure = g
+            haveIr = true
+        }
+        Option.None => {
+        }
+    }
+    var rain: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 0.0)
+    var peak = 0.0
+    match fetchRadar(e.lat, e.lon, reach, CLOUD_N) {
+        Option.Some(g) => {
+            for i in 0..g.len {
+                if (g[i] as f64) > peak {
+                    peak = g[i] as f64
+                }
+            }
+            rain = g
+        }
+        Option.None => {
+        }
+    }
+    e.rainPeak = peak
+
+    var f = cloudEmpty()
+    f.reach = reach
+    f.baseM = base
+    f.valid = true
+
+    // Wind moves the detail, and it moves it DOWNWIND: a meteorological wind
+    // direction is where the wind is coming FROM, so the vector points the other
+    // way. 270 degrees is a westerly, which blows toward the east, which is +x.
+    let toRad = 3.14159265358979 / 180.0
+    let dirTo = (o.windDirDeg + 180.0) * toRad
+    f.windX = Math.sin(dirTo) * o.windMps
+    f.windZ = Math.cos(dirTo) * o.windMps
+
+    // Normalise the satellite field to unit mean so multiplying it through the
+    // station's coverage preserves that coverage. Without this the absolute
+    // brightness of the infrared composite — which depends on the season, the
+    // hour and the ground temperature — would set how cloudy the game is.
+    var mean = 0.0
+    for i in 0..structure.len {
+        mean = mean + (structure[i] as f64)
+    }
+    mean = mean / (structure.len as f64)
+    if mean < 0.02 {
+        mean = 0.02
+    }
+
+    // Thicker cloud where it is raining, and deeper cloud when the base is high.
+    // A 120 m marine stratus deck is a few hundred metres thick; a raining cumulus
+    // congestus is kilometres. Precipitation is the one observation that reports
+    // on depth at all, so it is what separates them.
+    var thickness = 260.0 + base * 0.55
+    if peak > 0.02 {
+        thickness = thickness + 1400.0 * peak
+    }
+
+    var topMax = base + 120.0
+    let n = f.n
+    for j in 0..n {
+        for i in 0..n {
+            let idx = j * n + i
+            var rel = (structure[idx] as f64) / mean
+            if !haveIr {
+                rel = 1.0
+            }
+            // Centred on 1.0 and widened, so the pattern has real contrast
+            // without the mean drifting off the reported coverage.
+            var c = coverage * (0.30 + 0.70 * rel * 1.55)
+            let r = rain[idx] as f64
+            if r > 0.02 {
+                // It cannot be raining out of a clear patch.
+                let floorC = 0.55 + 0.45 * r
+                if c < floorC {
+                    c = floorC
+                }
+            }
+            if c < 0.0 {
+                c = 0.0
+            }
+            if c > 1.0 {
+                c = 1.0
+            }
+            let top = base + thickness * (0.45 + 0.55 * c) + 900.0 * r
+            if top > topMax {
+                topMax = top
+            }
+            let k = idx * 3
+            f.texel[k] = c as f32
+            f.texel[k + 1] = top as f32
+            f.texel[k + 2] = r as f32
+        }
+    }
+    f.topMaxM = topMax
+
+    e.clouds = f
+    e.cloudSource = EnvSource.Live
+    e.cloudsDirty = true
+    // Koschmieder. A reported 16 km visibility is 2.4e-4 per metre, which is a
+    // markedly hazier sky than the 1.3e-4 the renderer had hard-coded — and it is
+    // the measurement, so it wins.
+    if o.hasVis && o.visibilityM > 200.0 {
+        e.hazeK = 3.912 / o.visibilityM
+    }
+    e.obs = o
+    return true
+}
+
+// Whether the player asked for the real sky. Off by default: it costs several
+// network round trips at startup and it makes the game's appearance depend on
+// something outside the machine, both of which should be opt-in.
+pub fn envLiveRequested(): bool {
+    return envF64("FLYBY_LIVE", 0.0) > 0.5
+}
+
+// One line describing where the sky came from, for the HUD and the console.
+pub fn envWeatherLabel(e: &LiveEnv): string {
+    if (e.cloudSource as i32) == (EnvSource.Live as i32) {
+        var s = "LIVE " + e.obs.station.clone()
+        s = s + "  " + ((e.obs.coverOktas as i64)).toString() + "/8"
+        s = s + "  base " + ((e.clouds.baseM as i64)).toString() + "m"
+        if e.rainPeak > 0.02 {
+            s = s + "  RAIN"
+        }
+        return s
+    }
+    return "SYNTHETIC SKY"
 }
 
 // Point the environment at a new place without losing the clock.

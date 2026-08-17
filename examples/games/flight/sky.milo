@@ -188,6 +188,28 @@ vec3 skyTint() {
 //   - Blue is scattered most. Running the extinction per channel is the entire
 //     reason distant terrain looks BLUE rather than looking grey, and it costs
 //     two extra multiplies.
+// Optical depth of the air along a segment. Factored out because the cloud march
+// needs exactly this number for the air BETWEEN the camera and the cloud, and two
+// copies of an integral that must agree is two copies that will not.
+float hazeOpticalDepth(float d, float hEye, float hFrag) {
+    float H = 1150.0;
+    float a = max(hEye, 0.0);
+    float b = max(hFrag, 0.0);
+    float ea = exp(-a / H);
+    float eb = exp(-b / H);
+    float dh = a - b;
+    if (abs(dh) < 1.0) {
+        return uHaze * d * ea;
+    }
+    return uHaze * d * H * (eb - ea) / dh;
+}
+
+// Per-channel transmittance over that segment. Blue is scattered most, which is
+// the entire reason distance looks blue.
+vec3 hazeTransmittance(float d, float hEye, float hFrag) {
+    return exp(-hazeOpticalDepth(d, hEye, hFrag) * vec3(0.76, 0.93, 1.22));
+}
+
 vec3 aerial(vec3 col, vec3 rd, float d, float hEye, float hFrag) {
     float H = 1150.0;
     float a = max(hEye, 0.0);
@@ -206,15 +228,7 @@ vec3 aerial(vec3 col, vec3 rd, float d, float hEye, float hFrag) {
     //
     // The closed form divides by the altitude difference and so is singular for a
     // level ray — the most common ray in the frame — hence the branch.
-    float dh = a - b;
-    float integral;
-    if (abs(dh) < 1.0) {
-        integral = d * ea;
-    } else {
-        integral = d * H * (eb - ea) / dh;
-    }
-    float od = uHaze * integral;
-    vec3 t = exp(-od * vec3(0.76, 0.93, 1.22));
+    vec3 t = hazeTransmittance(d, hEye, hFrag);
     return col * t + skyColor(rd, false) * (1.0 - t);
 }
 

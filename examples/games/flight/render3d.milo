@@ -572,7 +572,9 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         s.fogEnd = 4200.0
         // ~30 km visibility. `fogStart`/`fogEnd` still bound the draw distance
         // and the camera, but they no longer decide what the air looks like.
-        s.haze = 0.00013
+        // The measured visibility when there is one, and a clear-day default
+        // when there is not. `hazeK` is where that decision already happened.
+        s.haze = w.env.hazeK
         applyClouds(s, w)
         // The sun is WHERE THE SUN IS: computed from the city's own latitude and
         // longitude and the current UTC instant (`solar.milo`), not chosen.

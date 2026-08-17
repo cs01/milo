@@ -1,0 +1,22 @@
+// @proven: 2
+// @failed: 1
+// @unknown: 0
+// The soundness half of the proof cut: a cut that does NOT hold is refuted where it is
+// written, and every proof that leaned on it is reported as conditional on it.
+//
+// Before that bookkeeping existed, the postcondition below came back a clean tick — it is
+// trivially provable from `a >= 100`, and nothing anywhere said `a >= 100` had itself been
+// refuted. That is the one way a proof cut turns into a false proof, so the cut carries an
+// identity and its dependents name it, exactly as a callee's `ensures` does.
+pub fn bad(a: i64): i64
+requires a >= 0
+ensures result >= 100
+{
+    assert(a >= 100)
+    return a
+}
+
+pub fn main(): i32 {
+    print(bad(200))
+    return 0
+}

@@ -17,6 +17,14 @@ export const BASELINE: Record<string, string> = {
     "invariant for, so it refutes with used=1,cap=0. Propagating `requires used <= cap` " +
     "onto the wrapper would be tautological ceremony on a getter; retire this once " +
     "prove-milo models struct invariants (docs/verification-roadmap.md).",
+  "std/arena.milo::arenaAlloc":
+    "the runtime capacity guard `assert(idx <= 2147483647)`, now a proof obligation " +
+    "because `assert` became a proof cut (docs/verification-roadmap.md). `idx` is " +
+    "`a.data.len`, which the model knows only to be non-negative — nothing bounds a Vec's " +
+    "length above, so the solver refutes with len = 2^31. That is the assert doing its " +
+    "job: it exists precisely because the bound cannot be established statically, and it " +
+    "aborts at runtime if it is ever reached. Retiring this needs a length bound in the " +
+    "model, not a change to the code.",
   "examples/embedded/pidStep.milo::pidStep":
     "call-site preconditions for fpMul(kp, error) / fpMul(ki, newIntegral) / " +
     "fpMul(kd, derivative). fpMul requires its args >= i32::MIN, which no i32 can " +

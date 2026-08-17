@@ -55,15 +55,40 @@ now come back `failed` with a real counterexample instead of `unknown`. Rational
 coefficients reach the i64 rows by per-atom scaling (multiplying an inequality by a
 positive constant preserves its solution set).
 
+**`assert E` as a proof cut (2026-08-16).** The practical substitute for quantifiers, and
+it needed no new syntax at all: `assert` was already a builtin. Each one is now proven where
+it is written, under the path conditions that reach it, and then ASSUMED by everything
+downstream — so a user can hand the solver the single intermediate fact that reconnects a
+goal to its premises.
+
+Assuming it is sound for a reason specific to `assert` and unavailable to a bare `assume`:
+codegen emits an unconditional abort on a false assert, in every build mode, so no execution
+reaches the next statement with E false. There is deliberately no `assume` form; an
+unchecked one is a false proof with a keyword.
+
+A cut whose own VC is not discharged still feeds the assumption — ordinary
+assume-guarantee, the same deal a callee's `ensures` gets — so each cut carries an identity
+and every VC that leaned on it names it. Without that, `assert(a >= 100)` refuted with a
+counterexample and the postcondition it made trivial reported a clean tick.
+
+Measured on the shape it is for: `sumTo`'s `ensures result >= 0` is *refuted* without a cut,
+because the walker havocs `s` at the loop and the postcondition becomes a claim about a free
+variable. With the cut it is proven, and the report says which fact it rests on until a loop
+invariant discharges the cut too (`tests/prove/proofCut.milo`: 7/7, unconditional).
+
+**Where a cut does NOT help, and it is worth knowing before reaching for one.** `std/smt`
+rejects any row containing a nonlinear product, so asserting a fact *about* such a term
+leaves both the cut and its consumer unknown — `let a = w * h; assert(a >= 1)` lowers `a`
+back to `(* w h)` in both. A cut buys something only where the connection was lost
+(a loop havoc, a branch) and not where the *term* is untranslatable. Fixing that case means
+abstracting a nonlinear subterm to a fresh constant, which is a different change.
+
 **Next, in order of leverage per unit of syntax:**
 
 1. **Range subtypes.** `MiloType` already carries `rangeMin`/`rangeMax` (`i32(0..50000)`).
    Propagating those into `intRangeAssumption` retires the `pidStep` baseline, whose whole
    problem is that only *parameters* carry range facts, so `setpoint - measured` escapes to
    ±2^32 in the unbounded-Int model. Mostly plumbing over an existing representation.
-2. **`assert E` as a proof cut** — prove it there, assume it downstream. The practical
-   substitute for quantifiers: it lets a user hand-decompose a proof the solver cannot do in
-   one shot, with no trigger machinery.
 3. **`@pure`.** `modelCall` deliberately refuses to share a constant between two identical
    call sites, because a Milo function may read mutable global state. Purity unlocks that.
 4. **`old` at loop entry** (SPARK's `'Loop_Entry`).

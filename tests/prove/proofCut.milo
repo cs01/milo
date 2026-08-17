@@ -1,0 +1,39 @@
+// @proven: 7
+// @failed: 0
+// @unknown: 0
+// `assert E` as a PROOF CUT: prove E where it is written, assume it downstream.
+//
+// This is the practical substitute for the quantifiers this prover deliberately does not
+// have (docs/verification-roadmap.md) — it lets a user hand-decompose a proof the solver
+// cannot do in one shot, with no trigger machinery and no new theory.
+//
+// Assuming it downstream is sound for a reason specific to `assert` and unavailable to a
+// bare `assume`: codegen emits an unconditional abort on a false assert in every build
+// mode, so no execution reaches the next statement with E false. `assume` with no runtime
+// check would be a false proof with a keyword, which is why there is no such form.
+//
+// Without the cut the postcondition is REFUTED, not merely unknown: after the loop the
+// walker havocs `s`, so `result >= 0` is a claim about a free variable. The cut names the
+// one fact that reconnects them, and the loop invariant is what discharges the cut itself
+// — see tests/prove/proofCutRefuted.milo for what happens when nothing does.
+pub fn sumTo(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var s = 0
+    var i = 0
+    while i < n
+    invariant s >= 0
+    invariant i >= 0
+    {
+        s = s + i
+        i = i + 1
+    }
+    assert(s >= 0)
+    return s
+}
+
+pub fn main(): i32 {
+    print(sumTo(5))
+    return 0
+}

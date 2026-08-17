@@ -5,7 +5,7 @@ import { must } from "./must";
 
 export interface VerificationCondition {
   fn: string;
-  kind: "precondition" | "postcondition" | "loop-invariant" | "termination" | "struct-invariant";
+  kind: "precondition" | "postcondition" | "loop-invariant" | "termination" | "struct-invariant" | "assert";
   smtlib: string;
   description: string;
   // Callees whose `ensures` this VC was allowed to ASSUME. Modular verification is
@@ -19,6 +19,13 @@ export interface VerificationCondition {
   // good as the construction and maintenance obligations for that type.
   assumesInvariants?: string[];
   invariantOf?: string;
+  // Proof cuts (`assert E`) this VC was allowed to ASSUME, named by the cut's own
+  // description, and — on a cut's own VC — the name it is discharging. Same
+  // assume-guarantee bookkeeping as `assumes`: a postcondition downstream of a REFUTED cut
+  // proved cleanly and said nothing about it before this existed, which is the one way a
+  // proof cut can turn into a false proof.
+  assumesCuts?: string[];
+  cutId?: string;
   // Callees modelled by an INVENTED value: a `@pure` fn with no `ensures` gets a symbol
   // that says only "this call has one fixed value per argument list". That is sound to
   // assume, but the solver is free to pick any value for it, so a counterexample built on
@@ -481,6 +488,58 @@ interface StructLitSite {
   conditions: string[];
 }
 
+// An `assert(E)` reached during symbolic execution — the proof cut, and the practical
+// substitute for the quantifiers this prover deliberately does not have (see
+// docs/verification-roadmap.md). It carries two obligations in one statement: E must be
+// PROVEN where it is written, and downstream it may be ASSUMED, so a user can hand the
+// solver the one intermediate fact that turns a nonlinear VC into a linear one.
+//
+// Assuming it downstream is sound for a reason specific to `assert` and NOT available to a
+// bare `assume`: codegen emits an unconditional abort on a false assert, in every build
+// mode, so no execution reaches the following statement with E false. An `assume` with no
+// runtime check would be a false proof with a keyword, which is why there is no such form.
+//
+// A cut whose own proof comes back `unknown` still feeds the assumption, exactly as a call
+// to a function whose `ensures` was never discharged does — that is ordinary
+// assume-guarantee, and `assumes` on the downstream VC is what records it.
+interface AssertSite {
+  cond: string;          // lowered to SMT in the environment at the assert
+  conditions: string[];  // path conditions in force where it is written
+  source: string;        // the expression as the user wrote it, for the description
+  line: number;
+}
+
+// The condition of a statement that is exactly `assert(E)` — nothing else. Deliberately
+// narrow: `assert` is variadic (a second argument is the failure message), and an assert
+// buried in a larger expression is not a statement-level cut.
+function assertCondition(stmt: Stmt): Expr | null {
+  if (stmt.kind !== "ExprStmt") return null;
+  const e = stmt.expr as any;
+  if (e?.kind !== "Call" || e.func !== "assert") return null;
+  const first = e.args?.[0];
+  const inner = first?.expr ?? first;
+  return inner && typeof inner === "object" && "kind" in inner ? (inner as Expr) : null;
+}
+
+// A one-line rendering of the asserted expression for the VC description. The prover has no
+// access to source text, and "assert holds" with no expression names nothing when three cuts
+// in one function each report a different verdict.
+function exprSource(e: Expr): string {
+  const n = e as any;
+  switch (n.kind) {
+    case "Ident": return n.name;
+    case "IntLit": case "FloatLit": return String(n.value);
+    case "BoolLit": return String(n.value);
+    case "BinOp": return `${exprSource(n.left)} ${n.op} ${exprSource(n.right)}`;
+    case "UnaryOp": return `${n.op}${exprSource(n.operand)}`;
+    case "FieldAccess": return `${exprSource(n.object)}.${n.field}`;
+    case "IndexAccess": return `${exprSource(n.object)}[${exprSource(n.index)}]`;
+    case "Call": return `${n.func}(…)`;
+    case "MethodCall": return `${exprSource(n.object)}.${n.method}(…)`;
+    default: return n.kind;
+  }
+}
+
 // Collect all execution paths through a function body via symbolic execution.
 // Handles if/else chains and early returns — the common pattern in contract-bearing functions.
 interface SymExecResult {
@@ -494,6 +553,7 @@ interface SymExecResult {
   havocDecls: string[];
   loops: LoopObligation[];
   structLits: StructLitSite[];
+  asserts: AssertSite[];
 }
 
 interface SymExecContext {
@@ -897,6 +957,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   const paths: SymPath[] = [];
   const calls: CallSite[] = [];
   const structLits: StructLitSite[] = [];
+  const asserts: AssertSite[] = [];
   const ctx = context ?? { havocSeq: 0, havocDecls: [] };
   const loops: LoopObligation[] = [];
   const varTypes = new Map(types ?? []);
@@ -1061,6 +1122,22 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
         applyMutations();
         continue;
       }
+      // `assert(E)` is the proof cut. Lowered in the PRE-mutation environment for the same
+      // reason a call's arguments are (the statement's own effects have not happened yet),
+      // then pushed onto the path conditions so every statement after it sees E as a fact.
+      // Pushing onto `pathConds` in place is what makes the assumption reach the rest of
+      // this block AND every nested body, which copy the array as they descend.
+      const cut = assertCondition(stmt);
+      if (cut) {
+        const smt = exprToSmtWithEnv(cut, localEnv);
+        // An unlowerable condition is not a fact — it is a marker. Proving it is impossible
+        // and assuming it would put `UNSUPPORTED` into the solver's input, so the cut is
+        // dropped entirely rather than half-applied.
+        if (!/UNSUPPORTED/.test(smt)) {
+          asserts.push({ cond: smt, conditions: [...pathConds], source: exprSource(cut), line: (stmt as any).span?.line ?? 0 });
+          pathConds.push(smt);
+        }
+      }
       applyMutations();
       if (stmt.kind === "Return") {
         const val = stmt.value ? exprToSmtWithEnv(stmt.value, localEnv) : "0";
@@ -1098,6 +1175,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
           .filter(s => !/UNSUPPORTED/.test(s));
         const bodyRun = collectPaths(stmt.body, havocEnv, varTypes, ctx);
         structLits.push(...bodyRun.structLits);
+        asserts.push(...bodyRun.asserts);
         const active = [...pathConds, ...assumed, ...(/UNSUPPORTED/.test(guard) ? [] : [guard])];
         loops.push({
           entryConds: [...pathConds],
@@ -1205,6 +1283,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
           .filter(s => !/UNSUPPORTED/.test(s));
         const bodyRun = collectPaths(stmt.body, havocEnv, varTypes, ctx);
         structLits.push(...bodyRun.structLits);
+        asserts.push(...bodyRun.asserts);
         const active = [...pathConds, ...assumed, ...(guard && !/UNSUPPORTED/.test(guard) ? [guard] : [])];
         loops.push({
           entryConds: [...pathConds],
@@ -1258,7 +1337,7 @@ function collectPaths(stmts: Stmt[], env: Map<string, string>, types?: Map<strin
   }
 
   walkCapture(stmts, 0, [], new Map(env));
-  return { paths, finalEnvs, breakEnvs, continueEnvs, calls, havocDecls: ctx.havocDecls, loops, structLits };
+  return { paths, finalEnvs, breakEnvs, continueEnvs, calls, havocDecls: ctx.havocDecls, loops, structLits, asserts };
 }
 
 // `x.len` on a string/Vec/array can never be negative, and the solver has no way to know
@@ -1648,7 +1727,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
     // Lowered BEFORE the declaration block is assembled: substituting the callee's params
     // for the caller's arguments is what invents symbols like `key_len`, and they have to
     // reach `fieldRefs` in time to be declared.
-    const callObligations: { callee: string; obligation: string; guard: string }[] = [];
+    const callObligations: { callee: string; obligation: string; guard: string; conds: string[] }[] = [];
     for (const call of symResult.calls) {
       const callee = requiresByFn.get(call.name);
       if (!callee || callee.name === fn.name) continue;   // self-recursion: needs induction, skip
@@ -1663,7 +1742,7 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
         // an unchecked precondition indistinguishable from a checked one — the call simply
         // wasn't in the report, so nothing said the guarantee was resting on nothing.
         const guard = call.conditions.length > 0 ? `(assert (and ${call.conditions.join(" ")}))` : "";
-        callObligations.push({ callee: callee.name, obligation, guard });
+        callObligations.push({ callee: callee.name, obligation, guard, conds: call.conditions });
       }
     }
 
@@ -1713,10 +1792,27 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
       ...structAssumptions,
     ].join("\n");
 
+    // Built before any VC is emitted so a cut can name an EARLIER cut it leaned on: the
+    // conditions arrays already carry the earlier cut's SMT, and this is what turns that
+    // string back into the name the report uses. Identical facts asserted twice collapse to
+    // one name, which is right — they are the same fact.
+    const cutName = new Map<string, string>();
+    for (const a of symResult.asserts) {
+      const name = `assert ${a.source}${a.line ? ` (line ${a.line})` : ""}`;
+      if (!cutName.has(a.cond)) cutName.set(a.cond, name);
+    }
+    const cutsIn = (conds: string[]): string[] => {
+      const seen = new Set<string>();
+      for (const c of conds) { const n = cutName.get(c); if (n) seen.add(n); }
+      return [...seen];
+    };
+
     for (const o of callObligations) {
+      const leansOn = cutsIn(o.conds);
       conditions.push({
         fn: fn.name,
         kind: "precondition",
+        ...(leansOn.length ? { assumesCuts: leansOn } : {}),
         description: `call to ${o.callee} from ${fn.name}: ${o.obligation}`,
         smtlib: [
           `; Call-site precondition proof: ${fn.name} -> ${o.callee}`,
@@ -1725,6 +1821,32 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
           preAssumptions,
           o.guard,
           `(assert (not ${o.obligation}))`,
+          `(check-sat)`,
+        ].filter(Boolean).join("\n"),
+      });
+    }
+
+    // Each `assert(E)` is proven where it is written, under the path conditions that reach
+    // it and under the cuts BEFORE it — `assert a; assert b` lets the second lean on the
+    // first, which is the whole point of a decomposition. The conditions array already
+    // carries the earlier cuts, because they were pushed onto it as the walker passed them.
+
+    for (const a of symResult.asserts) {
+      const guard = a.conditions.length > 0 ? `(assert (and true ${a.conditions.join(" ")}))` : "";
+      const leansOn = cutsIn(a.conditions);
+      conditions.push({
+        fn: fn.name,
+        kind: "assert",
+        cutId: cutName.get(a.cond),
+        ...(leansOn.length ? { assumesCuts: leansOn } : {}),
+        description: `assert in ${fn.name}${a.line ? `:${a.line}` : ""}: ${a.source}`,
+        smtlib: [
+          `; Proof cut: ${fn.name} asserts ${a.source}`,
+          `(set-logic ALL)`,
+          allDecls,
+          preAssumptions,
+          guard,
+          `(assert (not ${a.cond}))`,
           `(check-sat)`,
         ].filter(Boolean).join("\n"),
       });
@@ -1761,9 +1883,15 @@ export function generateVerificationConditions(program: Program, opts?: { onlyFi
             return `(and true ${parts.join(" ")})`;
           });
           const violated = violations.length === 1 ? violations[0] : `(or ${violations.join(" ")})`;
+          // A postcondition is the usual downstream consumer of a cut: the exit conditions
+          // it is proved under are exactly the path conditions the walker left behind, cuts
+          // included. Without naming them, a postcondition proved off a REFUTED cut came
+          // back a clean tick.
+          const leansOn = cutsIn(exits.flatMap(e => e.conditions));
           conditions.push({
             fn: fn.name,
             kind: "postcondition",
+            ...(leansOn.length ? { assumesCuts: leansOn } : {}),
             description: `postcondition of ${fn.name}: ${postSmt}`,
             smtlib: [
               `; Postcondition proof for ${fn.name}`,
@@ -2272,14 +2400,28 @@ export function conditionalProofs(pr: ProveResult): Map<SolverResult, string[]> 
     const rs = invariantResults.get(name);
     return rs !== undefined && rs.length > 0 && rs.every(x => x.status === "proven");
   };
+  // A proof cut holds only if its own VC was discharged. Keyed by the cut's name, and a
+  // name with no result at all counts as NOT held — a missing proof is not a proof.
+  const cutResults = new Map<string, SolverResult[]>();
+  for (const r of pr.results) {
+    if (!r.vc.cutId) continue;
+    const list = cutResults.get(r.vc.cutId) ?? [];
+    list.push(r);
+    cutResults.set(r.vc.cutId, list);
+  }
+  const cutHolds = (name: string) => {
+    const rs = cutResults.get(name);
+    return rs !== undefined && rs.length > 0 && rs.every(x => x.status === "proven");
+  };
   const out = new Map<SolverResult, string[]>();
   for (const r of pr.results) {
     if (r.status !== "proven") continue;
+    const weakCuts = (r.vc.assumesCuts ?? []).filter(name => !cutHolds(name));
     const weak = (r.vc.assumes ?? []).filter(fn => (fn === r.vc.fn ? !terminates(fn) : !established(fn)));
     const weakInv = (r.vc.assumesInvariants ?? [])
       .filter(name => !invariantHolds(name))
       .map(name => `${name}'s invariant`);
-    if (weak.length || weakInv.length) out.set(r, [...weak, ...weakInv]);
+    if (weak.length || weakInv.length || weakCuts.length) out.set(r, [...weak, ...weakInv, ...weakCuts]);
   }
   return out;
 }
@@ -2380,6 +2522,7 @@ export function proveJson(pr: ProveResult): string {
       ...(r.detail ? { detail: r.detail } : {}),
       ...(r.vc.assumes?.length ? { assumes: r.vc.assumes } : {}),
       ...(r.vc.assumesInvariants?.length ? { assumesInvariants: r.vc.assumesInvariants } : {}),
+      ...(r.vc.assumesCuts?.length ? { assumesCuts: r.vc.assumesCuts } : {}),
     })),
   }, null, 2) + "\n";
 }
@@ -2396,7 +2539,11 @@ export function formatProveReport(pr: ProveResult): string {
     const weak = conditional.get(r);
     const selfAssumed = weak?.includes(r.vc.fn);
     const invariants = weak?.filter(f => f.endsWith("'s invariant")) ?? [];
-    const others = weak?.filter(f => f !== r.vc.fn && !f.endsWith("'s invariant")) ?? [];
+    // A cut reads nothing like a callee: "assumes assert x >= 0, whose own postcondition is
+    // not established" names a postcondition a cut does not have. Split out by the prefix
+    // the cut names carry.
+    const cuts = weak?.filter(f => f.startsWith("assert ")) ?? [];
+    const others = weak?.filter(f => f !== r.vc.fn && !f.endsWith("'s invariant") && !f.startsWith("assert ")) ?? [];
     // Two different gaps read the same in the tally but not to a reader: a function with no
     // `decreases` at all was never asked to terminate, while one whose measure came back
     // unproven was asked and could not answer.
@@ -2408,6 +2555,7 @@ export function formatProveReport(pr: ProveResult): string {
     if (others.length) parts.push(`${others.join(", ")}, whose own postcondition is not established`);
     if (selfAssumed) parts.push(termNote);
     if (invariants.length) parts.push(`${invariants.join(", ")}, which this run did not establish at every construction and mutation`);
+    if (cuts.length) parts.push(`the proof ${cuts.length === 1 ? "cut" : "cuts"} ${cuts.join(", ")}, which this run did not discharge`);
     const note = parts.length === 0 ? "" : ` — conditional: assumes ${parts.join("; and ")}`;
     lines.push(`  ${icon} [${r.vc.kind}] ${r.vc.fn}: ${r.status}${r.detail ? ` — ${r.detail}` : ""}${note}`);
   }

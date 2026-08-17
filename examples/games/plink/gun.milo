@@ -18,7 +18,7 @@ from "gl" import {
     GlContext, Gpu, Mesh
 }
 from "./mat4" import {
-    identity, lookAt, multiply, perspective, rotationX, rotationY, rotationZ, translation
+    identity, lookAt, multiply, perspective, rotationX, rotationY, rotationZ, scaling, translation
 }
 from "./mesh" import {
     Builder, builder
@@ -32,8 +32,6 @@ from "./textures" import {
 from "./vec3" import {
     Vec3, v3
 }
-
-pub let CYLINDER_ROUNDS: i64 = 6
 
 pub struct Gun {
     steelMesh: Mesh,
@@ -53,8 +51,6 @@ pub struct Gun {
     cylinder: f64,
     cylinderTarget: f64,
 
-    rounds: i64,
-    reloadT: f64,
     cooldown: f64,
 }
 
@@ -229,30 +225,24 @@ pub fn newGun(gl: &mut GlContext): Gun {
         flash: 0.0,
         cylinder: 0.0,
         cylinderTarget: 0.0,
-        rounds: CYLINDER_ROUNDS,
-        reloadT: 0.0,
         cooldown: 0.0,
     }
 }
 
 impl Gun {
+    // The only thing between you and the next shot is how fast the hammer comes
+    // back. Counting six and then standing still for a second is a rule that only
+    // ever interrupts the thing this game is about.
     fn canFire(self: &Self): bool {
-        return self.rounds > 0 && self.cooldown <= 0.0 && self.reloadT <= 0.0
+        return self.cooldown <= 0.0
     }
 
     fn fire(self: &mut Self) {
-        self.rounds = self.rounds - 1
         self.cooldown = 0.16
         self.kickBack = 0.030
         self.kickRise = 0.075
         self.flash = 0.045
         self.cylinderTarget = self.cylinderTarget + 1.0472
-    }
-
-    fn beginReload(self: &mut Self) {
-        if self.reloadT <= 0.0 && self.rounds < CYLINDER_ROUNDS {
-            self.reloadT = 1.15
-        }
     }
 
     fn update(self: &mut Self, dt: f64) {
@@ -262,13 +252,6 @@ impl Gun {
         self.kickRise = self.kickRise - self.kickRise * Math.minF64(dt * 16.0, 1.0)
         self.kickBack = self.kickBack - self.kickBack * Math.minF64(dt * 10.0, 1.0)
         self.cylinder = self.cylinder + (self.cylinderTarget - self.cylinder) * Math.minF64(dt * 14.0, 1.0)
-        if self.reloadT > 0.0 {
-            self.reloadT = self.reloadT - dt
-            if self.reloadT <= 0.0 {
-                self.reloadT = 0.0
-                self.rounds = CYLINDER_ROUNDS
-            }
-        }
     }
 
     // The gun's own frame: a fixed offset from the eye, rotated into the view
@@ -297,35 +280,39 @@ impl Gun {
         // Angled across the view rather than pointed straight down it: a gun
         // parallel to the camera shows you its back end and nothing else, and
         // the back end of a revolver is a dark circle.
-        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + reloadTilt(self.reloadT) + 0.04 - 0.04 * aim), multiply(rotationY(0.44 - 0.44 * aim), rotationZ(-0.07 + 0.07 * aim))))
-        return multiply(translation(eye), multiply(basis, local))
+        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + 0.04 - 0.04 * aim), multiply(rotationY(0.44 - 0.44 * aim), rotationZ(-0.07 + 0.07 * aim))))
+        // 1.35x. A viewmodel is always a little bigger than the real thing —
+        // held at arm's length in an 85 degree frustum, a life-size revolver is
+        // a detail in the corner rather than the gun in your hand.
+        return multiply(translation(eye), multiply(basis, multiply(local, scaling(1.35))))
     }
 
     fn cylinderMatrix(self: &Self, model: &Vec<f32>): Vec<f32> {
         return multiply(model, multiply(translation(v3(0.0, 0.016, -0.044)), multiply(rotationZ(self.cylinder), translation(v3(0.0, -0.016, 0.044)))))
     }
 
-    fn draw(self: &Self, gfx: &Gfx, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64, aspect: f64) {
+    // Drawn in the scene's own projection with the depth buffer live, not in a
+    // private frustum with the depth test switched off. The old way had no depth
+    // at all inside the gun: the barrel painted over the frame, then the cylinder
+    // painted over the barrel, and the far wall of every tube showed through its
+    // own near wall. That is what made it look like glass. The scene's near plane
+    // is 6 cm and the gun is held at about 60, so it needs no special frustum —
+    // it is simply the nearest thing in the world.
+    fn draw(self: &Self, gfx: &Gfx, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64, viewProj: &Vec<f32>) {
         let model = self.modelMatrix(eye, fwd, right, up, aim, bob)
-        // Its own projection: a 50-degree horizontal frustum with a 3 cm near
-        // plane, so the gun is never clipped and never fish-eyed.
-        let fovY = 2.0 * Math.atan(Math.tan(0.47) / aspect)
-        let proj = perspective(fovY, aspect, 0.02, 12.0)
-        let view = lookAt(eye, eye + fwd, up)
-        let vp = multiply(proj, view)
         gfx.scene.bind()
-        gfx.scene.uniformMat4("uViewProj", vp)
+        gfx.scene.uniformMat4("uViewProj", viewProj)
+        // The AO buffer holds the occlusion of whatever the gun is covering up,
+        // and the gun is not in the prepass that built it.
         gfx.setAoAmount(0.0)
-        Gpu.depthTest(false)
-        Gpu.depthWrite(false)
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
         gfx.sceneDraw(self.steelMesh, model, self.steelMat)
         gfx.sceneDraw(self.cylMesh, self.cylinderMatrix(model), self.steelMat)
         gfx.sceneDraw(self.gripMesh, model, self.gripMat)
         if self.flash > 0.0 {
             gfx.sceneDraw(self.flashMesh, model, self.flashMat)
         }
-        Gpu.depthTest(true)
-        Gpu.depthWrite(true)
         gfx.setAoAmount(1.0)
     }
 
@@ -335,14 +322,4 @@ impl Gun {
         self.gripMesh.free(gl)
         self.flashMesh.free(gl)
     }
-}
-
-// The gun tips over while it is being reloaded and comes back level as the last
-// round goes in.
-fn reloadTilt(t: f64): f64 {
-    if t <= 0.0 {
-        return 0.0
-    }
-    let phase = Math.minF64(t / 1.15, 1.0)
-    return 0.75 * Math.sin(phase * 3.14159)
 }

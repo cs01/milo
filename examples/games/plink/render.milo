@@ -314,7 +314,10 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
         aoRadius: 0.95,
         debug: 0.0,
         exposure: 1.0,
-        bloomAmount: 0.06,
+        // A little more than a film camera would give you. The targets and the
+        // break are emissive now, and the bloom is what carries their light out
+        // past their own silhouette.
+        bloomAmount: 0.10,
         flash: 0.0,
         time: 0.0,
     }

@@ -250,6 +250,54 @@ fn falseFront(wood: &mut Builder, paint: &mut Builder, side: f64, zNear: f64, zF
     }
     paint.setAo(1.0)
     paint.setTint(1.0, 1.0, 1.0)
+
+    // A frame and a sill around every opening. A hole cut straight into a plank
+    // wall is the single most obvious thing missing from a rendered building:
+    // real joinery stands proud of the siding and throws a shadow, and that
+    // shadow is what tells the eye the wall has thickness.
+    wood.setUvScale(3.0)
+    wood.setTint(tint * 0.72, tint * 0.66, tint * 0.58)
+    let out = side * 0.07
+    var zw = zNear + 1.1
+    while zw < zFar - 1.1 {
+        windowCasing(wood, xFace, out, side, 1.15, 2.15, zw, zw + 0.85)
+        if frontHeight > bodyHeight + 1.2 {
+            windowCasing(wood, xFace, out, side, 2.75, 3.55, zw + 0.1, zw + 0.75)
+        }
+        zw = zw + 2.4
+    }
+
+    // The door, in the middle of the front, with a plank step at its foot.
+    let zd = (zNear + zFar) * 0.5 - 0.52
+    paint.setTint(0.020, 0.019, 0.018)
+    paint.setAo(0.22)
+    paint.boxSpan(v3(xFace - side * 0.02, 0.34, zd), v3(xFace - side * 0.20, 2.42, zd + 1.04))
+    paint.setAo(1.0)
+    paint.setTint(1.0, 1.0, 1.0)
+    windowCasing(wood, xFace, out, side, 0.34, 2.42, zd, zd + 1.04)
+    wood.setTint(tint * 0.66, tint * 0.60, tint * 0.53)
+    wood.boxSpan(v3(xFace - side * 0.34, 0.30, zd - 0.12), v3(xFace + side * 0.02, 0.36, zd + 1.16))
+    wood.setUvScale(1.0)
+    wood.setTint(1.0, 1.0, 1.0)
+}
+
+// Four boards around an opening plus a sill that sticks out under it. `out` is
+// how far the casing stands proud of the wall face, signed by which side of the
+// street the building is on.
+fn windowCasing(wood: &mut Builder, xFace: f64, out: f64, side: f64, yLo: f64, yHi: f64, zLo: f64, zHi: f64) {
+    let jamb = 0.085
+    let xa = Math.minF64(xFace, xFace - out)
+    let xb = Math.maxF64(xFace, xFace - out)
+    // head and jambs
+    wood.boxSpan(v3(xa, yHi, zLo - jamb), v3(xb, yHi + jamb, zHi + jamb))
+    wood.boxSpan(v3(xa, yLo, zLo - jamb), v3(xb, yHi, zLo))
+    wood.boxSpan(v3(xa, yLo, zHi), v3(xb, yHi, zHi + jamb))
+    // sill: deeper than the casing, and sloped away by sitting a little lower at
+    // its outer edge
+    let xs = xFace - side * 0.15
+    let xsa = Math.minF64(xFace, xs)
+    let xsb = Math.maxF64(xFace, xs)
+    wood.boxSpan(v3(xsa, yLo - 0.075, zLo - 0.11), v3(xsb, yLo, zHi + 0.11))
 }
 
 // Corner boards, a water table and battens. A sunlit plank wall with nothing on
@@ -993,16 +1041,20 @@ pub fn buildWorld(gl: &mut GlContext, posterTex: i64, flatTex: i64, signATex: i6
     addTinRoof(builders[B_CANVAS], -11.3, -5.8, 20.5, 26.0, 3.46, 2.95, false)
     addEndFacade(builders[B_WOOD], builders[B_PAINT], -12.8, -5.8, 10.0, 5.2, 0.88)
 
-    // Right of the street: the general store and a livery.
-    falseFront(builders[B_WOOD], builders[B_PAINT], 1.0, 12.5, 20.5, 6.5, 5.6, 3.8, 0.82)
-    falseFront(builders[B_WOOD], builders[B_PAINT], 1.0, 22.0, 30.5, 8.0, 5.0, 4.6, 0.70)
-    addPorch(builders[B_WOOD], 1.0, 12.5, 21.5, 2.85)
-    addBoardwalk(builders[B_WOOD], 1.0, 11.5, 31.5)
-    addWalkRail(builders[B_WOOD], 1.0, 12.0, 31.0)
-    addTrim(builders[B_WOOD], 5.8, 12.3, 12.5, 20.5, 3.8, 0.82)
-    addTrim(builders[B_WOOD], 5.8, 13.8, 22.0, 30.5, 4.6, 0.70)
-    addTinRoof(builders[B_CANVAS], 5.8, 12.3, 12.5, 20.5, 3.86, 3.25, false)
-    addTinRoof(builders[B_CANVAS], 5.8, 13.8, 22.0, 30.5, 4.66, 4.05, false)
+    // Right of the street: the general store, which is the building you stand
+    // opposite and the only one in the frame while you are shooting. It runs the
+    // whole width of the view on purpose — the old pair of shorter fronts put an
+    // alley through the middle of the range, and an alley is a hole in the wall
+    // you are aiming at. The livery is pushed past the end of the store.
+    falseFront(builders[B_WOOD], builders[B_PAINT], 1.0, 12.5, 26.0, 6.5, 5.6, 3.8, 0.82)
+    falseFront(builders[B_WOOD], builders[B_PAINT], 1.0, 27.5, 34.5, 8.0, 5.0, 4.6, 0.70)
+    addPorch(builders[B_WOOD], 1.0, 12.5, 26.6, 2.85)
+    addBoardwalk(builders[B_WOOD], 1.0, 11.5, 33.0)
+    addWalkRail(builders[B_WOOD], 1.0, 12.0, 32.5)
+    addTrim(builders[B_WOOD], 5.8, 12.3, 12.5, 26.0, 3.8, 0.82)
+    addTrim(builders[B_WOOD], 5.8, 13.8, 27.5, 34.5, 4.6, 0.70)
+    addTinRoof(builders[B_CANVAS], 5.8, 12.3, 12.5, 26.0, 3.86, 3.25, false)
+    addTinRoof(builders[B_CANVAS], 5.8, 13.8, 27.5, 34.5, 4.66, 4.05, false)
     addEndFacade(builders[B_WOOD], builders[B_PAINT], 5.8, 12.3, 12.5, 4.9, 0.80)
 
     addHitchingRail(builders[B_WOOD], -4.2, 12.0, 16.0)
@@ -1025,11 +1077,16 @@ pub fn buildWorld(gl: &mut GlContext, posterTex: i64, flatTex: i64, signATex: i6
     // Milo is wanted in this town.
     addPoster(builders[B_POSTER], -5.65, 1.84, 13.9, 1.0, 0.0, 0.52, 0.69, 0.02)
     addPoster(builders[B_POSTER], -5.65, 1.78, 24.4, 1.0, 0.0, 0.52, 0.69, -0.015)
-    addPoster(builders[B_POSTER], 5.65, 1.82, 19.3, -1.0, 0.0, 0.52, 0.69, 0.018)
+    // Windows start at zNear + 1.1 and repeat every 2.4 m, so 14.9 is wall.
+    addPoster(builders[B_POSTER], 5.65, 1.86, 14.95, -1.0, 0.0, 0.52, 0.69, 0.018)
     addPoster(builders[B_POSTER], -7.9, 1.74, 9.85, 0.0, -1.0, 0.52, 0.69, 0.0)
     addPoster(builders[B_POSTER], 10.6, 1.70, 12.35, 0.0, -1.0, 0.52, 0.69, -0.02)
     addSignFace(builders[B_SIGN_A], -9.3, 2.70, 9.765, 0.0, -1.0, 2.50, 0.62)
     addSignFace(builders[B_SIGN_B], 9.05, 2.60, 12.265, 0.0, -1.0, 2.40, 0.58)
+    // The big board on the store's street face, above the porch roof. It is the
+    // only thing on that wall above head height, and a blank false front two
+    // storeys tall is the emptiest surface in the town.
+    addSignFace(builders[B_SIGN_B], 5.785, 4.30, 19.25, -1.0, 0.0, 4.15, 1.00)
     addCacti(builders[B_GRASS], r)
     addGrass(builders[B_GRASS], r)
     addRocks(builders[B_STONE], r)

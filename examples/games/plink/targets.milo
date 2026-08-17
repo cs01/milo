@@ -17,7 +17,7 @@ from "gl" import {
     GlContext, Mesh
 }
 from "./mat4" import {
-    identity, multiply, rotationX, rotationY, translation
+    identity, multiply, rotationX, rotationY, scaling, translation
 }
 from "./mesh" import {
     Builder, builder
@@ -105,6 +105,12 @@ pub struct Targets {
     shardMesh: Mesh,
     bottleMat: Material,
     plateMat: Material,
+    shardMat: Material,
+    // The white-hot pop at the point of impact, and how much of it is left.
+    burstMat: Material,
+    burstMesh: Mesh,
+    burstT: f64,
+    burstPos: Vec3,
     steelMat: Material,
     rustMat: Material,
     shardVerts: Vec<f32>,
@@ -191,53 +197,66 @@ fn baseGeometry(b: &mut Builder) {
 // in the same place.
 fn placeRigs(): Vec<Rig> {
     var out: Vec<Rig> = Vec.new()
-    // x, y (the pin, in world metres), z, which way it faces, kind.
-    // These are placed against real surfaces rather than scattered: a rig
-    // floating a hand's width off the rail it is supposedly bolted to is the
-    // first thing anyone notices, and a reflex game is only fair if the same
-    // target is always in the same place.
     let rail = RAIL_TOP + 0.08
-    let spots: Vec<f64> = [-5.62, rail, 11.6, 1.0, 0.0, -5.62, rail, 14.4, 1.0, 1.0, -5.62, rail, 17.2, 1.0, 0.0, -5.62, rail, 20.0, 1.0, 1.0, -5.62, rail, 23.5, 1.0, 0.0, -5.62, rail, 27.0, 1.0, 1.0, -5.62, rail, 31.0, 1.0, 0.0, 5.62, rail, 13.2, -1.0, 1.0, 5.62, rail, 16.0, -1.0, 0.0, 5.62, rail, 18.8, -1.0, 1.0, 5.62, rail, 22.0, -1.0, 0.0, 5.62, rail, 25.5, -1.0, 1.0, 5.62, rail, 29.0, -1.0, 0.0, -4.20, 1.10, 12.4, 1.0, 1.0, -4.20, 1.10, 15.6, 1.0, 0.0, 4.20, 1.10, 14.9, -1.0, 0.0, 4.20, 1.10, 18.1, -1.0, 1.0, -5.10, 0.94, 13.4, 1.0, 0.0, 5.05, 0.94, 25.5, -1.0, 1.0, 4.44, 0.70, 23.0, -1.0, 0.0, -1.90, 0.80, 37.0, 0.0, 1.0, 1.40, 0.14, 34.0, 0.0, 0.0, -2.60, 0.14, 41.0, 0.0, 1.0,]
+
+    // The range proper: a row along the right-hand rail, in front of the store
+    // you stand opposite. Evenly spaced and always in the same place, because a
+    // reflex game is only fair if the target you learn to swing to is where you
+    // learned it. Eleven of them, alternating bottle and plate, is enough that
+    // six can be up at once and there is still somewhere new for the next one.
+    let count = 11
+    for i in 0..count {
+        let z = 13.1 + 1.24 * (i as f64)
+        out.push(makeRig(5.62, rail, z, -1.0, i % 2))
+    }
+    // Two on the barrels and one on the trough, out in front of the rail: they
+    // break the row up and they are the closest targets in the game.
+    out.push(makeRig(4.20, 1.10, 15.4, -1.0, 1))
+    out.push(makeRig(4.20, 1.10, 20.6, -1.0, 0))
+    out.push(makeRig(4.44, 0.70, 23.0, -1.0, 1))
+
+    // Scenery: the opposite boardwalk and the far end of the town. These are
+    // never raised — `setStance` marks them out of play — but a rig standing
+    // down on an empty rail is part of the town.
+    let others: Vec<f64> = [-5.62, rail, 11.6, 1.0, 0.0, -5.62, rail, 14.4, 1.0, 1.0, -5.62, rail, 17.2, 1.0, 0.0, -5.62, rail, 20.0, 1.0, 1.0, -5.62, rail, 23.5, 1.0, 0.0, -5.62, rail, 27.0, 1.0, 1.0, -5.62, rail, 31.0, 1.0, 0.0, -4.20, 1.10, 12.4, 1.0, 1.0, -4.20, 1.10, 15.6, 1.0, 0.0, -5.10, 0.94, 13.4, 1.0, 0.0, -1.90, 0.80, 37.0, 0.0, 1.0, 1.40, 0.14, 34.0, 0.0, 0.0, -2.60, 0.14, 41.0, 0.0, 1.0,]
     var i = 0
-    while i * 5 < spots.len {
-        let x = spots[i * 5]
-        let y = spots[i * 5 + 1]
-        let z = spots[i * 5 + 2]
-        let face = spots[i * 5 + 3]
-        let kind = spots[i * 5 + 4] as i64
-        // yaw turns local -Z towards the street.
-        var yaw = 0.0
-        if face > 0.5 {
-            yaw = -1.5708
-        } else if face < -0.5 {
-            yaw = 1.5708
-        }
-        out.push(Rig {
-            pos: v3(x, y, z),
-            yaw: yaw,
-            kind: kind,
-            angle: 0.0,
-            angVel: 0.0,
-            commanded: 0.0,
-            state: ST_DOWN,
-            hold: 0.0,
-            broken: false,
-            cooldown: 0.0,
-            // A little wider than the mesh. The targets stand ten to twenty
-            // metres off, where a bottle is a few pixels across, and a shot that
-            // visibly clipped the glass reading as a miss is what made this feel
-            // unfair rather than hard.
-            hitRadius: if kind == KIND_BOTTLE {
-                0.22
-            } else {
-                0.26
-            }
-            ,
-        }
-        )
+    while i * 5 < others.len {
+        out.push(makeRig(others[i * 5], others[i * 5 + 1], others[i * 5 + 2], others[i * 5 + 3], others[i * 5 + 4] as i64))
         i = i + 1
     }
     return out
+}
+
+// One rig, down, at a place on a rail. `face` is which way the target turns to
+// look at the street: yaw takes local -Z there.
+fn makeRig(x: f64, y: f64, z: f64, face: f64, kind: i64): Rig {
+    var yaw = 0.0
+    if face > 0.5 {
+        yaw = -1.5708
+    } else if face < -0.5 {
+        yaw = 1.5708
+    }
+    return Rig {
+        pos: v3(x, y, z),
+        yaw: yaw,
+        kind: kind,
+        angle: 0.0,
+        angVel: 0.0,
+        commanded: 0.0,
+        state: ST_DOWN,
+        hold: 0.0,
+        broken: false,
+        cooldown: 0.0,
+        // A little wider than the mesh. The targets stand eight or nine metres
+        // off, and a shot that visibly clipped the glass reading as a miss is
+        // what made this feel unfair rather than hard.
+        hitRadius: if kind == KIND_BOTTLE {
+            0.22
+        } else {
+            0.26
+        }
+        ,
+    }
 }
 
 pub fn newTargets(gl: &mut GlContext): Targets {
@@ -259,9 +278,28 @@ pub fn newTargets(gl: &mut GlContext): Targets {
     var baseMesh = Mesh.new(gl, sceneAttrs())
     baseMesh.upload(sb.data.clone())
 
+    // Emissive, and not subtly. These sit under a porch roof in its own shade,
+    // and a target you have to hunt for in a dark recess is a target you shoot
+    // late. The values are above the bloom threshold on purpose: the glow that
+    // spills off them is how you catch one out of the corner of your eye.
+    var burstBuilder = builder()
+    burstBuilder.sphere(v3(0.0, 0.0, 0.0), 1.0, 8, 12)
+    var burstMesh = Mesh.new(gl, sceneAttrs())
+    burstMesh.upload(burstBuilder.data.clone())
+    var burstMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 1.0, 0.0)
+    burstMat.emissive = v3(14.0, 9.0, 4.2)
+
     var bottleMat = material(TEX_GLASS, 0.13, 0.42, 0.12, 0.07, 0.0)
     bottleMat.normalStrength = 0.4
+    bottleMat.emissive = v3(0.10, 0.62, 0.24)
     var plateMat = material(TEX_PAINT, 0.90, 0.88, 0.84, 0.38, 0.0)
+    plateMat.emissive = v3(0.60, 0.52, 0.44)
+    // Shards keep the colour of what they came off in their vertex tint; the
+    // material gives them all a little heat, so a break throws light for the
+    // second it is in the air.
+    var shardMat = material(TEX_GLASS, 0.55, 0.55, 0.55, 0.10, 0.0)
+    shardMat.normalStrength = 0.3
+    shardMat.emissive = v3(0.30, 0.24, 0.15)
     let steelMat = material(TEX_STEEL, 0.48, 0.50, 0.53, 0.36, 0.85)
     let rustMat = material(TEX_RUST, 0.40, 0.27, 0.18, 0.85, 0.30)
 
@@ -278,6 +316,11 @@ pub fn newTargets(gl: &mut GlContext): Targets {
         shardMesh: Mesh.new(gl, sceneAttrs()),
         bottleMat: bottleMat,
         plateMat: plateMat,
+        shardMat: shardMat,
+        burstMat: burstMat,
+        burstMesh: burstMesh,
+        burstT: 0.0,
+        burstPos: v3(0.0, 0.0, 0.0),
         steelMat: steelMat,
         rustMat: rustMat,
         shardVerts: Vec.new(),
@@ -415,14 +458,14 @@ impl Targets {
         // clock ever starts.
         self.sinceSpawn = self.sinceSpawn + dt
         let want = if running {
-            3 + (pressure * 2.6) as i64
+            5 + (pressure * 3.4) as i64
         } else {
-            2
+            4
         }
         let gap = if running {
-            0.85 - 0.45 * pressure
+            0.44 - 0.22 * pressure
         } else {
-            1.30
+            0.85
         }
         if self.liveCount() < want && self.sinceSpawn > gap {
             self.sinceSpawn = 0.0
@@ -434,12 +477,12 @@ impl Targets {
                 let k = self.rng.int(self.rigs.len)
                 if self.eligible[k] && self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
                     let hold = if running {
-                        (2.35 - 0.85 * pressure) * self.rng.range(0.85, 1.2)
+                        (2.60 - 0.95 * pressure) * self.rng.range(0.85, 1.2)
                     } else {
-                        5.0
+                        6.0
                     }
                     self.raise(k, hold)
-                    self.rigs[k].cooldown = 1.4
+                    self.rigs[k].cooldown = 1.0
                     break
                 }
                 tries = tries + 1
@@ -498,10 +541,15 @@ impl Targets {
         self.rigs[index].cooldown = 1.1
 
         let away = (c - from).norm()
+        // The pop at the impact point, which is what sells the hit in the frame
+        // where it happens: the shards have not moved yet in that frame.
+        self.burstT = 0.11
+        self.burstPos = c
+
         let pieces = if kind == KIND_BOTTLE {
-            34
+            72
         } else {
-            30
+            60
         }
         let spread = if kind == KIND_BOTTLE {
             0.085
@@ -515,9 +563,13 @@ impl Targets {
             let dy = self.rng.range(-1.0, 1.0)
             let dz = self.rng.range(-1.0, 1.0)
             let off = v3(dx, dy, dz).norm().scale(spread * self.rng.range(0.2, 1.0))
-            let radial = off.norm().scale(self.rng.range(1.1, 3.4))
-            let vel = radial + away.scale(self.rng.range(1.6, 4.2)) + v3(0.0, self.rng.range(0.4, 2.1), 0.0)
-            let s = self.rng.range(0.012, 0.038)
+            // Harder and wider than it was: a third of the pieces are thrown
+            // fast enough to clear the boardwalk, and the rest fountain up and
+            // fall on it. The spread is what makes it read as a burst rather
+            // than as a puff.
+            let radial = off.norm().scale(self.rng.range(1.8, 6.2))
+            let vel = radial + away.scale(self.rng.range(2.2, 6.0)) + v3(0.0, self.rng.range(0.9, 3.8), 0.0)
+            let s = self.rng.range(0.008, 0.042)
             var r = 0.80
             var g = 0.80
             var bl = 0.78
@@ -526,11 +578,13 @@ impl Targets {
                 g = self.rng.range(0.34, 0.52)
                 bl = self.rng.range(0.10, 0.20)
             }
+            // Some of it is dust rather than glass: small, pale, short-lived.
+            let dust = self.rng.range(0.0, 1.0) < 0.22
             self.shards.push(Shard {
                 pos: c + off,
                 vel: vel,
                 axis: v3(self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0)).norm(),
-                rate: self.rng.range(-19.0, 19.0),
+                rate: self.rng.range(-34.0, 34.0),
                 spin: self.rng.range(0.0, 6.28),
                 a: v3(-s, -s * 0.7, 0.0),
                 b: v3(s * self.rng.range(0.6, 1.3), -s * 0.5, 0.0),
@@ -539,7 +593,12 @@ impl Targets {
                 g: g,
                 bl: bl,
                 life: 0.0,
-                maxLife: self.rng.range(1.8, 3.2),
+                maxLife: if dust {
+                    self.rng.range(0.35, 0.7)
+                } else {
+                    self.rng.range(1.8, 3.2)
+                }
+                ,
                 onGround: false,
             }
             )
@@ -547,6 +606,7 @@ impl Targets {
     }
 
     fn stepShards(self: &mut Self, dt: f64) {
+        self.burstT = Math.maxF64(0.0, self.burstT - dt)
         var i = 0
         while i < self.shards.len {
             self.shards[i].life = self.shards[i].life + dt
@@ -638,6 +698,16 @@ impl Targets {
     // triangles is nothing to upload, and it avoids a draw call and a matrix per
     // fragment of glass.
     fn drawShards(self: &mut Self, gfx: &Gfx) {
+        if self.burstT > 0.0 {
+            // A sphere that grows and dims over a sixth of a second. It is
+            // emissive far above the bloom threshold, so what you actually see
+            // is the flare around it rather than the ball itself.
+            let k = self.burstT / 0.11
+            let r = 0.045 + 0.17 * (1.0 - k)
+            var m = self.burstMat
+            m.emissive = v3(14.0 * k, 9.0 * k, 4.2 * k)
+            gfx.sceneDraw(self.burstMesh, multiply(translation(self.burstPos), scaling(r)), m)
+        }
         if self.shards.len == 0 {
             return
         }
@@ -662,7 +732,7 @@ impl Targets {
         b.setAo(1.0)
         self.shardMesh.upload(b.data.clone())
         let m = identity()
-        gfx.sceneDraw(self.shardMesh, m, self.bottleMat)
+        gfx.sceneDraw(self.shardMesh, m, self.shardMat)
     }
 
     fn free(self: Self, gl: &mut GlContext) {

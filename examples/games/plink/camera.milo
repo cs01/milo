@@ -53,7 +53,7 @@ pub fn newCamera(): Camera {
         // In the street, on the far side of it, and clear of your own boardwalk:
         // the porch posts stand at x = 3.7 and standing behind one puts a pillar
         // through the middle of the range.
-        pos: v3(-3.0, EYE_HEIGHT, 21.0),
+        pos: v3(-3.0, EYE_HEIGHT, 19.2),
         yaw: FACING,
         pitch: -0.02,
         bob: 0.0,

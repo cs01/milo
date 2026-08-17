@@ -77,6 +77,17 @@ pub fn lookAt(eye: &Vec3, at: &Vec3, up: &Vec3): Vec<f32> {
     return m
 }
 
+// A uniform scale. Non-uniform is deliberately not offered: the scene shader
+// uses the model matrix as its own normal matrix, which only holds while the
+// three axes scale together.
+pub fn scaling(s: f64): Vec<f32> {
+    var m = identity()
+    m[0] = s as f32
+    m[5] = s as f32
+    m[10] = s as f32
+    return m
+}
+
 pub fn translation(p: &Vec3): Vec<f32> {
     var m = identity()
     m[12] = p.x as f32

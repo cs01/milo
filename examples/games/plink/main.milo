@@ -43,7 +43,7 @@ from "sdl/keys" import {
     SC_ESCAPE, SC_F, SC_SPACE
 }
 from "./gun" import {
-    CYLINDER_ROUNDS, Gun, newGun
+    Gun, newGun
 }
 from "./targets" import {
     KIND_BOTTLE, ST_UP, Targets, newTargets
@@ -257,7 +257,7 @@ pub fn main(): i32 {
     // at a glancing angle, the near one three metres off and the far one thirty.
     // You stand across the street from the right-hand boardwalk instead, square on
     // to it, so the whole rail is a row at one honest distance.
-    cam.pos.z = argValue("--z", "21").parseF64() ?? 21.0
+    cam.pos.z = argValue("--z", "19.2").parseF64() ?? 19.2
     cam.pos.x = argValue("--x", "-3.0").parseF64() ?? -3.0
     // Only the rail you are square on to is in play. Everything else — the far
     // fence, the wagon, the whole opposite boardwalk — stays down as scenery.
@@ -364,7 +364,6 @@ pub fn main(): i32 {
                         combo = 0
                         hits = 0
                         shotsFired = 0
-                        gun.rounds = CYLINDER_ROUNDS
                     }
                 }
                 prevSpace = spaceDown
@@ -374,12 +373,6 @@ pub fn main(): i32 {
                 // learn the gun before the clock is against you.
                 if lmbEdge {
                     fireNow = true
-                }
-                // The cylinder refills itself. A reload key in a game about how
-                // fast you can point is a key that only ever punishes you for
-                // not having pressed it earlier.
-                if gun.rounds == 0 && gun.reloadT <= 0.0 {
-                    gun.beginReload()
                 }
             }
         }
@@ -455,7 +448,10 @@ pub fn main(): i32 {
                 }
             }
         }
-        gfx.flash = gun.flash * 3.0
+        // The muzzle flash is a light on the gun, not a strobe over the whole
+        // picture. Whiting out the frame on every shot hides the one thing you
+        // are meant to be watching, which is the target you just shot at.
+        gfx.flash = 0.0
 
         // ── draw ──────────────────────────────────────────────────────────────
         unsafe {
@@ -499,12 +495,12 @@ pub fn main(): i32 {
         let fwd = cam.forward()
         let rightV = fwd.cross(v3(0.0, 1.0, 0.0)).norm()
         let upV = rightV.cross(fwd).norm()
-        gun.draw(gfx, cam.eye(), fwd, rightV, upV, aiming, cam.bob, aspect)
+        gun.draw(gfx, cam.eye(), fwd, rightV, upV, aiming, cam.bob, vp)
 
         gfx.present(dw as i64, dh as i64)
 
         hud.clear()
-        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, gun.rounds, gun.reloadT, hitFlash, missFlash, aiming, gfx.time)
+        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, hitFlash, missFlash, aiming, gfx.time)
         gfx.drawHud(hud.verts, dw as i64, dh as i64)
 
         if headless && warmup > 0 {
@@ -546,7 +542,7 @@ pub fn main(): i32 {
     return 0
 }
 
-fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, rounds: i64, reloadT: f64, hitFlash: f64, missFlash: f64, aiming: f64, time: f64) {
+fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, hitFlash: f64, missFlash: f64, aiming: f64, time: f64) {
     let s = Math.maxF64(dh / 900.0, 0.6)
     let cx = dw * 0.5
     let cy = dh * 0.5
@@ -633,36 +629,6 @@ fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score:
     // after the attract panel, which sits over the middle of the screen.
     crosshair(hud, cx, cy, s, 1.0 - aiming * 0.6)
 
-    // Rounds left, as six marks that go out as they are spent.
-    let bx = dw - 40.0 * s
-    for i in 0..6 {
-        let lit = i < rounds
-        let a = if lit {
-            0.95
-        } else {
-            0.22
-        }
-        hud.rect(bx - (i as f64) * 14.0 * s, dh - 42.0 * s, 8.0 * s, 20.0 * s, if lit {
-            1.0
-        } else {
-            0.8
-        }
-        , if lit {
-            0.85
-        } else {
-            0.8
-        }
-        , if lit {
-            0.45
-        } else {
-            0.8
-        }
-        , a)
-    }
-    if reloadT > 0.0 {
-        let w = 100.0 * s
-        hud.rect(dw - 40.0 * s - w + 8.0 * s, dh - 58.0 * s, w * (1.0 - reloadT / 1.15), 4.0 * s, 1.0, 0.85, 0.45, 0.85)
-    }
 }
 
 fn crosshair(hud: &mut Hud, cx: f64, cy: f64, s: f64, spread: f64) {

@@ -28,6 +28,9 @@ from "./textures" import {
 from "./plane" import {
     drawAirframe
 }
+from "./live" import {
+    envWeatherLabel, envStamp
+}
 from "./world3d" import {
     World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH,
     fmtTime, fenceK, FENCE_SOFT, terrainTile
@@ -2787,6 +2790,16 @@ pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
         // name and range onto the marker itself, where the player is already
         // looking. What is left down here is the two keys that are not obvious.
         text(c, 24, c.h - 26, "ENTER  ELSEWHERE      M  MUSIC", 2, 0.26, 0.28, 0.32)
+        // Where the sky came from, and the hour it describes.
+        //
+        // Not decoration. This sky is assembled from measurements when it can be
+        // and invented when it cannot, and those two look similar on screen — a
+        // fabricated overcast is exactly as grey as a real one. Naming the station
+        // and stamping the time is what keeps "the weather in the game is the
+        // weather outside" a checkable claim rather than an assertion. When it is
+        // invented it says so, in the same place, in the same words.
+        text(c, 24, c.h - 48, envWeatherLabel(w.env), 2, 0.26, 0.30, 0.34)
+        text(c, 24, c.h - 70, envStamp(w.env) + "Z", 2, 0.22, 0.25, 0.29)
         return
     }
     // Invented country still runs the hoop game, so it keeps its readouts.

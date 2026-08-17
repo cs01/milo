@@ -216,8 +216,12 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
     if base < 0.0 {
         base = lclMetres(o.tempC, o.dewC)
     }
-    if base < 60.0 {
-        base = 60.0
+    // A station reporting cloud but no base leaves only the condensation level,
+    // and that goes to zero when the air is saturated. Zero is not a cloud base,
+    // it is fog; the floor keeps a saturated night from putting the deck inside
+    // the buildings.
+    if base < 150.0 {
+        base = 150.0
     }
     let coverage = o.coverOktas / 8.0
 
@@ -291,13 +295,25 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
             if !haveIr {
                 rel = 1.0
             }
-            // Centred on 1.0 and widened, so the pattern has real contrast
-            // without the mean drifting off the reported coverage.
-            var c = coverage * (0.30 + 0.70 * rel * 1.55)
+            // Centred on 1.0 and widened about that centre.
+            //
+            // The widening has to be symmetric around 1.0 or it changes the mean,
+            // and the mean is the whole point: the station measured this sky at a
+            // particular number of eighths and the satellite is only being asked
+            // where to put it. A previous form multiplied by (0.30 + 0.70*rel*1.55),
+            // whose mean is 1.385, which quietly reported every sky as 39% more
+            // covered than the station said — a 3/8 scattered day rendered as
+            // broken overcast.
+            var c = coverage * (1.0 + 1.15 * (rel - 1.0))
             let r = rain[idx] as f64
-            if r > 0.02 {
-                // It cannot be raining out of a clear patch.
-                let floorC = 0.55 + 0.45 * r
+            // It cannot be raining out of a clear patch — but the correction has
+            // to be proportional to how hard it is raining. A flat floor of 0.55
+            // applied to any echo at all turned a measured 3/8 sky into overcast
+            // everywhere the radar saw drizzle, which is the station being
+            // overruled by its own weakest evidence. Below light-rain reflectivity
+            // the echo says nothing about sky cover and is ignored.
+            if r > 0.15 {
+                let floorC = 0.30 + 0.60 * r
                 if c < floorC {
                     c = floorC
                 }

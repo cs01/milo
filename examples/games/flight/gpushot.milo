@@ -57,7 +57,7 @@ from "./world3d" import {
     World, heightAt, settleUnderCeiling
 }
 from "./live" import {
-    envF64, envLiveRequested, envGoLive, envWeatherLabel
+    envF64, envLiveRequested, envGoLive, envWeatherLabel, envWeatherTick
 }
 from "./world3d" import {
     marksFor, worldIn, worldUpdate, SEED
@@ -211,6 +211,9 @@ pub fn main(): i32 {
     // the last frame. The autopilot steers on its own with no input at all.
     var first = true
     for i in 0..frames {
+        // Off the frame path in the sense that matters: this yields to the
+        // fetching task and returns, it never waits on the network itself.
+        envWeatherTick(w.env, w.city.reach)
         worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, false)
         if mark >= 0 {
             aimAtMark(w, place, mark, dist)

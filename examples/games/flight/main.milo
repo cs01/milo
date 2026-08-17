@@ -41,7 +41,7 @@ from "./textures" import {
     groundTexture, planeTexture, facadeTexture
 }
 from "./live" import {
-    envLiveRequested, envGoLive, envWeatherLabel
+    envLiveRequested, envGoLive, envWeatherLabel, envWeatherTick
 }
 from "./world3d" import {
     worldIn, worldUpdate, worldSetPlace, resetTour, SEED, settleUnderCeiling
@@ -432,6 +432,9 @@ pub fn main(): i32 {
         }
         musicTick(snd)
 
+        // Off the frame path in the sense that matters: this yields to the
+        // fetching task and returns, it never waits on the network itself.
+        envWeatherTick(w.env, w.city.reach)
         worldUpdate(w, dt, inp.moveX, inp.moveY, inp.boost)
         let view = viewOf(w.cam, c.w, c.h)
         // Bind the scene target and match it to the window before any geometry is

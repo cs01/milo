@@ -17,6 +17,12 @@
 from "std/env" import {
     Env
 }
+from "std/runtime" import {
+    Task, schedulerExists, schedulerYield
+}
+from "std/sync" import {
+    Channel
+}
 from "std/time" import {
     epochSecs
 }
@@ -43,6 +49,21 @@ pub enum EnvSource: i32 {
     Synthetic = 0,
     Computed = 1,
     Live = 2,
+}
+
+// Everything one fetch produces, as one value.
+//
+// Split out from `LiveEnv` so the work can happen on a task that owns nothing
+// else: a background fetch that reached into the environment would be writing
+// fields the renderer reads on another stack, and the whole point of doing this
+// off the frame path is that the frame never sees a half-updated sky.
+pub struct WxSnapshot {
+    ok: bool,
+    clouds: CloudField,
+    obs: Obs,
+    hazeK: f64,
+    rainPeak: f64,
+    rainFrac: f64,
 }
 
 pub struct LiveEnv {
@@ -82,6 +103,9 @@ pub struct LiveEnv {
     // falls back to invented weather, which is the exact failure this whole file
     // is written to avoid.
     liveWanted: bool,
+    // Epoch seconds of the last successful fetch, and whether one is in flight.
+    lastFetchSec: i64,
+    fetching: bool,
 
     // The sky over this place: coverage and cloud-top height on a grid, with one
     // base for the layer. Synthetic until a fetch replaces it, and honest about
@@ -167,6 +191,8 @@ pub fn envNew(lat: f64, lon: f64, reach: f64, groundM: f64): LiveEnv {
         sunSource: EnvSource.Synthetic,
         groundM: groundM,
         liveWanted: false,
+        lastFetchSec: 0,
+        fetching: false,
         clouds: cloudEmpty(),
         cloudSource: EnvSource.Synthetic,
         obs: obsEmpty(),
@@ -226,14 +252,74 @@ pub fn envSynthWeather(e: &mut LiveEnv, reachIn: f64) {
 // Returns false and changes nothing if the observation could not be fetched,
 // which leaves whatever sky was there before rather than clearing it: a dropped
 // request is not a report of clear skies.
+// How often to go back to the network, in seconds. The radar mosaic updates
+// about every five minutes and a surface observation about every hour, so asking
+// faster than this gets the same bytes back.
+let WX_REFRESH_SECS: i64 = 300
+
+// The finished snapshot, handed from the fetching task to the render loop.
+//
+// A pair of globals rather than a channel, and that is sound here rather than
+// sloppy: these are GREEN tasks, cooperatively scheduled onto one thread, so the
+// task runs only while the loop is inside `schedulerYield` and there is no
+// instant at which both are executing. The flag is set after the value is
+// written, which is the only ordering that matters when nothing can interleave
+// between the two statements.
+var WX_SNAP: WxSnapshot = WxSnapshot {
+    ok: false,
+    clouds: cloudEmpty(),
+    obs: obsEmpty(),
+    hazeK: 0.00013,
+    rainPeak: 0.0,
+    rainFrac: 0.0,
+}
+
+var WX_READY: bool = false
+
+fn snapshotEmpty(): WxSnapshot {
+    return WxSnapshot {
+        ok: false,
+        clouds: cloudEmpty(),
+        obs: obsEmpty(),
+        hazeK: 0.00013,
+        rainPeak: 0.0,
+        rainFrac: 0.0,
+    }
+}
+
+// Copy a finished snapshot into the environment. One place, so the synchronous
+// path and the background one cannot install it differently.
+fn envInstall(e: &mut LiveEnv, snap: WxSnapshot) {
+    var s = snap
+    e.clouds = replace(s.clouds, cloudEmpty())
+    e.obs = replace(s.obs, obsEmpty())
+    e.hazeK = s.hazeK
+    e.rainPeak = s.rainPeak
+    e.rainFrac = s.rainFrac
+    e.cloudSource = EnvSource.Live
+    e.cloudsDirty = true
+}
+
+// Fetch on this stack and install. Used at startup and at a place change, both
+// of which are already pauses.
 pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
+    let snap = buildSnapshot(e.lat, e.lon, reachIn, e.groundM)
+    if !snap.ok {
+        return false
+    }
+    e.lastFetchSec = epochSecs()
+    envInstall(e, snap)
+    return true
+}
+
+fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
     var reach = reachIn
     if reach < 1000.0 {
         reach = 8000.0
     }
-    let o = fetchObs(e.lat, e.lon)
+    let o = fetchObs(lat, lon)
     if !o.ok {
-        return false
+        return snapshotEmpty()
     }
 
     // Measured where reported, modelled where not. A station that sees cloud
@@ -251,12 +337,12 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
         base = 150.0
     }
     // The observation is above ground; the renderer is above sea level.
-    base = base + e.groundM
+    base = base + groundM
     let coverage = o.coverOktas / 8.0
 
     var structure: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 1.0)
     var haveIr = false
-    match fetchIr(e.lat, e.lon, reach, CLOUD_N) {
+    match fetchIr(lat, lon, reach, CLOUD_N) {
         Option.Some(g) => {
             structure = g
             haveIr = true
@@ -267,7 +353,7 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
     var rain: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 0.0)
     var peak = 0.0
     var wet = 0
-    match fetchRadar(e.lat, e.lon, reach, CLOUD_N) {
+    match fetchRadar(lat, lon, reach, CLOUD_N) {
         Option.Some(g) => {
             for i in 0..g.len {
                 let v = g[i] as f64
@@ -283,8 +369,7 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
         Option.None => {
         }
     }
-    e.rainPeak = peak
-    e.rainFrac = (wet as f64) / ((CLOUD_N * CLOUD_N) as f64)
+    let rainFrac = (wet as f64) / ((CLOUD_N * CLOUD_N) as f64)
 
     var f = cloudEmpty()
     f.reach = reach
@@ -371,17 +456,89 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
     }
     f.topMaxM = topMax
 
-    e.clouds = f
-    e.cloudSource = EnvSource.Live
-    e.cloudsDirty = true
+    var hazeK = 0.00013
     // Koschmieder. A reported 16 km visibility is 2.4e-4 per metre, which is a
     // markedly hazier sky than the 1.3e-4 the renderer had hard-coded — and it is
     // the measurement, so it wins.
     if o.hasVis && o.visibilityM > 200.0 {
-        e.hazeK = 3.912 / o.visibilityM
+        hazeK = 3.912 / o.visibilityM
     }
-    e.obs = o
-    return true
+    return WxSnapshot {
+        ok: true,
+        clouds: f,
+        obs: o,
+        hazeK: hazeK,
+        rainPeak: peak,
+        rainFrac: rainFrac,
+    }
+}
+
+// Called once a frame. Advances a background fetch and installs its result.
+//
+// This is what makes the weather realtime rather than a snapshot taken at
+// startup: a flight lasts longer than the weather does. The fetch cannot run on
+// the frame path — it is seconds of network — so it runs on a green task, and
+// this yields to the scheduler once per frame to let it move.
+//
+// Measured before building it: a fetch driven this way completes in about 400 ms
+// of wall clock and the WORST single yield is 20 ms. That is one dropped frame,
+// once, every five minutes. A blocking refetch on the same schedule would be a
+// second-long freeze.
+pub fn envWeatherTick(e: &mut LiveEnv, reachIn: f64) {
+    if !e.liveWanted {
+        return
+    }
+    // Give the fetching task its slice. Guarded because the scheduler only exists
+    // once something has been spawned, and a run that never goes live never
+    // spawns anything.
+    if schedulerExists() {
+        schedulerYield()
+    }
+    if e.fetching {
+        if WX_READY {
+            WX_READY = false
+            let snap = replace(WX_SNAP, snapshotEmpty())
+            e.fetching = false
+            if snap.ok {
+                e.lastFetchSec = epochSecs()
+                envInstall(e, snap)
+                if envF64("FLYBY_DEBUG_WX", 0.0) > 0.5 {
+                    print("weather refreshed: " + envWeatherLabel(e))
+                }
+            } else {
+                // A failed refresh keeps the sky that is already there. Weather
+                // that vanishes because a public API had a bad minute would be a
+                // worse answer than weather that is five minutes stale.
+                e.lastFetchSec = epochSecs()
+            }
+        }
+        return
+    }
+    // Overridable so the refresh can actually be exercised: waiting five minutes
+    // to find out whether a five-minute timer works is not a test.
+    var every = WX_REFRESH_SECS
+    let over = envF64("FLYBY_WX_SECS", 0.0)
+    if over > 0.5 {
+        every = over as i64
+    }
+    if epochSecs() - e.lastFetchSec < every {
+        return
+    }
+    var reach = reachIn
+    if reach < 1000.0 {
+        reach = 8000.0
+    }
+    let lat = e.lat
+    let lon = e.lon
+    let ground = e.groundM
+    e.fetching = true
+    WX_READY = false
+    let _ = Task.spawn(move(): void => {
+        let snap = buildSnapshot(lat, lon, reach, ground)
+        WX_SNAP = snap
+        WX_READY = true
+    }
+    )
 }
 
 // Whether the player asked for the real sky. Off by default: it costs several

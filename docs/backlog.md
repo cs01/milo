@@ -101,9 +101,11 @@ ROI / Effort: **H**igh / **M**edium / **L**ow. Tiers = the quadrant that matters
   short list rather than a vague one: the eight owning kinds the census names
   (`ArrayLit`, `ArrayRepeat`, `CastExpr`, `IsExpr`, `Propagate`, `RangeExpr`,
   `UnaryOp`, `UnsafeBlock`), enum payloads beyond `Option`, and Vec-of-struct.
-  Deliberately excluded, not missing: a move-capturing closure that ESCAPES is a
-  known-open hole, so generating it would make this harness a permanent red light
-  instead of a detector — it is the indirect-closure-escape entry, not this one.
+  A move-capturing closure that ESCAPES was excluded here while it was a known-open
+  hole; it was closed 2026-08-16 (roadmap, Safety Hardening: `move` on an outer
+  closure copies an inner borrowing closure's env pointer without owning it, and
+  `retainsParam` could not see a capture at all), so this shape is now a candidate
+  for the harness rather than a permanent red light.
   The pattern to expect is the one the `Drop` shape set: a missing shape is a
   missing bug class. The counter-evidence so far is that the ten shapes and the
   nesting added on 2026-08-14 found nothing in the compiler — one model bug in the

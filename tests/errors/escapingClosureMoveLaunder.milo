@@ -1,0 +1,17 @@
+// `move` on the OUTER closure does not own what an inner borrowing closure points at:
+// moving a `{fn, env}` pair copies the pointer, and that env is still the frame `make`
+// is about to leave. This printed -1 for 8 — a live use-after-free that `move`, the
+// escape hatch every other diagnostic in this pass names, was laundering.
+// @error: cannot return a closure that captures 'n' by reference
+
+fn make(): move () => i64 {
+    let n = 5
+    let f = (x: i64) => x + n
+    let outer = move (): i64 => f(3)
+    return outer
+}
+
+fn main() {
+    let h = make()
+    print(h())
+}

@@ -1,0 +1,25 @@
+// The accepted spelling of the three escapingClosureMoveLaunder* rejections: once the
+// INNER closure is `move` too, the whole chain owns its captures and outliving the frame
+// is fine. Also pins the non-rejection: a closure capturing a fn-typed parameter is only
+// "retained" for the caller when that parameter could be a borrowing closure — passing a
+// non-capturing one stays legal.
+// @expect: 8
+// @expect: 12
+
+fn make(): move () => i64 {
+    let n = 5
+    let f = move(x: i64) => x + n
+    let outer = move(): i64 => f(3)
+    return outer
+}
+
+fn twice(f: (i64) => i64, v: i64): i64 {
+    let g = (x: i64) => f(f(x))
+    return g(v)
+}
+
+fn main() {
+    let h = make()
+    print(h())
+    print(twice((x: i64) => x + 1, 10))
+}

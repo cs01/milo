@@ -2866,6 +2866,15 @@ export class TypeChecker {
       if (Array.isArray(node)) { for (const x of node) walk(x); return; }
       const n = node as Record<string, unknown> & { kind?: string };
       if (n.kind === "Ident" && n.name === param.name) { retained = true; return; }
+      // A closure that CAPTURES the parameter keeps it, and the walk above cannot see
+      // that: the body spells the use `f(3)`, a `Call` with a string callee and no `Ident`
+      // node anywhere. So `fn wrap(f) { return move (): i64 => f(3) }` answered "not
+      // retained", the call site handed it a borrowing closure, and the returned `move`
+      // closure carried a pointer into the dead frame — printed -1 for 8.
+      if (n.kind === "Closure") {
+        const caps = this.closureCaptures.get(n as unknown as Expr);
+        if (caps?.some(c => c.name === param.name)) { retained = true; return; }
+      }
       // Forwarding: `fn outer(g) { each(g) }` keeps `g` only if `each` does. Without this
       // a one-line wrapper would be indistinguishable from a store.
       if (n.kind === "Call" && Array.isArray(n.args)) {
@@ -2943,20 +2952,43 @@ export class TypeChecker {
     // Approximate scoping on purpose: one flat map per body, so a closure bound by
     // `let f = …` is still recognized when `f` is stored later. Shadowing can only make
     // this reject something it would otherwise allow, never the reverse.
+    // Which frame-pointing captures does escaping `c` expose? For a borrowing closure that
+    // is its own capture list. For a `move` closure it is normally EMPTY — owning the
+    // captures is the whole point — but not when a capture is itself a borrowing closure:
+    // moving a `{fn, env}` pair copies the pointer, and the env keeps pointing at the frame
+    // the inner closure was written in. `let f = (x) => x + n; return move () => f(3)`
+    // printed -1 for 8 through exactly that hole, so resolve through move captures until we
+    // reach a borrowing closure or run out of bindings. A capture we cannot resolve here is
+    // a fn-typed *parameter*; those are caught one frame up by `retainsParam`, which counts
+    // a capture as retention.
+    const borrowedCaps = (c: Expr, bound: Map<string, Expr>, visited: Set<Expr>): CaptureInfo[] => {
+      if (visited.has(c)) return [];
+      visited.add(c);
+      const caps = this.closureCaptures.get(c) ?? [];
+      if (!(c as Extract<Expr, { kind: "Closure" }>).isMove) return caps;
+      const out: CaptureInfo[] = [];
+      for (const cap of caps) {
+        const inner = bound.get(cap.name);
+        if (inner) out.push(...borrowedCaps(inner, bound, visited));
+      }
+      return out;
+    };
     const check = (value: Expr, bound: Map<string, Expr>, message: (names: string) => string, holder: string) => {
       let c: Expr | null = null;
       if (value.kind === "Closure") c = value;
       else if (value.kind === "Ident") c = bound.get(value.name) ?? null;
-      if (!c || (c as Extract<Expr, { kind: "Closure" }>).isMove) return;
-      const caps = this.closureCaptures.get(c);
-      if (!caps || caps.length === 0) return;
+      if (!c) return;
+      const caps = borrowedCaps(c, bound, new Set());
+      if (caps.length === 0) return;
       const span = value.span ?? c.span;
       const key = `${span?.line ?? 0}:${span?.col ?? 0}`;
       if (seen.has(key)) return;
       seen.add(key);
       const names = caps.map(c => `'${c.name}'`).join(", ");
-      this.error(message(names), span,
-        `this closure points at locals in the current frame, and ${holder} can outlive them — write 'move (…) => …' so the closure owns its captures instead`);
+      const hint = (c as Extract<Expr, { kind: "Closure" }>).isMove
+        ? `this closure is 'move', but it captures another closure that points at locals in the current frame — 'move' on the outer one copies that pointer, it does not own what it points at. Write the inner closure 'move (…) => …' too`
+        : `this closure points at locals in the current frame, and ${holder} can outlive them — write 'move (…) => …' so the closure owns its captures instead`;
+      this.error(message(names), span, hint);
     };
     const cannotStore = (names: string) => `cannot store a closure that captures ${names} by reference`;
     // Structural walk rather than a per-node switch: a missing arm here would silently

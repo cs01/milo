@@ -1,0 +1,19 @@
+// The store spelling of escapingClosureMoveLaunder — a different arm of the escape walk
+// (StructLit, not Return), so it is locked separately. Ran off the end of the dead frame
+// and printed unprintable bytes.
+// @error: cannot store a closure that captures 'n' by reference
+
+struct Box { f: move () => i64 }
+
+var G: Box = Box { f: move (): i64 => 0 }
+
+fn make() {
+    let n = 5
+    let f = (x: i64) => x + n
+    G = Box { f: move (): i64 => f(3) }
+}
+
+fn main() {
+    make()
+    print(G.f())
+}

@@ -1,0 +1,21 @@
+// The same hole reached through a parameter. `retainsParam` decides "does the callee keep
+// this argument?" by looking for the parameter as an `Ident`, and a CAPTURE is invisible
+// to that: `f(3)` inside the closure body is a `Call` with a string callee and no `Ident`
+// node at all. So `wrap` answered "not retained", the borrowing closure passed the
+// call-site check, and the returned `move` closure carried a pointer into the dead frame.
+// @error: cannot pass a closure that captures 'n' by reference to 'wrap', which keeps it
+
+fn wrap(f: (i64) => i64): move () => i64 {
+    return move (): i64 => f(3)
+}
+
+fn make(): move () => i64 {
+    let n = 5
+    let g = (x: i64) => x + n
+    return wrap(g)
+}
+
+fn main() {
+    let h = make()
+    print(h())
+}

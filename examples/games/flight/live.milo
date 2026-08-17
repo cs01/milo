@@ -143,14 +143,7 @@ pub struct LiveEnv {
 fn envI64(name: string, fallback: i64): i64 {
     match Env.get(name) {
         Option.Some(v) => {
-            match parseInt(v) {
-                Option.Some(n) => {
-                    return n
-                }
-                Option.None => {
-                    return fallback
-                }
-            }
+            return parseInt(v) ?? fallback
         }
         Option.None => {
             return fallback
@@ -164,14 +157,7 @@ fn envI64(name: string, fallback: i64): i64 {
 pub fn envF64(name: string, fallback: f64): f64 {
     match Env.get(name) {
         Option.Some(v) => {
-            match parseFloat(v) {
-                Option.Some(n) => {
-                    return n
-                }
-                Option.None => {
-                    return fallback
-                }
-            }
+            return parseFloat(v) ?? fallback
         }
         Option.None => {
             return fallback

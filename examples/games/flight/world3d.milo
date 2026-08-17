@@ -33,14 +33,7 @@ pub enum Theme: i32 {
 }
 
 pub fn nextTheme(t: Theme): Theme {
-    match Theme.tryFrom((t as i32) + 1) {
-        Option.Some(n) => {
-            return n
-        }
-        Option.None => {
-            return Theme.Coast
-        }
-    }
+    return Theme.tryFrom((t as i32) + 1) ?? Theme.Coast
 }
 
 // Terrain quads are coarse on purpose now. Before the aerial drape the quad WAS

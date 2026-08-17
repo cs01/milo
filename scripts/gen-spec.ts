@@ -209,7 +209,9 @@ function render(reqs: Requirement[]): string {
     "trimming, and is the whole of the requirement — a program that produces these lines by a different " +
     "route conforms.");
 
-  return L.join("\n") + "\n";
+  // Exactly one trailing newline: the repo lint strips a trailing blank line on commit,
+  // and a generator that emits one makes the file stale the instant it is committed.
+  return L.join("\n").replace(/\n+$/, "") + "\n";
 }
 
 if (import.meta.main) {

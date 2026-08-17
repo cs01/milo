@@ -191,6 +191,17 @@ pub struct Scene {
     // along the view ray. Roughly 3.9 / visibility-in-metres, so 1e-4 is a clear
     // 40 km day and 4e-4 is a thick one.
     haze: f64,
+    // The cloud VOLUME, as opposed to `cloud` above, which is the projected deck
+    // in the sky pass and covers everything above the volume's top. Both exist:
+    // the deck is what a cirrus sheet at 9 km should be — far enough that
+    // parallax over a 16 km map is nil — and the volume is what you can fly into.
+    cloudBase: f64,
+    cloudTopMax: f64,
+    cloudReach: f64,
+    cloudOn: f64,
+    cloudDens: f64,
+    cloudWindX: f64,
+    cloudWindZ: f64,
     tris: i64, // triangles recorded this frame
     // One vertex stream per texture slot, ten floats per vertex, three vertices
     // per triangle. Grown and never shrunk: a frame is within a few percent of
@@ -216,6 +227,13 @@ pub fn sceneNew(w: i64, h: i64): Scene {
         turbidity: 0.35,
         cloud: 0.30,
         haze: 0.00018,
+        cloudBase: 900.0,
+        cloudTopMax: 2200.0,
+        cloudReach: 8000.0,
+        cloudOn: 0.0,
+        cloudDens: 1.0,
+        cloudWindX: 6.0,
+        cloudWindZ: 2.0,
         tris: 0,
         streams: streams,
     }

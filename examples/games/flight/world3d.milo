@@ -526,7 +526,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
     }
     var w = World {
         rng: Rng.new(seed),
-        env: envNew(head.originLat, head.originLon),
+        env: envNew(head.originLat, head.originLon, head.reach),
         city: head,
         easy: easy,
         plane: Plane {
@@ -655,7 +655,7 @@ fn rotatePlace(w: &mut World) {
 // time; the caller decodes the next on demand.
 pub fn worldSetPlace(w: &mut World, c: City) {
     w.city = c
-    envSetPlace(w.env, w.city.originLat, w.city.originLon)
+    envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach)
     w.marks = marksFor(w.city.name)
     w.markIdx = 0
     w.markName = ""
@@ -728,7 +728,7 @@ pub fn stepPlace(w: &mut World, dir: i64) {
         w.nextIdx = (k + 1) % w.next.len
     }
     // The tour belongs to the place, so it is rebuilt whenever the place moves.
-    envSetPlace(w.env, w.city.originLat, w.city.originLon)
+    envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach)
     w.marks = marksFor(w.city.name)
     computeFence(w)
     w.markIdx = 0

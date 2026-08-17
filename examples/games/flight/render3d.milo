@@ -107,6 +107,24 @@ fn weatherOf(t: Theme): Weather {
     }
 }
 
+// Hand the weather volume's geometry to the renderer.
+//
+// Only the scalars: the grid itself lives on the GPU and is uploaded when it
+// changes, not per frame.
+pub fn applyClouds(s: &mut Scene, w: &World) {
+    s.cloudBase = w.env.clouds.baseM
+    s.cloudTopMax = w.env.clouds.topMaxM
+    s.cloudReach = w.env.clouds.reach
+    s.cloudDens = 1.0
+    s.cloudWindX = w.env.clouds.windX
+    s.cloudWindZ = w.env.clouds.windZ
+    if w.env.clouds.valid {
+        s.cloudOn = 1.0
+    } else {
+        s.cloudOn = 0.0
+    }
+}
+
 // Cross the whole atmosphere from region `a` to region `b` as one value, so
 // nothing can be left behind mid-fade. `mix` is 1 at the old region, 0 at the new.
 pub fn applyWeather(s: &mut Scene, a: Theme, b: Theme, mix: f64) {
@@ -544,12 +562,18 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         // real city the point is to SEE it, so: clear air, fog only far enough
         // out to hide the edge of the data.
         s.turbidity = 0.30
-        s.cloud = 0.30
+        // The projected deck is off over a real place: the volume below draws the
+        // weather now, and a deck at infinity drawn on top of it is a second,
+        // disagreeing set of clouds in the same sky. It stays in the code because
+        // it is still the right answer for a cirrus sheet at nine kilometres,
+        // which has no parallax worth having over a 16 km map.
+        s.cloud = 0.0
         s.fogStart = 1500.0
         s.fogEnd = 4200.0
         // ~30 km visibility. `fogStart`/`fogEnd` still bound the draw distance
         // and the camera, but they no longer decide what the air looks like.
         s.haze = 0.00013
+        applyClouds(s, w)
         // The sun is WHERE THE SUN IS: computed from the city's own latitude and
         // longitude and the current UTC instant (`solar.milo`), not chosen.
         //

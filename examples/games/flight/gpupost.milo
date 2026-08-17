@@ -35,6 +35,9 @@ from "./gfx3d" import {
 from "./sky" import {
     SKY_GLSL
 }
+from "./cloud" import {
+    CLOUD_GLSL, CloudField, cloudEmpty, cloudUpload, cloudUpdate
+}
 from "./gpuworld" import {
     QUAD_VERT_LOCAL, projScale, skyUniforms
 }
@@ -81,6 +84,9 @@ pub struct Post {
     overlay: Texture2D, // the 2D layer's linear light
     overlayCov: Texture2D, // and how much of the scene it hides
     cover: Texture2D, // the land-cover water mask, uploaded on a place change
+    // Cloud coverage and cloud-top height over the map square, uploaded when the
+    // weather changes rather than per frame — a forecast is minutes old at best.
+    cloudTex: Texture2D,
     sea: Shader,
     over: Shader,
     bright: Shader,
@@ -115,6 +121,7 @@ pub fn postNew(gl: &mut GlContext, w: i64, h: i64, ow: i64, oh: i64): Result<Pos
         // LINEAR: the grid is coarse, and a nearest-sampled shoreline is a
         // staircase of 10 m steps. Filtering makes it a soft waterline.
         cover: Texture2D.r32fEmpty(gl, COVER_TEX, COVER_TEX, true),
+        cloudTex: cloudUpload(gl, cloudEmpty()),
         sea: sea,
         over: over,
         bright: bright,
@@ -170,6 +177,12 @@ pub fn postBindWorld(p: &Post) {
     p.world.bind()
 }
 
+// Push a new weather field to the GPU. Called when the field changes, which is
+// on a place change or when a fetch lands — never per frame.
+pub fn postSetClouds(p: &Post, f: &CloudField) {
+    cloudUpdate(p.cloudTex, f)
+}
+
 // The sea, then the overlay, then bloom, then the window.
 pub fn postFinish(p: &Post, c: &Canvas, v: &View, s: &Scene, cov: &CoverGrid, cover: &Vec<f32>, coverDirty: bool, hasSea: bool, time: f64, bloomGain: f64, exposure: f64, dw: i64, dh: i64) {
     // Only when the place changes: a 19 km grid is 14 MB and there is no reason
@@ -203,6 +216,19 @@ pub fn postFinish(p: &Post, c: &Canvas, v: &View, s: &Scene, cov: &CoverGrid, co
         on = 1.0
     }
     p.sea.uniformF("uSeaOn", on)
+    // The cloud volume rides along in the sea pass because that pass already
+    // owns the two things a march needs and nothing else in the chain has both:
+    // the view ray, reconstructed from the same projection the geometry used, and
+    // the scene depth the geometry wrote into alpha. Giving clouds a pass of
+    // their own would mean a second full-resolution target and rebuilding both.
+    p.cloudTex.bind(2)
+    p.sea.uniformI("uCloudTex", 2)
+    p.sea.uniformF("uCloudBase", s.cloudBase)
+    p.sea.uniformF("uCloudTopMax", s.cloudTopMax)
+    p.sea.uniformF("uCloudReach", s.cloudReach)
+    p.sea.uniformF("uCloudOn", s.cloudOn)
+    p.sea.uniformF("uCloudDensity", s.cloudDens)
+    p.sea.uniform2F("uCloudWind", s.cloudWindX, s.cloudWindZ)
     p.quad.draw()
 
     // The 2D layer, blended in. Premultiplied alpha: the shader emits the
@@ -314,7 +340,7 @@ uniform vec2 uFogRange;
 uniform float uSeaOn;
 "
 
-    + SKY_GLSL + "
+    + SKY_GLSL + CLOUD_GLSL + "
 const float SEA_LIFT = 0.80;
 // Terrain at or under this is the DEM\'s water sheet, not land. Generous enough
 // to swallow the noise flyby adds to terrain, tight enough that a real shore
@@ -410,30 +436,23 @@ float wetness(vec2 xz) {
 }
 
 
-void main() {
-    vec4 world = texture(uWorld, vUv);
-    vec3 base = world.rgb;
-    float sceneZ = world.a;
+// The sea alone, returning rather than writing.
+//
+// It used to be `main` and it used to write `fragColor` from five places. Clouds
+// have to composite over EVERY pixel — including the ones where there is no sea
+// and the ones that are pure sky, which is most of them — so every one of those
+// early exits had to become a value the caller can carry on working with.
+vec4 seaShade(vec3 rd, vec3 base, float sceneZ) {
     if (uSeaOn < 0.5) {
-        fragColor = vec4(base, sceneZ);
-        return;
+        return vec4(base, sceneZ);
     }
 
-    // Exactly the inverse of gpuworld.viewProj, which is why they share uProj:
-    // a field of view reconstructed a fraction off is a sea that does not line up
-    // with the coast it is lapping against.
-    float a = (vUv.x * 2.0 - 1.0) / uProj.x;
-    float b = (vUv.y * 2.0 - 1.0) / uProj.y;
-    vec3 rd = normalize(uRight * a + uUp * b + uFwd);
-
     if (rd.y > -0.0008 || uEye.y <= 0.2) {
-        fragColor = vec4(base, sceneZ);
-        return;
+        return vec4(base, sceneZ);
     }
     float t = -uEye.y / rd.y;
     if (t <= 0.0 || t > uFogRange.y) {
-        fragColor = vec4(base, sceneZ);
-        return;
+        return vec4(base, sceneZ);
     }
 
     // Newton against the wave field. The flat plane is already within a couple of
@@ -458,8 +477,7 @@ void main() {
     // renderer then paints as land, in the middle of a bay.
     float wet = wetness(p.xz);
     if (seaZ <= 0.0 || wet < 0.002) {
-        fragColor = vec4(base, sceneZ);
-        return;
+        return vec4(base, sceneZ);
     }
     // Anything standing on the water still occludes it — a bridge deck, a tower,
     // a ship. Judged by HEIGHT, not by depth: the DEM writes 0 over water, so the
@@ -473,8 +491,7 @@ void main() {
         wet *= 1.0 - smoothstep(WATERLINE, WATERLINE + WATERLINE_FADE, sceneY);
     }
     if (wet < 0.002) {
-        fragColor = vec4(base, sceneZ);
-        return;
+        return vec4(base, sceneZ);
     }
 
     // Normal, with the sample spacing set by how much world a pixel covers here.
@@ -531,7 +548,46 @@ void main() {
     // then it is almost pure haze and so is what is behind it, so nothing shows.
     float edge = 1.0 - smoothstep(uFogRange.y * 0.75, uFogRange.y, t);
     float k = edge * wet;
-    fragColor = vec4(mix(base, col, k), mix(sceneZ, seaZ, k));
+    return vec4(mix(base, col, k), mix(sceneZ, seaZ, k));
+}
+
+void main() {
+    vec4 world = texture(uWorld, vUv);
+    vec3 base = world.rgb;
+    float sceneZ = world.a;
+
+    // Exactly the inverse of gpuworld.viewProj, which is why they share uProj:
+    // a field of view reconstructed a fraction off is a sea that does not line up
+    // with the coast it is lapping against.
+    float a = (vUv.x * 2.0 - 1.0) / uProj.x;
+    float b = (vUv.y * 2.0 - 1.0) / uProj.y;
+    vec3 rd = normalize(uRight * a + uUp * b + uFwd);
+
+    vec4 sea = seaShade(rd, base, sceneZ);
+    vec3 col = sea.rgb;
+    float depth = sea.a;
+
+    // How far this ray may travel before something opaque stops it.
+    //
+    // `depth` is measured along the VIEW AXIS, which is what the geometry pass
+    // wrote and what the sea pass wants; the march needs distance along THIS ray.
+    // Dividing by the cosine between them is the whole conversion, and skipping
+    // it clips cloud short toward the edges of the frame by up to the tangent of
+    // half the field of view — a curved bite out of the sky that moves with the
+    // camera.
+    float cosF = max(dot(rd, uFwd), 0.0001);
+    float maxT = 60000.0;
+    if (depth > 0.0) { maxT = depth / cosF; }
+
+    // Offset each ray a fraction of a step. Marching every pixel from the same
+    // place makes the layer boundaries land on the same planes across the whole
+    // frame, which reads as a set of concentric shells; jittering turns that
+    // banding into noise, which the eye discards.
+    float jitter = fract(sin(dot(vUv, vec2(12.9898, 78.233))) * 43758.5453);
+    vec4 cl = cloudMarch(uEye, rd, maxT, jitter);
+    col = col * cl.a + cl.rgb;
+
+    fragColor = vec4(col, depth);
 }
 "
 

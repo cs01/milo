@@ -190,12 +190,30 @@ vec3 skyTint() {
 //     two extra multiplies.
 vec3 aerial(vec3 col, vec3 rd, float d, float hEye, float hFrag) {
     float H = 1150.0;
-    // Mean density over the segment. Averaging the endpoints rather than
-    // integrating exactly: the error is small over the distances drawn here, and
-    // the exact form divides by (hFrag - hEye), which is zero for a level ray —
-    // the single most common ray in the frame.
-    float dens = 0.5 * (exp(-max(hEye, 0.0) / H) + exp(-max(hFrag, 0.0) / H));
-    float od = uHaze * dens * d;
+    float a = max(hEye, 0.0);
+    float b = max(hFrag, 0.0);
+    float ea = exp(-a / H);
+    float eb = exp(-b / H);
+    // The exact integral of an exponential atmosphere along the segment, not the
+    // mean of its endpoints.
+    //
+    // Averaging the two ends is fine for a level ray and badly wrong for a steep
+    // one, which is the ray a flight sim spends most of its time on: from 3 km up,
+    // looking down at a city 15 km away along the slant, almost the whole path is
+    // in thin air near the top and the average says otherwise. It overstated the
+    // optical depth by about a third there, which put a grey wall between the
+    // aircraft and the ground exactly when the view should be at its best.
+    //
+    // The closed form divides by the altitude difference and so is singular for a
+    // level ray — the most common ray in the frame — hence the branch.
+    float dh = a - b;
+    float integral;
+    if (abs(dh) < 1.0) {
+        integral = d * ea;
+    } else {
+        integral = d * H * (eb - ea) / dh;
+    }
+    float od = uHaze * integral;
     vec3 t = exp(-od * vec3(0.76, 0.93, 1.22));
     return col * t + skyColor(rd, false) * (1.0 - t);
 }

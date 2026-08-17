@@ -25,8 +25,11 @@ from "./gfx" import {
 from "./gfx3d" import {
     Scene, View
 }
+from "./cloud" import {
+    CloudField
+}
 from "./gpupost" import {
-    CoverGrid, Post, postBeginWorld, postFinish, postFree, postNew, postResize, postBindWorld
+    CoverGrid, Post, postBeginWorld, postFinish, postFree, postNew, postResize, postBindWorld, postSetClouds
 }
 from "sdl" import {
     SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_MaximizeWindow,
@@ -189,6 +192,11 @@ pub fn screenBegin(s: &mut Screen): Size {
 // the sky if the order ever changes.
 pub fn screenRebind(s: &Screen) {
     postBindWorld(s.post)
+}
+
+// Push a new weather field to the GPU.
+pub fn screenSetClouds(s: &Screen, f: &CloudField) {
+    postSetClouds(s.post, f)
 }
 
 // Finish it: sea, overlay, bloom, tone map, swap. Clearing the overlay canvas is

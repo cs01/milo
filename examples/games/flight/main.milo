@@ -25,7 +25,7 @@ from "./input" import {
     Input, inputNew, pollInput
 }
 from "./display" import {
-    Screen, screenBegin, screenClose, screenFullscreen, screenOpen, screenPresent, screenRebind
+    Screen, screenBegin, screenClose, screenFullscreen, screenOpen, screenPresent, screenRebind, screenSetClouds
 }
 from "./gfx" import {
     Canvas, canvasNew, canvasFill, text, textCentered, fillRect, thickLine
@@ -469,6 +469,10 @@ pub fn main(): i32 {
         }
         // The sea only exists where the DEM says it does, and its camera is the
         // one the geometry was just drawn with.
+        if w.env.cloudsDirty {
+            screenSetClouds(scr, w.env.clouds)
+            w.env.cloudsDirty = false
+        }
         screenPresent(scr, c, view, s, grid, cover, coverDirty, cityHasSea(w.city), w.time, 0.35, exposure)
         coverDirty = false
     }

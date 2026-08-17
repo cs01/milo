@@ -29,6 +29,9 @@ from "std/strconv" import {
 from "./solar" import {
     SunDir, sunAt
 }
+from "./cloud" import {
+    CloudField, cloudEmpty, cloudSynthetic
+}
 
 // How the environment was arrived at, so the HUD can say so rather than implying
 // a live feed that is not there. A fabricated sky presented as the real one is
@@ -58,6 +61,15 @@ pub struct LiveEnv {
     baseEpoch: i64,
 
     sunSource: EnvSource,
+
+    // The sky over this place: coverage and cloud-top height on a grid, with one
+    // base for the layer. Synthetic until a fetch replaces it, and honest about
+    // which it is — see `cloudSource`.
+    clouds: CloudField,
+    cloudSource: EnvSource,
+    // Set when the field has changed and the GPU copy is stale. The renderer
+    // clears it after uploading; nothing else writes it.
+    cloudsDirty: bool,
 }
 
 fn envI64(name: string, fallback: i64): i64 {
@@ -78,7 +90,10 @@ fn envI64(name: string, fallback: i64): i64 {
     }
 }
 
-fn envF64(name: string, fallback: f64): f64 {
+// Public because the screenshot tool needs the same "read a number from the
+// environment or fall back" behaviour to place its camera, and two copies of
+// this would drift.
+pub fn envF64(name: string, fallback: f64): f64 {
     match Env.get(name) {
         Option.Some(v) => {
             match parseFloat(v) {
@@ -96,7 +111,7 @@ fn envF64(name: string, fallback: f64): f64 {
     }
 }
 
-pub fn envNew(lat: f64, lon: f64): LiveEnv {
+pub fn envNew(lat: f64, lon: f64, reach: f64): LiveEnv {
     let frozen = envI64("FLYBY_UTC", 0 - 1)
     let scale = envF64("FLYBY_TIMESCALE", 1.0)
     let now = epochSecs()
@@ -113,16 +128,43 @@ pub fn envNew(lat: f64, lon: f64): LiveEnv {
         timeScale: scale,
         baseEpoch: now,
         sunSource: EnvSource.Synthetic,
+        clouds: cloudEmpty(),
+        cloudSource: EnvSource.Synthetic,
+        cloudsDirty: true,
     }
     envRetime(e, 0.0)
+    envSynthWeather(e, reach)
     return e
 }
 
+// Invent a sky. Used until real data lands, and for any place no feed covers.
+//
+// The parameters are the ones a surface observation actually reports, so the
+// same call signature serves both: coverage in eighths of sky, a ceiling in
+// metres and a layer thickness. That is deliberate — when the fetch arrives it
+// fills the same field the same way, and nothing downstream changes.
+pub fn envSynthWeather(e: &mut LiveEnv, reachIn: f64) {
+    // An empty place has no extent, and a zero reach divides by zero in the
+    // shader's world-to-grid mapping.
+    var reach = reachIn
+    if reach < 1000.0 {
+        reach = 8000.0
+    }
+    // Varies with the place rather than being one fixed sky everywhere: the seed
+    // comes off the coordinates, so San Francisco and Honolulu get different
+    // weather and each one gets the SAME weather every run.
+    let seed = e.lat * 3.7 + e.lon * 1.9
+    e.clouds = cloudSynthetic(reach, 0.42, 980.0, 1150.0, seed)
+    e.cloudSource = EnvSource.Synthetic
+    e.cloudsDirty = true
+}
+
 // Point the environment at a new place without losing the clock.
-pub fn envSetPlace(e: &mut LiveEnv, lat: f64, lon: f64) {
+pub fn envSetPlace(e: &mut LiveEnv, lat: f64, lon: f64, reach: f64) {
     e.lat = lat
     e.lon = lon
     envRetime(e, 0.0)
+    envSynthWeather(e, reach)
 }
 
 // Recompute everything time-dependent. `elapsed` is seconds of wall clock since

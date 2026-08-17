@@ -1,0 +1,379 @@
+// Clouds as a volume with a floor and a ceiling, in metres above the ground.
+//
+// What was here before was `cloudDeck` in `sky.milo`: a noise field projected
+// onto a plane at infinity. As a sky it is good and it costs almost nothing. As
+// the thing asked for here it cannot work at all, because it has no altitude — it
+// is a pattern painted on the inside of the dome, so it is the same distance away
+// however high you climb, it is in a different place for every observer, and
+// there is no "over" to fly. That deck still draws everything above the volume;
+// this is what happens between the base and the top.
+//
+// The shape of the data is the point. Coverage and cloud-top height arrive as a
+// GRID over the same square of the world the city occupies, so a cloud is at a
+// map coordinate rather than in a direction, and its top is at an altitude
+// rather than at a brightness. Two consequences follow immediately and neither is
+// available to a projected deck: the aircraft can be under, inside or above a
+// given cloud, and the shadow of that cloud lands on a particular set of blocks.
+//
+// Where the grid comes from is deliberately not this file's business. It is
+// filled either by `cloudSynthetic` — noise, honest about being invented — or
+// from a satellite's infrared channel, where brightness temperature inverts to
+// cloud-top height. The renderer cannot tell the difference and should not be
+// able to.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Texture2D
+}
+
+// Grid side. 128 over a 16 km square is 125 m a cell, which is finer than the
+// satellite data that will fill it (GOES is 2 km at nadir in the infrared bands)
+// and about as coarse as the 3D detail noise can hide.
+pub let CLOUD_N: i64 = 128
+
+pub struct CloudField {
+    n: i64,
+    // Interleaved for upload: coverage, top height in metres, spare. One texture
+    // rather than two samplers because every march step reads both and they are
+    // always read together.
+    texel: Vec<f32>,
+    // Cloud base, metres. One number for the whole field: a reported ceiling is
+    // one number, and within a single city the base of a given layer really is
+    // close to flat — it is the condensation level, which is set by the surface
+    // temperature and dewpoint, and those do not vary much over 16 km.
+    baseM: f64,
+    // Highest top anywhere in the field, so the raymarch knows where the slab
+    // ends without reading the grid to find out.
+    topMaxM: f64,
+    // World half-extent the grid spans, metres.
+    reach: f64,
+    // Metres per second, for drifting the detail noise. The layer itself does not
+    // translate — it is a measurement of where cloud IS — but the fine structure
+    // has to move or the sky reads as a photograph pinned to the sky.
+    windX: f64,
+    windZ: f64,
+    valid: bool,
+}
+
+pub fn cloudEmpty(): CloudField {
+    var t: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N * 3, 0.0)
+    return CloudField {
+        n: CLOUD_N,
+        texel: t,
+        baseM: 900.0,
+        topMaxM: 2200.0,
+        reach: 8000.0,
+        windX: 6.0,
+        windZ: 2.0,
+        valid: false,
+    }
+}
+
+// Wrapping by declaration: a bit-mixing hash is SUPPOSED to overflow, and Milo
+// traps on overflow by default. Same reasoning as `textures.hashi`.
+@wrapping
+fn hash2(x: i64, y: i64): f64 {
+    var h = x * 374761393 + y * 668265263
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    var m = h % 65536
+    if m < 0 {
+        m = 0 - m
+    }
+    return (m as f64) / 65536.0
+}
+
+fn vnoise(x: f64, y: f64): f64 {
+    let xi = Math.floor(x)
+    let yi = Math.floor(y)
+    let xf = x - xi
+    let yf = y - yi
+    let u = xf * xf * (3.0 - 2.0 * xf)
+    let v = yf * yf * (3.0 - 2.0 * yf)
+    let i = xi as i64
+    let j = yi as i64
+    let a = hash2(i, j)
+    let b = hash2(i + 1, j)
+    let c = hash2(i, j + 1)
+    let d = hash2(i + 1, j + 1)
+    return (a + (b - a) * u) + ((c + (d - c) * v) - (a + (b - a) * u)) * v
+}
+
+fn fbm2(x: f64, y: f64): f64 {
+    var v = 0.0
+    var amp = 0.5
+    var px = x
+    var py = y
+    for _ in 0..5 {
+        v = v + amp * vnoise(px, py)
+        let nx = px * 1.7 + py * 1.1
+        let ny = py * 1.7 - px * 1.1
+        px = nx
+        py = ny
+        amp = amp * 0.5
+    }
+    return v
+}
+
+// A field that is not a measurement, and says so.
+//
+// `coverage` is the fraction of sky the layer should hide, which is the number a
+// surface observation actually reports (a METAR says FEW/SCT/BKN/OVC, which are
+// eighths). Turning that into a threshold on a noise field is the whole
+// generator: raise the threshold and the same noise becomes scattered cumulus,
+// lower it and it becomes overcast.
+pub fn cloudSynthetic(reach: f64, coverage: f64, baseM: f64, thicknessM: f64, seed: f64): CloudField {
+    var f = cloudEmpty()
+    f.reach = reach
+    f.baseM = baseM
+    f.topMaxM = baseM + thicknessM
+    f.valid = true
+
+    // Threshold that yields roughly `coverage` of the field above it. The fbm
+    // above sits around 0.5 with most of its mass between 0.25 and 0.75, so this
+    // is a linear fit through that range rather than an inversion of the CDF —
+    // close enough that the reported coverage and the visible coverage agree to
+    // within a few percent, which is all the input is accurate to anyway.
+    let lo = 0.74 - coverage * 0.52
+
+    let n = f.n
+    for j in 0..n {
+        for i in 0..n {
+            let u = (i as f64) / (n as f64) * 6.0 + seed
+            let v = (j as f64) / (n as f64) * 6.0 + seed * 0.7
+            let d = fbm2(u, v)
+            var c = (d - lo) / 0.26
+            if c < 0.0 {
+                c = 0.0
+            }
+            if c > 1.0 {
+                c = 1.0
+            }
+            // Thicker cloud is taller cloud. A flat top over a varying coverage
+            // looks like a sheet with holes punched in it; real cumulus tops rise
+            // where the cloud is deepest.
+            let top = baseM + thicknessM * (0.45 + 0.55 * c)
+            let k = (j * n + i) * 3
+            f.texel[k] = c as f32
+            f.texel[k + 1] = top as f32
+            f.texel[k + 2] = 0.0 as f32
+        }
+    }
+    return f
+}
+
+pub fn cloudUpload(gl: &mut GlContext, f: &CloudField): Texture2D {
+    return Texture2D.rgb32f(gl, f.n, f.n, f.texel, true)
+}
+
+pub fn cloudUpdate(tex: &Texture2D, f: &CloudField) {
+    tex.updateRgb32f(f.texel)
+}
+
+// Pasted into the pass that owns the view ray. It needs `skyColor`, `sunLight`
+// and `skyTint` from SKY_GLSL, and must be concatenated after it.
+pub let CLOUD_GLSL: string = "
+uniform sampler2D uCloudTex;  // r = coverage 0..1, g = top height in metres
+uniform float uCloudBase;
+uniform float uCloudTopMax;
+uniform float uCloudReach;
+uniform float uCloudOn;
+uniform vec2 uCloudWind;
+uniform float uCloudDensity;
+
+// Extinction per metre at unit density. Real cloud runs 0.01 to 0.1 depending on
+// how much liquid water is in it; this sits low in that range because the density
+// field above already saturates at 1.0 across a whole cell.
+const float CLOUD_SIGMA = 0.020;
+
+// World xz to a grid lookup.
+//
+// Mirrored rather than wrapped, matching what the terrain does with the same
+// coordinates: the map is a finite square and the flight is not, so the world
+// outside it is the world inside it reflected. A modulo wrap would join the far
+// edge of the weather to the near one and put a discontinuity in the sky along a
+// line, which over a cloud layer is far more obvious than it is over ground.
+vec2 cloudUv(vec2 xz) {
+    vec2 q = xz / (2.0 * uCloudReach) + 0.5;
+    vec2 f = abs(fract(q * 0.5) * 2.0 - 1.0);
+    return clamp(f, 0.002, 0.998);
+}
+
+float cloudHash3(vec3 p) {
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float cloudNoise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = cloudHash3(i + vec3(0.0, 0.0, 0.0));
+    float n100 = cloudHash3(i + vec3(1.0, 0.0, 0.0));
+    float n010 = cloudHash3(i + vec3(0.0, 1.0, 0.0));
+    float n110 = cloudHash3(i + vec3(1.0, 1.0, 0.0));
+    float n001 = cloudHash3(i + vec3(0.0, 0.0, 1.0));
+    float n101 = cloudHash3(i + vec3(1.0, 0.0, 1.0));
+    float n011 = cloudHash3(i + vec3(0.0, 1.0, 1.0));
+    float n111 = cloudHash3(i + vec3(1.0, 1.1, 1.0));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+// Three octaves. A fourth is visible only from inside a cloud and costs as much
+// as the first three together.
+float cloudFbm3(vec3 p) {
+    float v = 0.5 * cloudNoise3(p);
+    p *= 2.03;
+    v += 0.25 * cloudNoise3(p);
+    p *= 2.11;
+    v += 0.125 * cloudNoise3(p);
+    return v / 0.875;
+}
+
+// How much cloud is at a point, 0 to 1.
+//
+// The grid says how much sky is covered here and how tall the cloud is; the noise
+// says what shape it has. They are combined by EROSION rather than by
+// multiplication: the noise eats into the cloud from its edges, by an amount that
+// falls to nothing where coverage is total. Multiplying instead makes a solid
+// overcast just as lumpy as a scattered one, which is exactly backwards — an
+// overcast layer is a flat grey lid, and that flatness is what makes it read as
+// overcast rather than as a lot of separate clouds.
+float cloudDensity(vec3 p) {
+    vec2 c = texture(uCloudTex, cloudUv(p.xz)).rg;
+    float cover = c.r;
+    if (cover <= 0.002) { return 0.0; }
+    float top = max(c.g, uCloudBase + 40.0);
+    if (p.y < uCloudBase || p.y > top) { return 0.0; }
+
+    float h = (p.y - uCloudBase) / max(top - uCloudBase, 1.0);
+    // Flat bottom, rounded top. A cumulus base is a sharp plane — it is the
+    // altitude where rising air reaches its dew point, and that altitude is the
+    // same everywhere the air came from the same place — while the top is where
+    // the rising parcel ran out of buoyancy, which is gradual.
+    float prof = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.45, 1.0, h));
+
+    vec3 q = p * 0.0011 + vec3(uCloudWind.x, 0.0, uCloudWind.y) * uTime * 0.0004;
+    float detail = cloudFbm3(q);
+    float d = cover * prof - (1.0 - cover) * detail * 0.85;
+    return clamp(d, 0.0, 1.0) * uCloudDensity;
+}
+
+// Henyey-Greenstein. Cloud droplets scatter overwhelmingly FORWARD, which is why
+// a cloud between you and the sun has a bright rim and a cloud with the sun
+// behind you is a dull white lump. Without this the whole layer is uniformly lit
+// and reads as cotton wool.
+float cloudPhase(float ct, float g) {
+    float gg = g * g;
+    return (1.0 - gg) / (12.566 * pow(1.0 + gg - 2.0 * g * ct, 1.5));
+}
+
+// Transmittance from a point toward the sun. Four long steps: this is a shadow
+// through a medium with no hard edges, so the error from a coarse march shows up
+// as softness rather than as banding, and softness is what it should look like.
+float cloudLightT(vec3 p) {
+    float sum = 0.0;
+    float step = (uCloudTopMax - uCloudBase) * 0.28 + 40.0;
+    for (int i = 1; i <= 4; i++) {
+        vec3 q = p + uSun * (step * float(i));
+        if (q.y > uCloudTopMax) { break; }
+        sum += cloudDensity(q) * step;
+    }
+    // Two octaves, not one.
+    //
+    // A single exponential is the transmittance of a beam that is either absorbed
+    // or not. Cloud droplets barely absorb anything — they SCATTER, with an albedo
+    // near one — so light that leaves the direct beam is still in the cloud and
+    // still arrives, just later and from a different direction. Integrating only
+    // the direct beam is why a naive march produces clouds that are charcoal grey
+    // underneath instead of white, and no amount of raising the ambient term
+    // fixes it, because the error is in the shape and not the level. Summing a
+    // second, much shallower exponential stands in for that scattered energy at
+    // the cost of one more `exp`.
+    float t1 = exp(-sum * CLOUD_SIGMA);
+    float t2 = exp(-sum * CLOUD_SIGMA * 0.22);
+    return t1 * 0.62 + t2 * 0.38;
+}
+
+// March the slab and return scattered light in rgb, remaining transmittance in a.
+//
+// `maxT` is how far the ray may travel before something opaque stops it, so a
+// cloud behind a hillside is never integrated. That number comes from the depth
+// the geometry pass wrote, which is why this lives in a pass that has it.
+vec4 cloudMarch(vec3 ro, vec3 rd, float maxT, float jitter) {
+    if (uCloudOn < 0.5) { return vec4(0.0, 0.0, 0.0, 1.0); }
+
+    // Where the ray is inside the slab. A ray that never enters it — level flight
+    // under a high deck looking at the horizon, or anything pointing down from
+    // above the tops — has nothing to do here, and that early out is most of what
+    // makes this affordable.
+    float t0 = 0.0;
+    float t1 = maxT;
+    float dy = rd.y;
+    if (abs(dy) < 0.0001) {
+        if (ro.y < uCloudBase || ro.y > uCloudTopMax) { return vec4(0.0, 0.0, 0.0, 1.0); }
+    } else {
+        float ta = (uCloudBase - ro.y) / dy;
+        float tb = (uCloudTopMax - ro.y) / dy;
+        t0 = max(0.0, min(ta, tb));
+        t1 = min(maxT, max(ta, tb));
+    }
+    if (t1 <= t0) { return vec4(0.0, 0.0, 0.0, 1.0); }
+    // Cap the marched length. Looking along the layer the slab is effectively
+    // infinite, and past a few kilometres the haze has taken over anyway.
+    t1 = min(t1, t0 + 9000.0);
+
+    const int STEPS = 56;
+    float dt = (t1 - t0) / float(STEPS);
+    float ct = dot(rd, uSun);
+    // Two lobes: a strong forward one for the rim, a weak backward one for the
+    // glow a cloud has when the sun is behind the viewer.
+    float ph = cloudPhase(ct, 0.72) * 0.75 + cloudPhase(ct, -0.22) * 0.25;
+
+    vec3 sunCol = sunLight();
+    // Ambient is not a fudge here — a cloud sits under the whole sky dome and
+    // most of what lights its flanks is that dome, not the sun. It is scaled well
+    // above the zenith radiance because the dome covers a hemisphere and
+    // `skyColor` answers for one direction in it.
+    vec3 ambCol = skyColor(vec3(0.0, 1.0, 0.0), false) * 2.4 + vec3(0.03);
+
+    float trans = 1.0;
+    vec3 scat = vec3(0.0);
+    for (int i = 0; i < STEPS; i++) {
+        float t = t0 + (float(i) + jitter) * dt;
+        if (t > t1) { break; }
+        vec3 p = ro + rd * t;
+        float d = cloudDensity(p);
+        if (d > 0.002) {
+            float lt = cloudLightT(p);
+            // Ambient rises with height in the cloud: the top of a layer sees the
+            // whole sky, the bottom sees almost none of it, and that gradient is
+            // why the underside of a cloud is grey.
+            float hf = clamp((p.y - uCloudBase) / max(uCloudTopMax - uCloudBase, 1.0), 0.0, 1.0);
+            vec3 lum = sunCol * lt * ph * 14.0 + ambCol * (0.30 + 0.62 * hf);
+            float ext = d * dt * CLOUD_SIGMA;
+            float a = 1.0 - exp(-ext);
+            scat += trans * lum * a;
+            trans *= 1.0 - a;
+            if (trans < 0.012) { break; }
+        }
+    }
+    // Put the cloud behind the same air everything else is behind.
+    //
+    // Without this the layer keeps full contrast all the way to the horizon while
+    // the terrain under it fades out, so the slab ends in a hard horizontal band
+    // where it runs out of march distance — a straight edge across the sky, which
+    // is the one thing a sky never has.
+    float tMid = t0 + (t1 - t0) * 0.4;
+    float hazeF = 1.0 - exp(-uHaze * tMid * 0.85);
+    vec3 hz = skyColor(rd, false);
+    scat = mix(scat, hz * (1.0 - trans), hazeF);
+    trans = mix(trans, 1.0, hazeF * 0.55);
+
+    return vec4(scat, trans);
+}
+"

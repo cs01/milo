@@ -42,7 +42,7 @@ from "./gfx3d" import {
     sceneNew, viewOf
 }
 from "./gpupost" import {
-    CoverGrid, postBeginWorld, postFinish, postFree, postNew, postBindWorld
+    CoverGrid, postBeginWorld, postFinish, postFree, postNew, postBindWorld, postSetClouds
 }
 from "./gpuworld" import {
     drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass
@@ -52,6 +52,9 @@ from "./city" import {
 }
 from "./world3d" import {
     World, heightAt
+}
+from "./live" import {
+    envF64
 }
 from "./world3d" import {
     marksFor, worldIn, worldUpdate, SEED
@@ -199,6 +202,17 @@ pub fn main(): i32 {
         if mark >= 0 {
             aimAtMark(w, place, mark, dist)
         }
+        // Put the camera where the picture needs it.
+        //
+        // The autopilot decides the altitude, and the altitude is exactly what a
+        // cloud layer has to be photographed against: the same sky is a ceiling
+        // from below, a wall from inside it and a floor from above, and there is
+        // no other way to see which one the renderer is producing.
+        let shotAlt = envF64("FLYBY_SHOT_ALT", 0.0 - 1.0)
+        if shotAlt > 0.0 {
+            w.cam.y = shotAlt
+            w.cam.pitch = envF64("FLYBY_SHOT_PITCH", 0.0 - 8.0) * 3.14159265358979 / 180.0
+        }
         let view = viewOf(w.cam, c.w, c.h)
         postBeginWorld(p)
         drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
@@ -218,6 +232,10 @@ pub fn main(): i32 {
         drawChecklist(c, w)
         drawFound(c, w)
         drawHud(c, w, s, 60)
+        if w.env.cloudsDirty {
+            postSetClouds(p, w.env.clouds)
+            w.env.cloudsDirty = false
+        }
         postFinish(p, c, view, s, grid, dem, first, cityHasSea(w.city), w.time, 0.35, 1.0, W, H)
         first = false
         if i == frames - 1 {

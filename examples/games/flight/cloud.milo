@@ -124,6 +124,46 @@ fn fbm2(x: f64, y: f64): f64 {
 // eighths). Turning that into a threshold on a noise field is the whole
 // generator: raise the threshold and the same noise becomes scattered cumulus,
 // lower it and it becomes overcast.
+// A single localised rain cell, for testing the shaft renderer without waiting
+// for a real storm to appear over one of the five cities.
+//
+// Not reachable from normal play — the rain channel is otherwise written only by
+// radar. It exists because widespread rain and a discrete shaft look completely
+// different and only one of them can be checked against a live feed on any given
+// night.
+pub fn cloudAddTestCell(f: &mut CloudField, cx: f64, cz: f64, radius: f64, strength: f64) {
+    let n = f.n
+    let span = 2.0 * f.reach
+    for j in 0..n {
+        for i in 0..n {
+            let wx = ((i as f64) + 0.5) / (n as f64) * span - f.reach
+            let wz = ((j as f64) + 0.5) / (n as f64) * span - f.reach
+            let dx = wx - cx
+            let dz = wz - cz
+            let d = Math.sqrt(dx * dx + dz * dz) / radius
+            if d < 1.0 {
+                let a = (1.0 - d) * (1.0 - d)
+                let k = (j * n + i) * 3
+                let r = strength * a
+                if r > (f.texel[k + 2] as f64) {
+                    f.texel[k + 2] = r as f32
+                }
+                // Rain falls out of cloud, so the cell is overcast above itself.
+                if (f.texel[k] as f64) < 0.55 + 0.45 * a {
+                    f.texel[k] = ((0.55 + 0.45 * a) as f32)
+                }
+                let top = f.baseM + 2200.0 * a + 400.0
+                if (f.texel[k + 1] as f64) < top {
+                    f.texel[k + 1] = top as f32
+                }
+                if top > f.topMaxM {
+                    f.topMaxM = top
+                }
+            }
+        }
+    }
+}
+
 pub fn cloudSynthetic(reach: f64, coverage: f64, baseM: f64, thicknessM: f64, seed: f64): CloudField {
     var f = cloudEmpty()
     f.reach = reach
@@ -228,6 +268,7 @@ uniform float uCloudReach;
 uniform float uCloudOn;
 uniform vec2 uCloudWind;
 uniform float uCloudDensity;
+uniform float uRainPeak;      // strongest reflectivity anywhere on the map, 0..1
 
 // Extinction per metre at unit density. Real cloud runs 0.01 to 0.1 depending on
 // how much liquid water is in it; this sits low in that range because the density
@@ -290,11 +331,27 @@ float cloudFbm3(vec3 p) {
 // overcast layer is a flat grey lid, and that flatness is what makes it read as
 // overcast rather than as a lot of separate clouds.
 float cloudDensity(vec3 p) {
-    vec2 c = texture(uCloudTex, cloudUv(p.xz)).rg;
+    vec3 c = texture(uCloudTex, cloudUv(p.xz)).rgb;
     float cover = c.r;
-    if (cover <= 0.002) { return 0.0; }
     float top = max(c.g, uCloudBase + 40.0);
-    if (p.y < uCloudBase || p.y > top) { return 0.0; }
+
+    // Below the cloud base is where rain is, and the radar says where.
+    //
+    // A shaft is the visible part of weather at a distance — the thing that makes
+    // a squall a place rather than a condition — and it hangs from the cloud that
+    // is producing it, which is why this is keyed to the same grid cell as the
+    // coverage above it and not scattered independently. Densest just under the
+    // base and thinning downward: drops spread out as they fall and the lightest
+    // of them evaporate before they arrive, which is why a shaft has a soft,
+    // tapered bottom rather than a flat one.
+    if (p.y < uCloudBase) {
+        float rain = c.b;
+        if (rain <= 0.01) { return 0.0; }
+        float f = clamp(p.y / max(uCloudBase, 1.0), 0.0, 1.0);
+        return rain * 0.42 * (0.30 + 0.70 * f) * uCloudDensity;
+    }
+    if (cover <= 0.002) { return 0.0; }
+    if (p.y > top) { return 0.0; }
 
     float h = (p.y - uCloudBase) / max(top - uCloudBase, 1.0);
     // Flat bottom, rounded top. A cumulus base is a sharp plane — it is the
@@ -360,10 +417,15 @@ vec4 cloudMarch(vec3 ro, vec3 rd, float maxT, float jitter) {
     float t0 = 0.0;
     float t1 = maxT;
     float dy = rd.y;
+    // When it is raining the volume reaches the ground, because the rain does.
+    // Otherwise it starts at the cloud base and the empty air below is skipped,
+    // which is the early-out that pays for the whole effect on a clear day.
+    float slabLow = uCloudBase;
+    if (uRainPeak > 0.02) { slabLow = 0.0; }
     if (abs(dy) < 0.0001) {
-        if (ro.y < uCloudBase || ro.y > uCloudTopMax) { return vec4(0.0, 0.0, 0.0, 1.0); }
+        if (ro.y < slabLow || ro.y > uCloudTopMax) { return vec4(0.0, 0.0, 0.0, 1.0); }
     } else {
-        float ta = (uCloudBase - ro.y) / dy;
+        float ta = (slabLow - ro.y) / dy;
         float tb = (uCloudTopMax - ro.y) / dy;
         t0 = max(0.0, min(ta, tb));
         t1 = min(maxT, max(ta, tb));

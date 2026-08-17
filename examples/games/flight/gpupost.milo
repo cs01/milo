@@ -229,6 +229,7 @@ pub fn postFinish(p: &Post, c: &Canvas, v: &View, s: &Scene, cov: &CoverGrid, co
     p.sea.uniformF("uCloudOn", s.cloudOn)
     p.sea.uniformF("uCloudDensity", s.cloudDens)
     p.sea.uniform2F("uCloudWind", s.cloudWindX, s.cloudWindZ)
+    p.sea.uniformF("uRainPeak", s.rainPeak)
     p.quad.draw()
 
     // The 2D layer, blended in. Premultiplied alpha: the shader emits the

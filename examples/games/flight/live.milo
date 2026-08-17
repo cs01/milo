@@ -30,7 +30,7 @@ from "./solar" import {
     SunDir, sunAt
 }
 from "./cloud" import {
-    CLOUD_N, CloudField, cloudEmpty, cloudSynthetic
+    CLOUD_N, CloudField, cloudEmpty, cloudSynthetic, cloudAddTestCell
 }
 from "./wx" import {
     Obs, obsEmpty, fetchObs, fetchIr, fetchRadar, lclMetres
@@ -172,7 +172,15 @@ pub fn envSynthWeather(e: &mut LiveEnv, reachIn: f64) {
     // comes off the coordinates, so San Francisco and Honolulu get different
     // weather and each one gets the SAME weather every run.
     let seed = e.lat * 3.7 + e.lon * 1.9
-    e.clouds = cloudSynthetic(reach, 0.42, 980.0, 1150.0, seed)
+    var f = cloudSynthetic(reach, 0.42, 980.0, 1150.0, seed)
+    // Test hook: FLYBY_FAKE_RAIN puts one storm cell on the map so the shaft
+    // renderer can be checked when nothing is raining over any real city.
+    let fake = envF64("FLYBY_FAKE_RAIN", 0.0)
+    if fake > 0.01 {
+        cloudAddTestCell(f, reach * 0.25, 0.0 - reach * 0.15, reach * 0.30, fake)
+        e.rainPeak = fake
+    }
+    e.clouds = f
     e.cloudSource = EnvSource.Synthetic
     e.cloudsDirty = true
 }

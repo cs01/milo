@@ -118,6 +118,7 @@ pub fn applyClouds(s: &mut Scene, w: &World) {
     s.cloudDens = 1.0
     s.cloudWindX = w.env.clouds.windX
     s.cloudWindZ = w.env.clouds.windZ
+    s.rainPeak = w.env.rainPeak
     if w.env.clouds.valid {
         s.cloudOn = 1.0
     } else {

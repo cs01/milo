@@ -21,10 +21,15 @@ Measured off `gpushot.milo` frames, not guessed:
    `fogStart/fogEnd` currently apply.
 3. **The ortho drape is 7.8 m/px** — `ORTHO_PX = 2048` over a 16 km square.
    NAIP is natively ~1 m/px through the same USGS endpoint.
-4. **One 128 px procedural façade for every building on earth**, and roof colour
-   is not sampled from the drape it is sitting on.
-5. **Terrain quads are 110 m against 30 m DEM posts**, so cliffs smooth into
+4. **Terrain quads are 110 m against 30 m DEM posts**, so cliffs smooth into
    hills.
+5. **Draw distance is 4.4 km**, so from above the cloud layer the ground beyond
+   that is not drawn at all and the view down is a grey void.
+
+Two things that were on this list and should not have been: buildings already
+carry a window-grid façade texture (`textures.facadeTexture`, eight storeys by
+eight bays) and already take their roof colour from the drape they stand on
+(`prism` in `render3d.milo`). Checked, not assumed.
 
 ## The sky is not a sky
 
@@ -57,6 +62,25 @@ Coverage caveat: the Mesonet CONUS composite bbox is 23–50N, 126–65W, which
 excludes Honolulu. Hawaii has its own NEXRAD sites and its own composite; a
 place outside all of them falls back to synthetic weather rather than to an
 empty sky.
+
+## Status
+
+Done, each verified against a rendered frame rather than by inspection:
+
+- Real solar position, checked against six known cases including Honolulu at the
+  June solstice, where the noon sun is slightly NORTH.
+- Aerial perspective as exponential extinction with the exact atmospheric
+  integral along the ray.
+- Shadow maps over terrain and buildings.
+- Volumetric clouds with a real base and top: under, inside and above all render
+  correctly.
+- Live weather from station, satellite and radar.
+- Cloud shadows on the ground, measured at 11.8% of pixels changed.
+- Rain shafts under radar returns.
+
+Not done: drape resolution (the USGS endpoint caps a single request at 2048 px,
+so this needs tiled fetching and stitching), terrain LOD, draw distance from
+altitude, weather refresh during flight, HUD attribution.
 
 ## Order of work
 

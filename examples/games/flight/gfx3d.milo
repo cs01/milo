@@ -202,6 +202,7 @@ pub struct Scene {
     cloudDens: f64,
     cloudWindX: f64,
     cloudWindZ: f64,
+    rainPeak: f64,
     tris: i64, // triangles recorded this frame
     // One vertex stream per texture slot, ten floats per vertex, three vertices
     // per triangle. Grown and never shrunk: a frame is within a few percent of
@@ -234,6 +235,7 @@ pub fn sceneNew(w: i64, h: i64): Scene {
         cloudDens: 1.0,
         cloudWindX: 6.0,
         cloudWindZ: 2.0,
+        rainPeak: 0.0,
         tris: 0,
         streams: streams,
     }

@@ -216,7 +216,7 @@ fn addGround(b: &mut Builder) {
 //
 // `side` is -1 for the left of the street and +1 for the right; the facade
 // always faces x = 0.
-fn falseFront(wood: &mut Builder, paint: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64, depth: f64, frontHeight: f64, bodyHeight: f64, tint: f64) {
+fn falseFront(wood: &mut Builder, paint: &mut Builder, side: f64, zNear: f64, zFar: f64, depth: f64, frontHeight: f64, bodyHeight: f64, tint: f64) {
     let xFace = side * STREET_HALF
     let xBack = side * (STREET_HALF + depth)
     let lo = Math.minF64(xFace, xBack)
@@ -361,7 +361,7 @@ fn addEndFacade(wood: &mut Builder, paint: &mut Builder, xLo: f64, xHi: f64, z: 
 }
 
 // The porch roof and its posts, along one side of the street.
-fn addPorch(wood: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64, height: f64) {
+fn addPorch(wood: &mut Builder, side: f64, zNear: f64, zFar: f64, height: f64) {
     let xIn = side * (STREET_HALF - 2.1)
     let xOut = side * STREET_HALF
     wood.setUvScale(1.4)
@@ -434,9 +434,7 @@ fn addPorch(wood: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64, 
 // A rail along the street edge of the boardwalk. It is here to hang targets on:
 // a rail puts them at chest height in a line the eye can sweep, which is what
 // makes a reflex game readable, and it is what a porch has anyway.
-// Literal, not WALK_TOP + 0.95: a non-constant f64 global currently emits
-// `double 0` with an integer zero and the module fails to link.
-pub let RAIL_TOP: f64 = 1.25
+pub let RAIL_TOP: f64 = WALK_TOP + 0.95
 
 fn addWalkRail(wood: &mut Builder, side: f64, zNear: f64, zFar: f64) {
     let x = side * (STREET_HALF - 0.16)
@@ -456,7 +454,7 @@ fn addWalkRail(wood: &mut Builder, side: f64, zNear: f64, zFar: f64) {
 
 // Plank boardwalk, laid across the walk so the joints run the way a real one's
 // do, with a step down to the street.
-fn addBoardwalk(wood: &mut Builder, r: &mut Rand, side: f64, zNear: f64, zFar: f64) {
+fn addBoardwalk(wood: &mut Builder, side: f64, zNear: f64, zFar: f64) {
     let xIn = side * STREET_HALF
     let xOut = side * (STREET_HALF - 2.1)
     let lo = Math.minF64(xIn, xOut)
@@ -983,11 +981,11 @@ pub fn buildWorld(gl: &mut GlContext, posterTex: i64, flatTex: i64, signATex: i6
     addGround(builders[B_DIRT])
 
     // Left of the street: the saloon, then two smaller storefronts.
-    falseFront(builders[B_WOOD], builders[B_PAINT], r, -1.0, 10.0, 19.0, 7.0, 6.4, 4.1, 0.86)
-    falseFront(builders[B_WOOD], builders[B_PAINT], r, -1.0, 20.5, 26.0, 5.5, 4.9, 3.4, 0.74)
-    falseFront(builders[B_WOOD], builders[B_PAINT], r, -1.0, 27.5, 34.0, 5.0, 4.4, 3.2, 0.80)
-    addPorch(builders[B_WOOD], r, -1.0, 10.0, 26.0, 2.85)
-    addBoardwalk(builders[B_WOOD], r, -1.0, 9.0, 35.0)
+    falseFront(builders[B_WOOD], builders[B_PAINT], -1.0, 10.0, 19.0, 7.0, 6.4, 4.1, 0.86)
+    falseFront(builders[B_WOOD], builders[B_PAINT], -1.0, 20.5, 26.0, 5.5, 4.9, 3.4, 0.74)
+    falseFront(builders[B_WOOD], builders[B_PAINT], -1.0, 27.5, 34.0, 5.0, 4.4, 3.2, 0.80)
+    addPorch(builders[B_WOOD], -1.0, 10.0, 26.0, 2.85)
+    addBoardwalk(builders[B_WOOD], -1.0, 9.0, 35.0)
     addWalkRail(builders[B_WOOD], -1.0, 9.5, 34.0)
     addTrim(builders[B_WOOD], -12.8, -5.8, 10.0, 19.0, 4.1, 0.86)
     addTrim(builders[B_WOOD], -11.3, -5.8, 20.5, 26.0, 3.4, 0.74)
@@ -996,10 +994,10 @@ pub fn buildWorld(gl: &mut GlContext, posterTex: i64, flatTex: i64, signATex: i6
     addEndFacade(builders[B_WOOD], builders[B_PAINT], -12.8, -5.8, 10.0, 5.2, 0.88)
 
     // Right of the street: the general store and a livery.
-    falseFront(builders[B_WOOD], builders[B_PAINT], r, 1.0, 12.5, 20.5, 6.5, 5.6, 3.8, 0.82)
-    falseFront(builders[B_WOOD], builders[B_PAINT], r, 1.0, 22.0, 30.5, 8.0, 5.0, 4.6, 0.70)
-    addPorch(builders[B_WOOD], r, 1.0, 12.5, 21.5, 2.85)
-    addBoardwalk(builders[B_WOOD], r, 1.0, 11.5, 31.5)
+    falseFront(builders[B_WOOD], builders[B_PAINT], 1.0, 12.5, 20.5, 6.5, 5.6, 3.8, 0.82)
+    falseFront(builders[B_WOOD], builders[B_PAINT], 1.0, 22.0, 30.5, 8.0, 5.0, 4.6, 0.70)
+    addPorch(builders[B_WOOD], 1.0, 12.5, 21.5, 2.85)
+    addBoardwalk(builders[B_WOOD], 1.0, 11.5, 31.5)
     addWalkRail(builders[B_WOOD], 1.0, 12.0, 31.0)
     addTrim(builders[B_WOOD], 5.8, 12.3, 12.5, 20.5, 3.8, 0.82)
     addTrim(builders[B_WOOD], 5.8, 13.8, 22.0, 30.5, 4.6, 0.70)

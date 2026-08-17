@@ -1,0 +1,70 @@
+// A global with a runtime initializer is emitted zeroed and filled in by the generated
+// init routine. The zero placeholder used to be the literal string "0", which is only
+// valid LLVM for integer and i1 — so a scalar f64/f32 global, or a struct global with a
+// non-constant float field, emitted `double 0` and clang rejected the whole module with
+// an error[link] carrying no source location. Every global in globalRuntimeInit.milo is
+// an aggregate, which already took the zeroinitializer branch; that is why nothing caught
+// it. A closure-typed global additionally had its by-ref capture environment alloca'd in
+// the init routine, so the env dangled the moment that frame went away.
+struct P {
+    x: f64,
+    y: i64
+}
+
+// A by-ref closure built inside a *normal* fn still belongs in that fn's frame, even when
+// the call comes from global init — this is here so the static-env fix stays scoped.
+fn twice(n: i64): i64 {
+    let f = (v: i64) => v * 2
+    return f(n)
+}
+
+pub let A: f64 = 0.30
+
+pub let B: f64 = A + 0.95
+
+pub let C: f32 = 0.5
+
+pub let D: f32 = C + 0.25
+
+pub let K: f64 = 2.0
+
+pub let S: P = P {
+    x: K * 3.0, y: 7
+}
+
+pub let M: i64 = 2
+
+pub let F: (i64) => i64 = (x: i64) => x * M
+
+pub let N: i64 = twice(M)
+// A closure created inside a global closure's *body* still belongs in that body's frame:
+// it runs once per call, so a static env would be shared across calls.
+pub let G: (i64) => i64 = (x: i64) => {
+    let h = (y: i64) => y + M
+    return h(x) * M
+}
+
+pub let T: bool = A < B
+
+pub fn main(): i32 {
+    // @expect: 1.25
+    print($"{B}")
+    // @expect: 0.75
+    print($"{D}")
+    // @expect: 6 7
+    print($"{S.x} {S.y}")
+    // the env has to survive past global init, and past the first call
+    // @expect: 10
+    print($"{F(5)}")
+    // @expect: 14
+    print($"{F(7)}")
+    // @expect: 4
+    print($"{N}")
+    // @expect: true
+    print($"{T}")
+    // @expect: 6
+    print($"{G(1)}")
+    // @expect: 24
+    print($"{G(10)}")
+    return 0
+}

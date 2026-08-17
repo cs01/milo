@@ -5929,13 +5929,24 @@ export class Codegen {
 
     // at the call site: build env struct and closure pair
     if (captures.length > 0) {
-      const envAddr = this.nextTemp();
+      let envAddr = this.nextTemp();
       // The header slot is part of the allocation, so it is sized in here too.
       const envSize = this.structPayloadSize(["ptr", ...captures.map(c => this.llvmType(c.type))]);
+      // A by-ref env normally lives in the frame that created the closure, which
+      // outlives every use — except in the global-init routine, whose frame is gone
+      // before main runs. A closure global's env has to be static, so give it its own
+      // module-level slot. Only the env *container* moves: the captures it points at
+      // are globals, so they were already static. Scoped by currentFnName rather than
+      // a spanning flag so a closure created *inside* another closure's body during
+      // global init still gets a per-call frame env (that body runs many times).
+      const staticEnv = !isMove && this.currentFnName === GLOBAL_INIT_FN;
       if (isMove) {
         // heap-allocate env for move closures (safe to send to other threads)
         this.needsMalloc = true;
         lines.push(`  ${envAddr} = call ptr @malloc(i64 ${Math.max(envSize, 16)})`);
+      } else if (staticEnv) {
+        this.closureBodies.push([`@${closureName}_env = internal global ${envStructTy} zeroinitializer`]);
+        envAddr = `@${closureName}_env`;
       } else {
         lines.push(`  ${envAddr} = alloca ${envStructTy}`);
       }
@@ -12840,17 +12851,17 @@ export class Codegen {
     // non-const module-scope check exists to prevent.
     const structInit = this.tryConstantStructInit(g.value, g.type);
     if (structInit !== null) return structInit;
-    if (g.type.tag === "ptr") return "null";
-    const tag = g.type.tag;
-    if (tag === "struct" || tag === "array" || tag === "enum" || tag === "string" || tag === "vec" || tag === "hashmap") {
-      return "zeroinitializer";
-    }
-    return "0";
+    // zeroinitializer is valid for every LLVM type, scalars included. Classifying by
+    // type tag here to pick between "0"/"null"/"zeroinitializer" is what got a
+    // `double 0` (and `{ ptr, ptr } 0`) past codegen and into a clang parse error:
+    // "0" is only legal for integer and i1, and the tag list only covered aggregates.
+    return "zeroinitializer";
   }
 
   // Build an LLVM constant struct from a struct-literal global. Fields that are not
-  // compile-time constants (Vec.new(), String literals needing a heap buffer) fall
-  // back to zeroinitializer for that field alone, which is their correct empty form.
+  // compile-time constants (Vec.new(), String literals needing a heap buffer, any
+  // computed scalar) fall back to zeroinitializer for that field alone, which is their
+  // correct empty form; the runtime global-init pass fills them in.
   private tryConstantStructInit(value: import("./hir").HIRExpr, type: TypeKind): string | null {
     if (!value || value.kind !== "StructLit" || type.tag !== "struct") return null;
     const layout = this.structLayouts.get(type.name);
@@ -12860,15 +12871,9 @@ export class Codegen {
     for (const f of layout.fields) {
       const expr = byName.get(f.name);
       const c = expr ? this.tryConstantExpr(expr) : null;
-      if (c !== null) {
-        parts.push(`${f.type} ${c}`);
-      } else if (f.type.startsWith("%") || f.type.startsWith("[") || f.type.startsWith("{")) {
-        parts.push(`${f.type} zeroinitializer`);
-      } else if (f.type === "ptr") {
-        parts.push("ptr null");
-      } else {
-        parts.push(`${f.type} 0`);
-      }
+      // Same reason as getConstantInitializer: zeroinitializer covers every field type,
+      // so there is nothing to classify. A `double`/`float` field used to emit `0`.
+      parts.push(`${f.type} ${c !== null ? c : "zeroinitializer"}`);
     }
     return `{ ${parts.join(", ")} }`;
   }

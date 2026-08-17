@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { readdirSync, readFileSync, unlinkSync, existsSync, mkdtempSync, rmSync } from "fs";
+import { readdirSync, readFileSync, unlinkSync, existsSync, mkdtempSync, rmSync, statSync } from "fs";
 import { execSync, spawnSync } from "child_process";
-import { tmpdir, devNull } from "os";
+import { tmpdir, devNull, homedir } from "os";
 import { join } from "path";
 import { parseExpected, parseExpectedError, parseExpectedRuntimeError } from "./annotations";
 import { guardedRun, type RunResult } from "../scripts/guard";
@@ -133,6 +133,44 @@ const nameMatches: (describeName: string, testName: string) => boolean = (() => 
   return (d, t) => hit(t) || hit(`${d} > ${t}`);
 })();
 
+// A fixture may carry `// @requires-package: <name>` when it reaches, directly or through
+// an example it imports, a module that imports an external package. Fixtures compile with
+// no project manifest and CI installs nothing, so such a package is simply absent there and
+// the fixture cannot build — `error[import]: cannot open 'gl'`.
+//
+// Reported as an EXPLICIT skip naming the missing package, never dropped from the list the
+// way `@skip-os` drops a fixture. A test that silently stops existing is the failure this
+// suite is supposed to catch, and the annotation is meant to be read as a debt: the fixture
+// wants the pure part of what it imports factored out of the package-reaching path.
+function requiredPackage(dir: string, file: string): string | null {
+  const m = readFileSync(join(dir, file), "utf-8").match(/\/\/\s*@requires-package:\s*(\S+)/);
+  return m ? m[1] : null;
+}
+
+// Present in the local package cache? Mirrors src/pkg.ts's cache root, honouring
+// XDG_CACHE_HOME, and answers "absent" rather than throwing on any surprise.
+function packageMissing(name: string): boolean {
+  try {
+    const xdg = process.env.XDG_CACHE_HOME;
+    const root = xdg && xdg.length > 0 ? join(xdg, "milo") : join(homedir(), ".milo", "cache");
+    if (!existsSync(root)) return true;
+    const stack = [root];
+    for (let depth = 0; depth < 4 && stack.length; depth++) {
+      const next: string[] = [];
+      for (const d of stack) {
+        for (const e of readdirSync(d)) {
+          if (e === name) return false;
+          const child = join(d, e);
+          try { if (statSync(child).isDirectory()) next.push(child); } catch { /* unreadable */ }
+        }
+      }
+      stack.length = 0;
+      stack.push(...next);
+    }
+    return true;
+  } catch { return true; }
+}
+
 function lane(dir: string, describeName: string): string[] {
   let entries: string[] = [];
   try { entries = readdirSync(dir); } catch { return []; }
@@ -143,7 +181,19 @@ function lane(dir: string, describeName: string): string[] {
 }
 
 describe("fixtures (compile + run)", () => {
-  const files = lane(FIXTURES_DIR, "fixtures (compile + run)");
+  const all = lane(FIXTURES_DIR, "fixtures (compile + run)");
+  // Split rather than filtered: the unbuildable ones still register, as skips that name
+  // the package, so the count in the report stays honest.
+  const blocked = new Map<string, string>();
+  const files: string[] = [];
+  for (const f of all) {
+    const pkg = requiredPackage(FIXTURES_DIR, f);
+    if (pkg && packageMissing(pkg)) blocked.set(f, pkg);
+    else files.push(f);
+  }
+  for (const [file, pkg] of blocked) {
+    test.skip(`${file.replace(".milo", "")} — needs the '${pkg}' package, which is not installed`, () => {});
+  }
   const builds = new Map<string, RunResult>();
 
   beforeAll(async () => {

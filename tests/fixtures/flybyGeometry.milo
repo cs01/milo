@@ -4,6 +4,15 @@
 // that skips a tile, or a decoder that aborts on a short file all used to be
 // invisible until something looked wrong on screen.
 
+// SKIPPED where the `gl` package is not installed. This fixture reaches it without
+// wanting it: world3d imports ./live for the weather feature, live imports ./cloud, and
+// cloud imports gl. A fixture compiles with no project manifest and CI installs nothing,
+// so the package is simply absent there. The fix is to factor the pure geometry below
+// (blockOf/foldIn/unfold/wrapPi and ringCount/ringOffset) out of the package-reaching
+// import path — see docs/self-hosting.md; until then this is debt, stated out loud rather
+// than dropped from the suite.
+// @requires-package: gl
+
 from "../../examples/games/flight/world3d" import {
     foldIn, unfold, blockOf, wrapPi, PI, TAU
 }

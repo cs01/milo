@@ -2016,6 +2016,26 @@ built-in derive's name (`Eq`, `Json`), and a derive is private to its file unles
 Generic structs are not supported: `@derive` skips a struct with type parameters, built-in
 or user-defined.
 
+#### How this differs from Rust's `#[derive]`
+
+The surface looks the same and the mechanism is deliberately much weaker. Rust's derives are
+**procedural macros**: arbitrary Rust that runs at compile time, takes a token stream and
+returns one, shipped in a separate crate compiled for the host. Milo's are substitution over
+a template, with no user code running at compile time and one control construct that repeats
+over a list the struct declaration fixes — so expansion always terminates, needs no separate
+compilation target, and produces only what you could have typed by hand.
+
+The reason that is not the limitation it sounds like: **what makes Rust's derives powerful
+is not the macro, it is the blanket impls.** `serde` branches on field types through
+`impl<T: Serialize> Serialize for Vec<T>`; its macro mostly emits `self.field.serialize()`.
+A Milo template emits the same thing and gets the same dispatch from ordinary traits — a
+complete recursive JSON codec is about twenty lines
+(`tests/fixtures/deriveTemplateJson.milo`). Where it stops today is container fields, for
+want of `impl ToJson for Vec<T>`, not for want of macro power.
+
+So if you are reaching for compile-time code execution to make a derive work, the thing to
+ask for is usually the missing impl, not the missing macro.
+
 ---
 
 ## Interfaces (Runtime Polymorphism)

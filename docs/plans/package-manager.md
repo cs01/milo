@@ -199,6 +199,32 @@ Should packages be able to declare a public surface (only listed names importabl
 }
 ```
 
+### No central registry — decided 2026-08-17
+
+Milo resolves dependencies from their source location (`github.com/org/repo@v1.0`) into
+`~/.milo/cache`, Go-style. There is deliberately **no central index**, and this is a
+decision rather than a gap: an outside review called a registry "boring, mandatory", and
+it was declined.
+
+What a registry would add, and where Milo already stands:
+
+| what centralization buys | status |
+|---|---|
+| lockfile pinning an exact commit, not a mutable tag | already done (`milo.lock` records the SHA) |
+| integrity | already done (sha256 of the extracted tree, verified on every install) |
+| semver selection | already done (highest release tag; `^`/`>=` constraints on the compiler) |
+| discoverability — "what packages exist?" | **not provided.** You need the URL |
+| availability when the host is down | **not provided.** A GitHub outage stops installs |
+| yank / deprecate | **not provided** |
+
+So the parts that protect a build are done, and the parts a registry uniquely adds are
+discoverability and availability. Those are a *service* — hosting, uptime, a domain, a
+moderation policy — not compiler work, and running one is not wanted.
+
+If availability becomes the binding problem, the answer to reach for is Go's: a caching
+module **proxy** plus a checksum database, which decouples installs from the host without
+anyone curating an index. Do not reinstate a registry proposal without that distinction.
+
 ### The `milo` constraint
 
 A manifest's `milo` field bounds the compiler versions the package builds against, and it

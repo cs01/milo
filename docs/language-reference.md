@@ -8,6 +8,12 @@ last-verified: 2026-08-03 (Uuid value-type section added and compiled; full snip
 
 # The Milo Language Guide
 
+
+> This document is prose: it explains the language and is not verifiable. The **normative**
+> requirements — what a conforming implementation shall do, each traceable to the test that
+> discharges it — are in [spec.md](spec.md), generated from the suite. Syntax is
+> [grammar.ebnf](grammar.ebnf).
+
 A memory-safe systems language with simple syntax — Rust's semantics with a lighter, more TypeScript-like surface. Compiles to native code via LLVM.
 
 > **This file is the authoritative reference.** It is the exhaustive spec, kept in step with

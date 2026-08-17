@@ -1,0 +1,49 @@
+// `impl Trait for HashMap<K, V>` — the two-parameter case of a blanket impl on a builtin
+// container. Vec's version shipped first; the map arm had the identical hole (it errored
+// with `HashMap has no method '…'` before anything consulted a trait impl) and is closed
+// the same way, instantiated per key/value pair under a mangled name.
+//
+// The body uses BOTH parameters, which is the point: substitution has to bind K and V to
+// the right positions, and an impl whose parameter count does not match the container's is
+// skipped rather than bound wrongly.
+//
+// Output is deliberately order-independent — HashMap iteration order is unspecified, so a
+// fixture that printed entries in traversal order would be a flake, not a test.
+// @expect: keys=3 vals=60
+// @expect: keys=2 vals=3
+
+trait Summary {
+    fn summary(self: &Self): string
+}
+
+impl Summary for HashMap<K, V> {
+    fn summary(self: &Self): string {
+        var keys = 0
+        var vals = 0
+        for k in self {
+            keys = keys + 1
+            match self.get(k) {
+                Option.Some(v) => {
+                    vals = vals + v
+                }
+                Option.None => {
+                }
+            }
+        }
+        return $"keys={keys} vals={vals}"
+    }
+}
+
+fn main() {
+    var m: HashMap<string, i64> = HashMap.new()
+    m.insert("a", 10)
+    m.insert("b", 20)
+    m.insert("c", 30)
+    print(m.summary())
+
+    // A different key type instantiates a second, independent copy.
+    var n: HashMap<i64, i64> = HashMap.new()
+    n.insert(1, 1)
+    n.insert(2, 2)
+    print(n.summary())
+}

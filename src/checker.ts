@@ -3903,17 +3903,21 @@ export class TypeChecker {
   // is what stops every `Vec<T>` impl from collapsing onto one entry: `resolveMethod` is
   // keyed by a bare type name, so without the mangling a `Vec<i64>` impl and a
   // `Vec<string>` impl are the same key.
-  private instantiateContainerImpl(container: string, elem: TypeKind, method: string): { mangled: string; sig: FnSig } | null {
+  private instantiateContainerImpl(container: string, args: TypeKind[], method: string): { mangled: string; sig: FnSig } | null {
     const templates = this.genericImpls.get(container);
     if (!templates || templates.length === 0) return null;
-    const concreteName = `${container}_${this.mangleTypeName(elem)}`;
+    const concreteName = `${container}_${args.map(a => this.mangleTypeName(a)).join("_")}`;
     const already = this.resolveMethod(concreteName, method);
     if (already) return already;
     if (!templates.some(t => t.impl.methods.some(m => m.name === method))) return null;
 
-    const elemMilo = this.typeKindToMiloType(elem);
+    const argsMilo = args.map(a => this.typeKindToMiloType(a));
     for (const { impl: gi, program: prog } of templates) {
       const names = gi.typeParams.map(t => t.name);
+      // An impl whose parameter count does not match the container's is not about this
+      // container shape at all (`impl T for HashMap<K>` on a two-parameter map), and
+      // substituting anyway would bind the wrong positions silently.
+      if (names.length !== args.length) continue;
       // The receiver keeps its real container type: `self: &Self` on a `Vec<T>` impl must
       // stay a Vec, not become the mangled struct name, or the body cannot index it.
       const concreteImpl: import("./ast").ImplDecl = {
@@ -3926,11 +3930,11 @@ export class TypeChecker {
           params: m.params.map(p => ({
             name: p.name,
             type: p.name === "self"
-              ? { name: container, typeArgs: [elemMilo], isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null }
-              : this.substituteMiloType(declaredType(p), names, [elem]),
+              ? { name: container, typeArgs: argsMilo, isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null }
+              : this.substituteMiloType(declaredType(p), names, args),
           })),
-          retType: this.substituteMiloType(m.retType, names, [elem]),
-          body: this.substituteBody(m.body, names, [elem]),
+          retType: this.substituteMiloType(m.retType, names, args),
+          body: this.substituteBody(m.body, names, args),
         })),
         span: gi.span,
       };
@@ -8813,7 +8817,7 @@ export class TypeChecker {
         return this.setType(expr, { tag: "void" });
       }
       {
-        const blanket = this.instantiateContainerImpl("Vec", objType.element, expr.method);
+        const blanket = this.instantiateContainerImpl("Vec", [objType.element], expr.method);
         if (blanket) return this.dispatchMangledMethod(expr, blanket.mangled, sp);
       }
       this.error(`Vec has no method '${expr.method}'`, sp, memberHint(expr.method, VEC_MEMBERS));
@@ -8916,6 +8920,10 @@ export class TypeChecker {
           return this.setType(expr, { tag: "unknown" });
         }
         return this.setType(expr, { tag: "vec", element: el });
+      }
+      {
+        const blanket = this.instantiateContainerImpl("HashMap", [objType.key, objType.value], expr.method);
+        if (blanket) return this.dispatchMangledMethod(expr, blanket.mangled, sp);
       }
       this.error(`HashMap has no method '${expr.method}'`, sp, memberHint(expr.method, HASHMAP_MEMBERS));
       return this.setType(expr, { tag: "unknown" });

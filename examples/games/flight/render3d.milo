@@ -114,6 +114,9 @@ pub fn applyWeather(s: &mut Scene, a: Theme, b: Theme, mix: f64) {
     let wb = weatherOf(b)
     s.turbidity = wb.turbidity + (wa.turbidity - wb.turbidity) * mix
     s.cloud = wb.cloud + (wa.cloud - wb.cloud) * mix
+    // The invented regions never had a visibility of their own, so derive one
+    // from how thick their air already says it is.
+    s.haze = 0.00009 + s.turbidity * 0.00034
     s.fogStart = wb.fogStart + (wa.fogStart - wb.fogStart) * mix
     s.fogEnd = wb.fogEnd + (wa.fogEnd - wb.fogEnd) * mix
     // The sun is a direction, so it has to come back off the lerp normalised —
@@ -544,19 +547,26 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         s.cloud = 0.30
         s.fogStart = 1500.0
         s.fogEnd = 4200.0
-        // Late afternoon, not noon.
+        // ~30 km visibility. `fogStart`/`fogEnd` still bound the draw distance
+        // and the camera, but they no longer decide what the air looks like.
+        s.haze = 0.00013
+        // The sun is WHERE THE SUN IS: computed from the city's own latitude and
+        // longitude and the current UTC instant (`solar.milo`), not chosen.
         //
-        // The sun used to sit at 60 degrees because nothing could be done with
-        // where it was: the sky was a fixed gradient, the haze was three
-        // constants and the sea reflected the haze, so a low sun bought a
-        // slightly different shade of grey. With a real sky it is the single
-        // biggest dial in the game — it puts a glitter path across the bay,
-        // warms every west-facing facade, and turns the haze band from grey to
-        // gold. High noon is the one lighting condition that makes a city look
-        // like a model of itself.
-        s.sunX = 0.0 - 0.80
-        s.sunY = 0.32
-        s.sunZ = 0.51
+        // It used to be a hand-placed late-afternoon vector, which was the right
+        // call while the sky was a fixed gradient and a low sun bought nothing
+        // but a different shade of grey. Over a real place it is worth more than
+        // any amount of shader work: it is what makes the shadow down an avenue
+        // fall where the shadow down that avenue actually falls, and it is the
+        // difference between a picture of San Francisco and a picture of
+        // somewhere that looks like it.
+        //
+        // A real sun also means real night. That is a genuine cost — fly at 03:00
+        // local and there is nothing to see, where the old constant guaranteed a
+        // postcard every time — and it is the cost of the thing being true.
+        s.sunX = w.env.sunX
+        s.sunY = w.env.sunY
+        s.sunZ = w.env.sunZ
     } else {
         applyWeather(s, w.prevTheme, w.theme, w.themeMix)
     }

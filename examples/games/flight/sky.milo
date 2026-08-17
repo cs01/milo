@@ -25,6 +25,7 @@ uniform vec3 uSun;
 uniform float uTime;
 uniform float uTurbidity;   // 0 clear, 1 thick — weather drives this
 uniform float uCloud;       // 0 none, 1 overcast
+uniform float uHaze;        // extinction per metre at sea level
 
 float skyHash21(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -150,6 +151,53 @@ vec3 skyColor(vec3 rd, bool withSun) {
         col += sunTint * pow(d, 13.0) * 0.18 * clear;
     }
     return col;
+}
+
+// The HUE of the sky, at unit brightness.
+//
+// What a surface in shadow is lit BY. Not the sun — that is the definition of
+// being in shadow — but the whole dome above it, which is blue. This is why a
+// shadow on a sunny day photographs blue rather than grey, and getting it grey
+// is most of what makes rendered shadows look like paint.
+//
+// Only the colour is taken from the sky; the LEVEL is set by whoever calls this,
+// because the absolute brightness of the zenith is not the same thing as how
+// much of the dome a given surface can see.
+vec3 skyTint() {
+    vec3 s = skyColor(vec3(0.0, 1.0, 0.0), false);
+    float m = max(max(s.r, s.g), s.b) + 0.0001;
+    return mix(vec3(1.0), s / m, 0.62);
+}
+
+// Aerial perspective: what the air does to a surface `d` metres away.
+//
+// This used to be a linear crossfade between two distances, and a linear
+// crossfade is why the middle distance had no contrast left. Two things were
+// wrong with it. It reaches the sky colour COMPLETELY at `fogEnd`, so everything
+// past that is one flat sheet and the far half of a city is a single colour. And
+// it removes a constant amount per metre, where air removes a constant FRACTION
+// per metre — which is exponential, and which keeps far more contrast at the
+// distances a city actually occupies.
+//
+// Two further things a ramp cannot express and this does:
+//
+//   - Haze has a scale height. Nearly all of it is in the first kilometre or so,
+//     so a ray that climbs out of it stops accumulating, and the view from
+//     altitude is much clearer than the view along the ground. A flight sim is
+//     the one game where that is the common case rather than the exception.
+//   - Blue is scattered most. Running the extinction per channel is the entire
+//     reason distant terrain looks BLUE rather than looking grey, and it costs
+//     two extra multiplies.
+vec3 aerial(vec3 col, vec3 rd, float d, float hEye, float hFrag) {
+    float H = 1150.0;
+    // Mean density over the segment. Averaging the endpoints rather than
+    // integrating exactly: the error is small over the distances drawn here, and
+    // the exact form divides by (hFrag - hEye), which is zero for a level ray —
+    // the single most common ray in the frame.
+    float dens = 0.5 * (exp(-max(hEye, 0.0) / H) + exp(-max(hFrag, 0.0) / H));
+    float od = uHaze * dens * d;
+    vec3 t = exp(-od * vec3(0.76, 0.93, 1.22));
+    return col * t + skyColor(rd, false) * (1.0 - t);
 }
 
 // The colour of the light actually falling on the world, as opposed to the colour

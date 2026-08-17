@@ -1,0 +1,176 @@
+// Where the sun actually is, for a real place at a real moment.
+//
+// The weather presets carried a hand-picked sun direction per region, which is
+// fine for an invented world and wrong for a real one: the whole point of flying
+// over the actual San Francisco under the actual current sky is that the light
+// comes from where the light is coming from. A shadow that falls the wrong way
+// is worse than no shadow, because the eye reads shadow direction long before it
+// reads anything else in the frame.
+//
+// NOAA's solar position equations, which are accurate to well under a degree
+// over any date this game will ever be handed. That is far tighter than the
+// half-degree the sun's own disc subtends, so the error is invisible.
+//
+// World axes, fixed by how `tools/fetchcity.milo` projects OSM coordinates:
+// +x is EAST, +z is NORTH, +y is up. Getting this backwards puts the morning sun
+// in the west, which looks fine in a still and is obviously wrong the moment the
+// day runs.
+
+from "std/math" import {
+    Math
+}
+from "std/datetime" import {
+    DateTime
+}
+
+let PI: f64 = 3.141592653589793
+
+let DEG: f64 = 3.141592653589793 / 180.0
+
+// A unit vector pointing FROM the ground TOWARD the sun, in world axes, plus the
+// elevation that produced it. `up` is the sine of the elevation, so it is
+// negative at night and the existing shaders already read it that way.
+pub struct SunDir {
+    x: f64,
+    y: f64,
+    z: f64,
+    // Degrees above the horizon, negative when down. Kept because the renderer
+    // wants to know about civil twilight, which is a threshold on this and not
+    // on the vector.
+    elevationDeg: f64,
+    // Degrees clockwise from north.
+    azimuthDeg: f64,
+}
+
+fn isLeap(y: i32): bool {
+    if y % 400 == 0 {
+        return true
+    }
+    if y % 100 == 0 {
+        return false
+    }
+    return y % 4 == 0
+}
+
+// 1 on 1 January.
+fn dayOfYear(t: &DateTime): i64 {
+    var cum: Vec<i64> = Vec.new()
+    cum.push(0)
+    cum.push(31)
+    cum.push(59)
+    cum.push(90)
+    cum.push(120)
+    cum.push(151)
+    cum.push(181)
+    cum.push(212)
+    cum.push(243)
+    cum.push(273)
+    cum.push(304)
+    cum.push(334)
+    var m = t.month as i64
+    if m < 1 {
+        m = 1
+    }
+    if m > 12 {
+        m = 12
+    }
+    var d = cum[m - 1] + (t.day as i64)
+    if m > 2 {
+        if isLeap(t.year) {
+            d = d + 1
+        }
+    }
+    return d
+}
+
+// The sun over `lat`/`lon` (degrees, north and east positive) at the UTC moment
+// `t`.
+pub fn sunAt(lat: f64, lon: f64, t: &DateTime): SunDir {
+    let doy = dayOfYear(t) as f64
+    let utcMin = (t.hour as f64) * 60.0 + (t.minute as f64) + (t.second as f64) / 60.0
+
+    // Fractional year, in radians. The hour term matters: without it the
+    // declination is a step function at midnight and the sun jitters at the
+    // date boundary.
+    let g = 2.0 * PI / 365.0 * (doy - 1.0 + (utcMin / 60.0 - 12.0) / 24.0)
+
+    // The equation of time, in minutes — the difference between clock noon and
+    // the sun actually being due south. It swings about ±15 minutes over a year
+    // and dropping it is a visible error in shadow direction.
+    let eqTime = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2.0 * g) - 0.040849 * Math.sin(2.0 * g))
+
+    let decl = 0.006918
+    - 0.399912 * Math.cos(g)
+    + 0.070257 * Math.sin(g)
+    - 0.006758 * Math.cos(2.0 * g)
+    + 0.000907 * Math.sin(2.0 * g)
+    - 0.002697 * Math.cos(3.0 * g)
+    + 0.001480 * Math.sin(3.0 * g)
+
+    // True solar time in minutes. Four minutes per degree of longitude is the
+    // earth turning; the input is UTC so no timezone ever enters this.
+    var tst = utcMin + eqTime + 4.0 * lon
+    // Fold into a day so the hour angle stays in range near the date line.
+    while tst < 0.0 {
+        tst = tst + 1440.0
+    }
+    while tst >= 1440.0 {
+        tst = tst - 1440.0
+    }
+
+    let ha = (tst / 4.0 - 180.0) * DEG
+    let latR = lat * DEG
+
+    let sinLat = Math.sin(latR)
+    let cosLat = Math.cos(latR)
+    let sinDecl = Math.sin(decl)
+    let cosDecl = Math.cos(decl)
+
+    var cosZen = sinLat * sinDecl + cosLat * cosDecl * Math.cos(ha)
+    if cosZen > 1.0 {
+        cosZen = 1.0
+    }
+    if cosZen < -1.0 {
+        cosZen = -1.0
+    }
+    let zen = Math.acos(cosZen)
+    let elev = PI / 2.0 - zen
+
+    // Azimuth from the spherical triangle. The denominator vanishes when the sun
+    // is at the zenith or exactly on the horizon; both are directions where the
+    // azimuth does not matter, so a clamp is the whole handling it needs.
+    let sinZen = Math.sin(zen)
+    var az = 0.0
+    if sinZen > 0.000001 {
+        if cosLat > 0.000001 {
+            var c = (sinLat * cosZen - sinDecl) / (cosLat * sinZen)
+            if c > 1.0 {
+                c = 1.0
+            }
+            if c < -1.0 {
+                c = -1.0
+            }
+            az = PI - Math.acos(c)
+        }
+    }
+    // Before solar noon the sun is east of the meridian, after it is west, and
+    // the arccos above cannot tell those apart on its own.
+    if ha > 0.0 {
+        az = 2.0 * PI - az
+    }
+
+    let cosElev = Math.cos(elev)
+    return SunDir {
+        x: cosElev * Math.sin(az),
+        y: Math.sin(elev),
+        z: cosElev * Math.cos(az),
+        elevationDeg: elev / DEG,
+        azimuthDeg: az / DEG,
+    }
+}
+
+// The sun over a place right now.
+pub fn sunNow(lat: f64, lon: f64): SunDir {
+    let t = DateTime.now()
+    return sunAt(lat, lon, t)
+}

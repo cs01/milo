@@ -34,8 +34,14 @@ from "./texture" import {
 from "./gfx3d" import {
     Scene, View
 }
+from "std/math" import {
+    Math
+}
 from "./sky" import {
     SKY_GLSL
+}
+from "./gpushadow" import {
+    ShadowMap, SHADOW_SAMPLE_GLSL, SHADOW_EXTENT, SHADOW_DEPTH, lightMatrix, shadowNew, shadowFree
 }
 
 // Ten floats per vertex, laid out exactly as `texture.Vtx` declares them.
@@ -98,21 +104,34 @@ uniform vec3 uEye;
 uniform vec2 uFogRange;
 "
 
-    + SKY_GLSL + "
+    + SKY_GLSL + SHADOW_SAMPLE_GLSL + "
+uniform float uShadowAmb;   // how bright a shadowed surface is, against sunlit
+
 void main() {
     // `tw` fades the detail texture toward 1.0, which is a no-op multiplier —
     // that is how terrain and water share one draw call, and how the untextured
     // stream works at all: it carries tw = 0 and never sees its white texture.
     vec3 texel = texture(uTex, vUv).rgb;
-    vec3 col = vTint * vLight * mix(vec3(1.0), texel, vTw) * sunLight();
+    vec3 albedo = vTint * mix(vec3(1.0), texel, vTw);
+
+    // `vLight` is `ambient + (1 - ambient) * NdotL`, baked per vertex, and those
+    // two halves cannot be pulled apart again from the single scalar that
+    // arrived. So shadow does not subtract a direct term — it swaps the LIGHT
+    // SOURCE. A point the sun can see is lit by the sun; a point it cannot is lit
+    // by the sky, which is dimmer and blue. That is what actually happens
+    // outdoors, and it is the only form this can take without a sixth float per
+    // vertex.
+    float vis = sunVisibility(vWorld);
+    vec3 sun = sunLight();
+    vec3 lightCol = mix(sun * uShadowAmb * skyTint(), sun, vis);
+    vec3 col = albedo * vLight * lightCol;
 
     // Aerial perspective, toward the sky THIS pixel is looking at rather than
     // toward a constant. A ridge against a bright horizon and the same ridge
     // against the blue overhead now fade into different colours, which is what
     // distance actually looks like and what one fog colour could never give.
     vec3 rd = normalize(vWorld - uEye);
-    float f = clamp((vDepth - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
-    col = mix(col, skyColor(rd, false), f);
+    col = aerial(col, rd, vDepth, uEye.y, vWorld.y);
 
     fragColor = vec4(col, vDepth);
 }
@@ -286,8 +305,7 @@ void main() {
     }
 
     // The same aerial perspective as everything else in the frame.
-    float f = clamp((vDepth - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
-    col = mix(col, skyColor(rd, false), f);
+    col = aerial(col, rd, vDepth, uEye.y, vWorld.y);
 
     // Premultiplied, to match the blend the pass is drawn with.
     fragColor = vec4(col * alpha, alpha);
@@ -321,6 +339,7 @@ pub struct GpuWorld {
     facade: Texture2D,
     // The aerial drape arrives with a city and changes when the place does.
     ortho: Option<Texture2D>,
+    shadow: ShadowMap,
 }
 
 pub fn gpuWorldNew(gl: &mut GlContext, ground: &Texture, skin: &Texture, facade: &Texture): Result<GpuWorld, string> {
@@ -346,6 +365,9 @@ pub fn gpuWorldNew(gl: &mut GlContext, ground: &Texture, skin: &Texture, facade:
         skin: uploadTexture(gl, skin),
         facade: uploadTexture(gl, facade),
         ortho: Option.None,
+        // 2048 over a 2.6 km square is 1.3 m a texel, which is about the width
+        // of the narrowest thing in a city that casts a shadow worth seeing.
+        shadow: shadowNew(gl, 2048)?,
     }
     )
 }
@@ -513,6 +535,80 @@ pub fn drawSkyPass(g: &GpuWorld, s: &Scene, v: &View, w: f64, h: f64, time: f64)
     g.quad.draw()
 }
 
+// The world from the sun's point of view, into the shadow map.
+//
+// Runs before the camera pass and before the sky, and leaves the framebuffer
+// rebound to whatever the caller was drawing into — the caller passes its own
+// target back in, because this file has no idea whether the frame is going to
+// the window or to an offscreen buffer.
+//
+// The square is centred AHEAD of the aircraft rather than under it. A shadow map
+// centred on the camera spends half its texels behind the viewer, where nothing
+// is drawn; pushing it forward by two thirds of its own radius puts the
+// resolution where the city being looked at actually is.
+pub fn drawShadowPass(g: &mut GpuWorld, s: &mut Scene, v: &View) {
+    let cx = v.eye.x + v.fwd.x * SHADOW_EXTENT * 0.62
+    let cz = v.eye.z + v.fwd.z * SHADOW_EXTENT * 0.62
+    // Centred vertically on the ground rather than on the aircraft: the depth
+    // range has to cover what casts, and what casts is the city, not the plane.
+    let cy = 0.0
+
+    // Snap the centre to whole texels along the light's own axes. Without this
+    // the map shifts by a fraction of a texel every frame and every shadow edge
+    // in the scene crawls and shimmers as the aircraft moves — which is far more
+    // noticeable in motion than the shadows themselves are.
+    let step = g.shadow.texelWorld * 2.0
+    let sx = Math.floor(cx / step) * step
+    let sz = Math.floor(cz / step) * step
+
+    g.shadow.mat = lightMatrix(s.sunX, s.sunY, s.sunZ, sx, cy, sz, SHADOW_EXTENT, SHADOW_DEPTH)
+
+    g.shadow.target.bind()
+    // Far away, in the encoding the fragment shader writes: 1.0 is "nothing
+    // between here and the sun", so an untouched texel has to read as lit.
+    Gpu.clear(1.0, 0.0, 0.0, 1.0, true)
+    Gpu.depthTest(true)
+    Gpu.depthWrite(true)
+    Gpu.blendOff()
+    // Front faces only would halve the work and is the usual trick, but this
+    // world is not closed — terrain quads and bridge decks are single-sided —
+    // so culling here drops real casters.
+    Gpu.cullBackFaces(false)
+
+    g.shadow.shader.bind()
+    g.shadow.shader.uniformMat4("uLightVP", g.shadow.mat)
+    drawMesh(g, s, SLOT_NONE)
+    drawMesh(g, s, SLOT_GROUND)
+    drawMesh(g, s, SLOT_FACADE)
+    drawMesh(g, s, SLOT_ORTHO)
+    drawMesh(g, s, SLOT_SKIN)
+}
+
+// Bind the finished shadow map and everything needed to read it.
+fn shadowUniforms(g: &GpuWorld, sh: &Shader, s: &Scene) {
+    g.shadow.target.bindTexture(1)
+    sh.uniformI("uShadowTex", 1)
+    sh.uniformMat4("uLightVP", g.shadow.mat)
+    sh.uniformF("uShadowTexel", 1.0 / (g.shadow.size as f64))
+    // The bias is in light-clip z, where the whole range spans 2 * SHADOW_DEPTH
+    // metres. Scaled by texel size because that is what sets how far a sloped
+    // surface can drift within one texel — a fixed bias that works on a roof
+    // stripes a hillside.
+    sh.uniformF("uShadowBias", 2.5 * g.shadow.texelWorld / (2.0 * SHADOW_DEPTH))
+    // A shadow lit only by the sky, at about a fifth of full sun. Measured
+    // outdoor ratios run from a tenth to a third depending on how much sky the
+    // surface can see; a city street sees a strip of it, a roof sees all of it,
+    // and one number has to stand in for both.
+    sh.uniformF("uShadowAmb", 0.30)
+    // Below the horizon there is no sun to be shadowed from, and the map is full
+    // of garbage from a light direction pointing into the ground.
+    if s.sunY > 0.02 {
+        sh.uniformF("uShadowOn", 1.0)
+    } else {
+        sh.uniformF("uShadowOn", 0.0)
+    }
+}
+
 // Everything recorded this frame, in five draws.
 pub fn drawStreams(g: &mut GpuWorld, s: &mut Scene, v: &View, w: f64, h: f64, time: f64) {
     Gpu.depthTest(true)
@@ -531,6 +627,7 @@ pub fn drawStreams(g: &mut GpuWorld, s: &mut Scene, v: &View, w: f64, h: f64, ti
     g.shader.uniform2F("uFogRange", s.fogStart, s.fogEnd)
     g.shader.uniformI("uTex", 0)
     skyUniforms(g.shader, s, time)
+    shadowUniforms(g, g.shader, s)
 
     drawSlot(g, s, SLOT_NONE)
     drawSlot(g, s, SLOT_GROUND)
@@ -560,27 +657,53 @@ pub fn drawStreams(g: &mut GpuWorld, s: &mut Scene, v: &View, w: f64, h: f64, ti
     }
 }
 
+// Upload every stream once per frame.
+//
+// Split out from drawing because the geometry is now rasterised TWICE — once
+// from the sun into the shadow map, once from the camera — and re-uploading the
+// same few megabytes between the two passes is pure waste. The shadow pass runs
+// first and this runs before it.
+pub fn uploadStreams(g: &mut GpuWorld, s: &mut Scene) {
+    if s.streams[SLOT_NONE].len > 0 {
+        g.meshNone.upload(s.streams[SLOT_NONE])
+    }
+    if s.streams[SLOT_GROUND].len > 0 {
+        g.meshGround.upload(s.streams[SLOT_GROUND])
+    }
+    if s.streams[SLOT_FACADE].len > 0 {
+        g.meshFacade.upload(s.streams[SLOT_FACADE])
+    }
+    if s.streams[SLOT_ORTHO].len > 0 {
+        g.meshOrtho.upload(s.streams[SLOT_ORTHO])
+    }
+    if s.streams[SLOT_SKIN].len > 0 {
+        g.meshSkin.upload(s.streams[SLOT_SKIN])
+    }
+}
+
+fn drawMesh(g: &GpuWorld, s: &Scene, slot: i64) {
+    if s.streams[slot].len == 0 {
+        return
+    }
+    if slot == SLOT_NONE {
+        g.meshNone.draw()
+    } else if slot == SLOT_GROUND {
+        g.meshGround.draw()
+    } else if slot == SLOT_FACADE {
+        g.meshFacade.draw()
+    } else if slot == SLOT_ORTHO {
+        g.meshOrtho.draw()
+    } else {
+        g.meshSkin.draw()
+    }
+}
+
 fn drawSlot(g: &mut GpuWorld, s: &mut Scene, slot: i64) {
     if s.streams[slot].len == 0 {
         return
     }
     bindSlot(g, slot)
-    if slot == SLOT_NONE {
-        g.meshNone.upload(s.streams[slot])
-        g.meshNone.draw()
-    } else if slot == SLOT_GROUND {
-        g.meshGround.upload(s.streams[slot])
-        g.meshGround.draw()
-    } else if slot == SLOT_FACADE {
-        g.meshFacade.upload(s.streams[slot])
-        g.meshFacade.draw()
-    } else if slot == SLOT_ORTHO {
-        g.meshOrtho.upload(s.streams[slot])
-        g.meshOrtho.draw()
-    } else {
-        g.meshSkin.upload(s.streams[slot])
-        g.meshSkin.draw()
-    }
+    drawMesh(g, s, slot)
 }
 
 fn bindSlot(g: &GpuWorld, slot: i64) {
@@ -613,6 +736,7 @@ pub fn skyUniforms(sh: &Shader, s: &Scene, time: f64) {
     sh.uniformF("uTime", time)
     sh.uniformF("uTurbidity", s.turbidity)
     sh.uniformF("uCloud", s.cloud)
+    sh.uniformF("uHaze", s.haze)
 }
 
 pub fn gpuWorldFree(gl: &mut GlContext, g: GpuWorld) {
@@ -626,6 +750,7 @@ pub fn gpuWorldFree(gl: &mut GlContext, g: GpuWorld) {
         Option.None => {
         }
     }
+    shadowFree(gl, own.shadow)
     own.shader.free(gl)
     own.fall.free(gl)
     own.sky.free(gl)

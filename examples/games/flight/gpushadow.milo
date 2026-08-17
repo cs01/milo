@@ -1,0 +1,246 @@
+// Shadows, from where the sun actually is.
+//
+// A city seen from the air is mostly shadow. The avenues are canyons, every
+// tower lies down across the blocks east of it, and the pattern those make is
+// what the eye reads as "a photograph of a city" before it reads any texture,
+// any building shape or any amount of haze. FLYBY had none of it: every surface
+// carried one Lambert term against the sun and nothing ever occluded anything,
+// so the frame was a field of evenly lit boxes no matter how good the data under
+// it was.
+//
+// The pass is the standard one — draw the world from the sun into an offscreen
+// buffer, then in the camera pass ask that buffer whether the sun could see this
+// point — with two decisions worth writing down.
+//
+// **Depth goes in the colour attachment, not the depth attachment.** The `gl`
+// package's `Target` attaches depth as a RENDERBUFFER, which is not sampleable,
+// and adding a depth-texture target is a change to a published package and a
+// version bump on the way to a picture. Writing depth into an RGBA16F colour
+// texture needs nothing new. Half floats are too coarse for this on their own
+// (about 5 m of quantisation over the range the map covers, which is a visible
+// step along a shadow's edge), so the value is split across two channels: the
+// high byte in R and the remainder in G. That buys roughly 19 bits, which is
+// centimetres, and costs two instructions.
+//
+// **The caster set is whatever the camera recorded.** The streams this pass
+// draws are built by the same frustum-culled recording the camera pass uses, so
+// a building just outside the edge of the screen does not cast into it. The
+// honest consequence is a shadow that can pop in at the frame edge when the sun
+// is roughly side-on. Fixing it means recording a second, wider set of geometry
+// for the light alone — real work, and worth doing only once this is on screen
+// and the artifact can actually be judged.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Shader, Target
+}
+
+// Metres across the shadowed square. The near field is what carries the picture;
+// beyond this, shadow fades out and the old flat lighting takes over.
+pub let SHADOW_EXTENT: f64 = 2600.0
+
+// Half the depth range along the light direction, in metres. It has to clear the
+// tallest thing that can cast into the square from above — a 400 m tower under a
+// 15-degree sun throws its shadow 1.5 km, and the caster has to still be inside
+// the box for that to be drawn.
+pub let SHADOW_DEPTH: f64 = 4200.0
+
+pub struct ShadowMap {
+    target: Target,
+    shader: Shader,
+    size: i64,
+    // World → light clip, handed to the camera pass so it can ask the same
+    // question in the same space.
+    mat: Vec<f32>,
+    // Metres per shadow texel, which is what the bias has to be scaled by: the
+    // error in a depth comparison on a sloped surface is proportional to how far
+    // across the world one texel reaches.
+    texelWorld: f64,
+}
+
+// Positions only. Everything else the world vertex shader carries — uv, tint,
+// the Lambert term — is irrelevant to whether the sun can see a point, but the
+// attribute layout has to match the meshes being drawn, so the same ten floats
+// come in and nine of them go nowhere.
+pub let SHADOW_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aUv;
+layout (location = 2) in float aLight;
+layout (location = 3) in vec3 aTint;
+layout (location = 4) in float aTw;
+
+uniform mat4 uLightVP;
+
+void main() {
+    gl_Position = uLightVP * vec4(aPos, 1.0);
+}
+"
+
+pub let SHADOW_FRAG: string = "#version 330 core
+out vec4 fragColor;
+
+void main() {
+    // Split the depth so a half float can hold it. `hi` lands on exact multiples
+    // of 1/256, which a half represents without error, and `lo` carries what is
+    // left with the full mantissa to itself.
+    float z = gl_FragCoord.z;
+    float hi = floor(z * 256.0) / 256.0;
+    float lo = (z - hi) * 256.0;
+    fragColor = vec4(hi, lo, 0.0, 1.0);
+}
+"
+
+// Pasted into the camera pass. Kept here so the encoding above and the decoding
+// below cannot drift apart — they are two halves of one format, and a change to
+// one that misses the other is a shadow map that reads as uniformly lit.
+pub let SHADOW_SAMPLE_GLSL: string = "
+uniform sampler2D uShadowTex;
+uniform mat4 uLightVP;
+uniform float uShadowTexel;   // 1.0 / shadow map size
+uniform float uShadowBias;    // in light-clip z units
+uniform float uShadowOn;      // 0 disables the whole thing
+
+float shadowDepthAt(vec2 uv) {
+    vec2 e = texture(uShadowTex, uv).rg;
+    return e.r + e.g / 256.0;
+}
+
+// 1.0 fully lit, 0.0 fully shadowed.
+float sunVisibility(vec3 world) {
+    if (uShadowOn < 0.5) { return 1.0; }
+    vec4 ls = uLightVP * vec4(world, 1.0);
+    vec3 p = ls.xyz * 0.5 + 0.5;
+    // Outside the map is lit. The alternative — clamping to the edge — smears
+    // whatever is on the border across the entire rest of the world, which reads
+    // as a vast shadow with a straight edge.
+    if (p.x < 0.001 || p.x > 0.999 || p.y < 0.001 || p.y > 0.999 || p.z > 1.0) {
+        return 1.0;
+    }
+    // Nine taps. One tap gives a hard aliased edge that crawls as the plane
+    // moves, which is more distracting than no shadow at all.
+    float lit = 0.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 uv = p.xy + vec2(float(i), float(j)) * uShadowTexel;
+            lit += (p.z - uShadowBias > shadowDepthAt(uv)) ? 0.0 : 1.0;
+        }
+    }
+    lit = lit / 9.0;
+    // Fade the whole effect out at the edge of the covered square so the
+    // boundary is a gradient rather than a line across the city.
+    vec2 d = abs(p.xy - 0.5) * 2.0;
+    float edge = 1.0 - smoothstep(0.75, 0.99, max(d.x, d.y));
+    return mix(1.0, lit, edge);
+}
+"
+
+fn cross3(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64): Vec<f64> {
+    var v: Vec<f64> = Vec.new()
+    v.push(ay * bz - az * by)
+    v.push(az * bx - ax * bz)
+    v.push(ax * by - ay * bx)
+    return v
+}
+
+fn norm3(v: &mut Vec<f64>) {
+    let l = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) + 0.000000001
+    v[0] = v[0] / l
+    v[1] = v[1] / l
+    v[2] = v[2] / l
+}
+
+// World → light clip, orthographic, centred on `cx,cy,cz`.
+//
+// Orthographic because the sun is a directional light: its rays are parallel, so
+// there is no eye point to project from and no perspective divide to do. That is
+// also why `gl_FragCoord.z` is linear in world distance here, which is what makes
+// the two-channel depth encoding straightforward.
+//
+// Column-major with `m[col * 4 + row]`, matching `gpuworld.viewProj` — the two
+// matrices are handed to the same driver through the same call and a lone
+// transpose between them would be invisible until the shadows landed somewhere
+// impossible.
+pub fn lightMatrix(sunX: f64, sunY: f64, sunZ: f64, cx: f64, cy: f64, cz: f64, half: f64, depth: f64): Vec<f32> {
+    // The light travels the way the sun is NOT: `uSun` points from the ground up
+    // at it.
+    var fwd: Vec<f64> = Vec.new()
+    fwd.push(0.0 - sunX)
+    fwd.push(0.0 - sunY)
+    fwd.push(0.0 - sunZ)
+    norm3(fwd)
+
+    // Any axis not parallel to the light will do for the cross product. Straight
+    // up fails exactly at local noon on the equator, which is a real place and a
+    // real time, so it needs the fallback rather than a comment saying it is
+    // unlikely.
+    var upx = 0.0
+    var upy = 1.0
+    var upz = 0.0
+    if fwd[1] < 0.0 - 0.995 || fwd[1] > 0.995 {
+        upx = 0.0
+        upy = 0.0
+        upz = 1.0
+    }
+    var right = cross3(upx, upy, upz, fwd[0], fwd[1], fwd[2])
+    norm3(right)
+    var up = cross3(fwd[0], fwd[1], fwd[2], right[0], right[1], right[2])
+    norm3(up)
+
+    let tr = 0.0 - (right[0] * cx + right[1] * cy + right[2] * cz)
+    let tu = 0.0 - (up[0] * cx + up[1] * cy + up[2] * cz)
+    let tf = 0.0 - (fwd[0] * cx + fwd[1] * cy + fwd[2] * cz)
+
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    m[0] = (right[0] / half) as f32
+    m[4] = (right[1] / half) as f32
+    m[8] = (right[2] / half) as f32
+    m[12] = (tr / half) as f32
+
+    m[1] = (up[0] / half) as f32
+    m[5] = (up[1] / half) as f32
+    m[9] = (up[2] / half) as f32
+    m[13] = (tu / half) as f32
+
+    m[2] = (fwd[0] / depth) as f32
+    m[6] = (fwd[1] / depth) as f32
+    m[10] = (fwd[2] / depth) as f32
+    m[14] = (tf / depth) as f32
+
+    m[3] = 0.0 as f32
+    m[7] = 0.0 as f32
+    m[11] = 0.0 as f32
+    m[15] = 1.0 as f32
+    return m
+}
+
+pub fn shadowNew(gl: &mut GlContext, size: i64): Result<ShadowMap, string> {
+    // NEAREST, not linear. The depth here is split across two channels, and
+    // hardware filtering would interpolate those two numbers independently —
+    // across a depth discontinuity that produces a value that is not any depth
+    // that was ever written. The nine-tap loop does the smoothing instead, on
+    // the comparison RESULT, which is the only place smoothing a shadow is
+    // meaningful.
+    let target = Target.new(gl, size, size, true, false)?
+    let shader = Shader.compile(gl, SHADOW_VERT, SHADOW_FRAG)?
+    var m: Vec<f32> = Vec.filled(16, 0.0)
+    m[0] = 1.0 as f32
+    m[5] = 1.0 as f32
+    m[10] = 1.0 as f32
+    m[15] = 1.0 as f32
+    return Result.Ok(ShadowMap {
+        target: target,
+        shader: shader,
+        size: size,
+        mat: m,
+        texelWorld: 2.0 * SHADOW_EXTENT / (size as f64),
+    }
+    )
+}
+
+pub fn shadowFree(gl: &mut GlContext, sm: ShadowMap) {
+    var own = sm
+    own.target.free(gl)
+    own.shader.free(gl)
+}

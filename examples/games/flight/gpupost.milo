@@ -164,6 +164,12 @@ pub fn postBeginWorld(p: &Post) {
     Gpu.clear(0.0, 0.0, 0.0, 0.0, true)
 }
 
+// Bind the scene target WITHOUT clearing it, for a caller returning from a pass
+// that bound a framebuffer of its own.
+pub fn postBindWorld(p: &Post) {
+    p.world.bind()
+}
+
 // The sea, then the overlay, then bloom, then the window.
 pub fn postFinish(p: &Post, c: &Canvas, v: &View, s: &Scene, cov: &CoverGrid, cover: &Vec<f32>, coverDirty: bool, hasSea: bool, time: f64, bloomGain: f64, exposure: f64, dw: i64, dh: i64) {
     // Only when the place changes: a 19 km grid is 14 MB and there is no reason

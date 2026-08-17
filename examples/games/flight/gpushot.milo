@@ -42,10 +42,10 @@ from "./gfx3d" import {
     sceneNew, viewOf
 }
 from "./gpupost" import {
-    CoverGrid, postBeginWorld, postFinish, postFree, postNew
+    CoverGrid, postBeginWorld, postFinish, postFree, postNew, postBindWorld
 }
 from "./gpuworld" import {
-    drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho
+    drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass
 }
 from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
@@ -202,6 +202,12 @@ pub fn main(): i32 {
         let view = viewOf(w.cam, c.w, c.h)
         postBeginWorld(p)
         drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
+        // Record, upload once, then rasterise twice: from the sun, then from the
+        // camera. The shadow pass binds its own framebuffer, so the scene target
+        // has to be bound again before anything else is drawn.
+        uploadStreams(gw, s)
+        drawShadowPass(gw, s, view)
+        postBindWorld(p)
         drawSkyPass(gw, s, view, W as f64, H as f64, w.time)
         drawStreams(gw, s, view, W as f64, H as f64, w.time)
         drawSpeedLines(c, w)

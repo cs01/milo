@@ -26,7 +26,7 @@ from "./gfx3d" import {
     Scene, View
 }
 from "./gpupost" import {
-    CoverGrid, Post, postBeginWorld, postFinish, postFree, postNew, postResize
+    CoverGrid, Post, postBeginWorld, postFinish, postFree, postNew, postResize, postBindWorld
 }
 from "sdl" import {
     SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_MaximizeWindow,
@@ -178,6 +178,17 @@ pub fn screenBegin(s: &mut Screen): Size {
     return Size {
         w: s.rw, h: s.rh
     }
+}
+
+// Point the driver back at the scene target after a pass that bound its own.
+//
+// The shadow map renders into a framebuffer of its own between recording the
+// world and drawing it, and whatever bound the scene target first is not
+// necessarily still in scope by then. Binding without clearing, because the
+// clear already happened in `screenBegin` and doing it twice would throw away
+// the sky if the order ever changes.
+pub fn screenRebind(s: &Screen) {
+    postBindWorld(s.post)
 }
 
 // Finish it: sea, overlay, bloom, tone map, swap. Clearing the overlay canvas is

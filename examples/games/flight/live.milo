@@ -1,0 +1,155 @@
+// The real environment over a real place: what the sun is doing, and (as this
+// grows) what the sky and the weather are doing.
+//
+// Everything here is keyed to a moment and a coordinate rather than to a mood.
+// The region weather table in `render3d.milo` answers "what does a coast feel
+// like"; this answers "what is it like over 37.77N 122.42W right now", which is
+// a different question with a checkable answer.
+//
+// Time comes from the clock, unless `FLYBY_UTC` is set to an epoch-seconds
+// value, in which case that instant is used forever. That override exists so a
+// screenshot is reproducible: without it every frame grab lands under a slightly
+// different sun and no two pictures can be compared.
+//
+// `FLYBY_TIMESCALE` multiplies elapsed time, so a day can be run in a minute to
+// watch shadows sweep. It is a debugging dial, not a game feature.
+
+from "std/env" import {
+    Env
+}
+from "std/time" import {
+    epochSecs
+}
+from "std/datetime" import {
+    DateTime
+}
+from "std/strconv" import {
+    parseInt, parseFloat
+}
+from "./solar" import {
+    SunDir, sunAt
+}
+
+// How the environment was arrived at, so the HUD can say so rather than implying
+// a live feed that is not there. A fabricated sky presented as the real one is
+// the failure mode worth engineering against.
+pub enum EnvSource: i32 {
+    Synthetic = 0,
+    Computed = 1,
+}
+
+pub struct LiveEnv {
+    lat: f64,
+    lon: f64,
+
+    // Sun direction in world axes (+x east, +z north, +y up).
+    sunX: f64,
+    sunY: f64,
+    sunZ: f64,
+    sunElevDeg: f64,
+    sunAzDeg: f64,
+
+    // The instant the fields above describe, epoch seconds UTC.
+    epoch: i64,
+    // Set once at construction from FLYBY_UTC; -1 means follow the clock.
+    frozenEpoch: i64,
+    timeScale: f64,
+    // Epoch at construction, so a scaled clock has something to run from.
+    baseEpoch: i64,
+
+    sunSource: EnvSource,
+}
+
+fn envI64(name: string, fallback: i64): i64 {
+    match Env.get(name) {
+        Option.Some(v) => {
+            match parseInt(v) {
+                Option.Some(n) => {
+                    return n
+                }
+                Option.None => {
+                    return fallback
+                }
+            }
+        }
+        Option.None => {
+            return fallback
+        }
+    }
+}
+
+fn envF64(name: string, fallback: f64): f64 {
+    match Env.get(name) {
+        Option.Some(v) => {
+            match parseFloat(v) {
+                Option.Some(n) => {
+                    return n
+                }
+                Option.None => {
+                    return fallback
+                }
+            }
+        }
+        Option.None => {
+            return fallback
+        }
+    }
+}
+
+pub fn envNew(lat: f64, lon: f64): LiveEnv {
+    let frozen = envI64("FLYBY_UTC", 0 - 1)
+    let scale = envF64("FLYBY_TIMESCALE", 1.0)
+    let now = epochSecs()
+    var e = LiveEnv {
+        lat: lat,
+        lon: lon,
+        sunX: 0.44,
+        sunY: 0.78,
+        sunZ: 0.44,
+        sunElevDeg: 51.0,
+        sunAzDeg: 180.0,
+        epoch: now,
+        frozenEpoch: frozen,
+        timeScale: scale,
+        baseEpoch: now,
+        sunSource: EnvSource.Synthetic,
+    }
+    envRetime(e, 0.0)
+    return e
+}
+
+// Point the environment at a new place without losing the clock.
+pub fn envSetPlace(e: &mut LiveEnv, lat: f64, lon: f64) {
+    e.lat = lat
+    e.lon = lon
+    envRetime(e, 0.0)
+}
+
+// Recompute everything time-dependent. `elapsed` is seconds of wall clock since
+// the environment was created, and is only consulted when the clock is scaled or
+// frozen — otherwise the real clock is the truth and drift cannot accumulate.
+pub fn envRetime(e: &mut LiveEnv, elapsed: f64) {
+    if e.frozenEpoch >= 0 {
+        e.epoch = e.frozenEpoch + ((elapsed * e.timeScale) as i64)
+    } else {
+        if e.timeScale == 1.0 {
+            e.epoch = epochSecs()
+        } else {
+            e.epoch = e.baseEpoch + ((elapsed * e.timeScale) as i64)
+        }
+    }
+    let t = DateTime.fromEpoch(e.epoch)
+    let s = sunAt(e.lat, e.lon, t)
+    e.sunX = s.x
+    e.sunY = s.y
+    e.sunZ = s.z
+    e.sunElevDeg = s.elevationDeg
+    e.sunAzDeg = s.azimuthDeg
+    e.sunSource = EnvSource.Computed
+}
+
+// UTC label for the HUD, e.g. "2026-08-17 06:12Z".
+pub fn envStamp(e: &LiveEnv): string {
+    let t = DateTime.fromEpoch(e.epoch)
+    return t.format()
+}

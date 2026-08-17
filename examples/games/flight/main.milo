@@ -25,7 +25,7 @@ from "./input" import {
     Input, inputNew, pollInput
 }
 from "./display" import {
-    Screen, screenBegin, screenClose, screenFullscreen, screenOpen, screenPresent
+    Screen, screenBegin, screenClose, screenFullscreen, screenOpen, screenPresent, screenRebind
 }
 from "./gfx" import {
     Canvas, canvasNew, canvasFill, text, textCentered, fillRect, thickLine
@@ -50,7 +50,7 @@ from "./gpupost" import {
     CoverGrid
 }
 from "./gpuworld" import {
-    clearOrtho, drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho
+    clearOrtho, drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass
 }
 from "std/math" import {
     Math
@@ -423,6 +423,12 @@ pub fn main(): i32 {
         // recorded, because the render size is what the projection is built from.
         let rs = screenBegin(scr)
         drawWorld(c, s, w, groundTex, skinTex, facadeTex, view)
+        // Record, upload once, then rasterise twice: from the sun, then from the
+        // camera. The shadow pass binds its own framebuffer, so the scene target
+        // has to be bound again before anything else is drawn.
+        uploadStreams(gw, s)
+        drawShadowPass(gw, s, view)
+        screenRebind(scr)
         drawSkyPass(gw, s, view, rs.w as f64, rs.h as f64, w.time)
         drawStreams(gw, s, view, rs.w as f64, rs.h as f64, w.time)
 

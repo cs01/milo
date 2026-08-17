@@ -187,6 +187,10 @@ pub struct Scene {
     // haze washes the blue out of the dome, and how much of it is cloud.
     turbidity: f64,
     cloud: f64,
+    // Extinction per metre at sea level, which is what `sky.aerial` integrates
+    // along the view ray. Roughly 3.9 / visibility-in-metres, so 1e-4 is a clear
+    // 40 km day and 4e-4 is a thick one.
+    haze: f64,
     tris: i64, // triangles recorded this frame
     // One vertex stream per texture slot, ten floats per vertex, three vertices
     // per triangle. Grown and never shrunk: a frame is within a few percent of
@@ -211,6 +215,7 @@ pub fn sceneNew(w: i64, h: i64): Scene {
         fogEnd: 1500.0,
         turbidity: 0.35,
         cloud: 0.30,
+        haze: 0.00018,
         tris: 0,
         streams: streams,
     }

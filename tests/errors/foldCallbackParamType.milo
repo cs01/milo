@@ -1,0 +1,17 @@
+// @error: 'fold' callback parameter 2 is declared
+//
+// `fold` validated its callback's RETURN type against the accumulator and never its
+// parameters, so `fold(0, (acc: i64, x: &string) => acc + x.len)` over a `Vec<i64>` read
+// each element as a string pointer and folded garbage (`-16`).
+//
+// It was the one combinator the mechanical fix missed, because its callback is `args[1]`
+// rather than `args[0]` — which is exactly the shape this session keeps finding: a rule
+// applied across sites, with the odd one out forgotten. Now gated by
+// tests/callbackSigCoverage.test.ts, which requires every `cbHint` site to consult
+// `checkCallbackSig`.
+fn main() {
+    var v: Vec<i64> = Vec.new()
+    v.push(7)
+    let r = v.fold(0, (acc: i64, x: &string) => acc + x.len)
+    print("folded ", r)
+}

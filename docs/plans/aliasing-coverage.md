@@ -226,9 +226,24 @@ kind to appear in exactly one of the two lists. Verified by adding a node to `hi
 watching the gate name it. The list is imported by the test rather than scraped, so it
 stays referenced code instead of a comment nobody is obliged to keep.
 
-The itable and the parser are one-off fixes with fixtures, not yet gated. A gate for those
-would have to be shaped differently (there is no enumeration to compare against), which is
-the honest reason they are still open rather than an oversight.
+**All three are now gated (2026-08-16).** The parser's type construction is covered by
+`tests/typeAnnotationFidelity.test.ts`, which asks whether a value of the WRONG shape can
+satisfy an annotation. The itable is covered by `tests/itableDropSlot.test.ts`, which reads
+the emitted IR and requires every `@itable.*` to end in a destructor slot — filled for a
+type that has one, null for a type that does not — across two interface arities so a
+hardcoded count cannot pass by accident. Neither had an enumeration to diff against, which
+is why both are property assertions rather than coverage lists.
+
+**A fourth instance, created by the fix for the third.** Combinator callbacks were checked
+at 20 sites and nothing forced the 21st. Censusing `cbHint` construction found it
+immediately: `fold` validated its callback's RETURN against the accumulator and never its
+parameters, because its callback is `args[1]` rather than `args[0]` and the mechanical fix
+had matched `args[0]`. `fold(0, (acc: i64, x: &string) => acc + x.len)` over a `Vec<i64>`
+folded garbage. Now gated by `tests/callbackSigCoverage.test.ts`.
+
+That is worth stating plainly: a fix applied across N sites is itself an enumeration, and
+inherits exactly the defect it was fixing. The gate has to land in the same change as the
+fix, not after it.
 
 ## Grade criteria
 

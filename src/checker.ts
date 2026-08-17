@@ -8296,6 +8296,10 @@ export class TypeChecker {
         const cbType = this.checkExprWithHint(expr.args[1], cbHint);
         if (cbBorrow) this.unfreeze(cbBorrow);
         if (cbType.tag !== "fn") { this.error(`'${expr.method}' argument 2 must be a function`, sp); return this.setType(expr, { tag: "unknown" }); }
+        // `fold` checked the callback's RETURN against the accumulator and never its
+        // parameters, so `fold(0, (acc: i64, x: &string) => acc + x.len)` over a Vec<i64>
+        // read each element as a string pointer and folded garbage.
+        this.checkCallbackSig(cbType, cbHint, expr.method, sp);
         if (!typeEq(cbType.ret, accType) && cbType.ret.tag !== "unknown" && accType.tag !== "unknown") {
           this.error(`'${expr.method}' callback must return ${typeName(accType)} to match the initial value, got ${typeName(cbType.ret)}`, sp);
         }

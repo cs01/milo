@@ -4,7 +4,7 @@
 import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute, GlobalDecl } from "./ast";
 import { simpleType, declaredType, floatNamespaceConst } from "./ast";
 import type { TypeKind } from "./types";
-import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar, SLICE_COMBINATORS } from "./types";
+import { typeFromAst, typeEq, typeName, isNumeric, isCopy, isScalar, SLICE_COMBINATORS, ARRAY_COMBINATORS } from "./types";
 import type { Diagnostic, WarningConfig } from "./diagnostics";
 import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
@@ -243,6 +243,7 @@ export interface CheckResult {
   interfaceCoercions: Map<Expr, { fromType: string; ifaceName: string }>;
   interfaceMethodCalls: Map<Expr, { ifaceName: string; methodName: string; methodIndex: number }>;
   autoJsonStringify: Map<Expr, TypeKind>;
+  arraySliceArgs: Set<Expr>;
   autoJsonToJson: Map<Expr, string>;
   anonStructs: { name: string; fields: { name: string; type: TypeKind }[] }[];
   globalTypes?: Map<string, TypeKind>;
@@ -445,6 +446,10 @@ export class TypeChecker {
   private interfaceCoercions = new Map<Expr, { fromType: string; ifaceName: string }>();
   private interfaceMethodCalls = new Map<Expr, { ifaceName: string; methodName: string; methodIndex: number }>();
   private autoJsonStringify = new Map<Expr, TypeKind>();
+  // Arguments where a fixed array is being passed to a slice parameter. Lowering turns
+  // each into a full-range slice; the checker cannot do it because the conversion is a
+  // representation change, not a type judgement.
+  private arraySliceArgs = new Set<Expr>();
   // Subset of the above whose struct has a `toJson`: the mangled name to call
   // instead of the built-in stringifier.
   private autoJsonToJson = new Map<Expr, string>();
@@ -1740,6 +1745,7 @@ export class TypeChecker {
       interfaceCoercions: this.interfaceCoercions,
       interfaceMethodCalls: this.interfaceMethodCalls,
       autoJsonStringify: this.autoJsonStringify,
+      arraySliceArgs: this.arraySliceArgs,
       autoJsonToJson: this.autoJsonToJson,
       anonStructs: this.anonStructs,
       globalTypes: this._globalTypes,
@@ -7291,6 +7297,17 @@ export class TypeChecker {
             && argType.tag === "vec" && typeEq(paramType.inner.element, argType.element)) {
           continue;
         }
+        // A FIXED array satisfies a slice parameter too. Unlike a Vec this is not a
+        // pass-through: `[N x T]` is an inline layout and the callee expects the
+        // `{ptr,len,cap}` view, so the conversion is recorded here and materialised in
+        // lowering. Without it `total(v)` worked and `total(a)` did not, for the same
+        // function and the same element type.
+        if (paramType.inner.tag === "array" && paramType.inner.size === null
+            && argType.tag === "array" && argType.size !== null
+            && typeEq(paramType.inner.element, argType.element)) {
+          this.arraySliceArgs.add(expr.args[i]);
+          continue;
+        }
         if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
           if (!this.tryInterfaceCoercion(expr.args[i], argType, paramType)) {
             this.error(`argument ${i + 1} of '${expr.func}': expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span, this.optionUnwrapHint(paramType, argType));
@@ -8039,8 +8056,13 @@ export class TypeChecker {
     // Whitelisted rather than widened, because the same arm also carries `push`/`pop`/
     // `insert`/`sort` — a slice is a non-owning view and must not grow or reorder its
     // source. Anything outside this set still reaches the array path and is rejected.
-    const objType = (objTypeRaw.tag === "array" && objTypeRaw.size === null
-      && SLICE_COMBINATORS.has(expr.method))
+    // A FIXED array reaches the same set, but the lowerer has to materialise a full-range
+    // slice for it rather than re-tag: `[N x T]` is an inline layout, not a `%Vec`. Both
+    // arms are normalised here so the arm below sees one shape.
+    const objType = (objTypeRaw.tag === "array"
+      && (objTypeRaw.size === null
+        ? SLICE_COMBINATORS.has(expr.method)
+        : ARRAY_COMBINATORS.has(expr.method)))
       ? { tag: "vec", element: objTypeRaw.element } as TypeKind
       : objTypeRaw;
     if ((objType.tag === "int" || objType.tag === "float" || objType.tag === "bool") && expr.method === "toString") {

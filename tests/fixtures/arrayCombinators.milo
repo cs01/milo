@@ -1,0 +1,41 @@
+// The combinators on a FIXED array, and a fixed array passed to a slice parameter.
+//
+// Slices got these first by re-tagging: `&[T]` already carries the `%Vec` layout, so the
+// existing emitters worked unchanged. A fixed array cannot be re-tagged — `[N x T]` is an
+// inline layout, not a `{ptr,len,cap}` view — so both halves here materialise a full-range
+// slice, which is exactly the `VecSlice` node `a[0..N]` already produced. That is why this
+// needed no new emitter either, only the conversion at the two boundaries:
+//
+//   a.sum()      — lowering wraps the receiver
+//   total(a)     — the checker marks the argument, lowering wraps it
+//
+// The second was the visible asymmetry: `total(v)` on a Vec worked and `total(a)` on an
+// array did not, for the same function and the same element type.
+//
+// `clone` is deliberately NOT in the array set: cloning a fixed array should yield an
+// array, and re-tagging would quietly change the result type to a slice.
+// @expect: 10
+// @expect: 2
+// @expect: 20
+// @expect: true
+// @expect: true
+// @expect: 10
+// @expect: 10
+
+fn total(s: &[i64]): i64 {
+    return s.sum()
+}
+
+fn main() {
+    let a: [i64; 4] = [1, 2, 3, 4]
+    print(a.sum())
+    print(a.filter((x: &i64) => x % 2 == 0).len)
+    print(a.fold(0, (acc: i64, n: &i64) => acc + n * 2))
+    print(a.any((x: &i64) => x == 3))
+    print(a.contains(2))
+
+    // Passing the array where a slice is expected, and using it again afterwards — the
+    // conversion is a view, so it must not consume or disturb the array.
+    print(total(a))
+    print(a.sum())
+}

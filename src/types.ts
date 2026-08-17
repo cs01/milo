@@ -183,6 +183,16 @@ export function needsDrop(t: TypeKind): boolean {
 // Shared by src/checker.ts and src/lower.ts so the two can never disagree about which
 // methods a slice has — a divergence there is an accepted program the lowerer then cannot
 // emit, which is exactly how this landed the first time.
+// A FIXED array (`[T; N]`) can use the same set, but not by re-tagging: it is laid out
+// inline as `[N x T]`, not as a `%Vec`, so the object has to be turned into a full-range
+// slice first. `clone` is excluded because cloning a fixed array should yield an array,
+// not a slice of one — the re-tag would change the result type.
+export const ARRAY_COMBINATORS: ReadonlySet<string> = new Set([
+  "sum", "map", "filter", "fold", "reduce", "each", "enumerate",
+  "find", "position", "indexOf", "any", "all", "contains",
+  "isEmpty", "join", "first", "last", "min", "max",
+]);
+
 export const SLICE_COMBINATORS: ReadonlySet<string> = new Set([
   "sum", "map", "filter", "fold", "reduce", "each", "enumerate",
   "find", "position", "indexOf", "any", "all", "contains",

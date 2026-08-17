@@ -6,7 +6,7 @@ import { declaredType, floatNamespaceConst } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
-import { typeFromAst, SLICE_COMBINATORS } from "./types";
+import { typeFromAst, SLICE_COMBINATORS, ARRAY_COMBINATORS } from "./types";
 import { readFileSync, existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 import { must } from "./must";
@@ -566,6 +566,21 @@ class LowerCtx {
     // it uniformly.
     const rc = this.c.rangeCheckedExprs.get(expr);
     if (rc) return { kind: "RangeCheck", value: lowered, min: rc.min, max: rc.max, typeName: rc.typeName, type: lowered.type, span: expr.span };
+    // A fixed array passed where a slice is expected. Done HERE rather than in each call
+    // path because the checker marks the argument expression itself, and every position
+    // that can carry one — free call, method call, variadic — funnels through this method.
+    if (this.c.arraySliceArgs.has(expr) && lowered.type.tag === "array" && lowered.type.size !== null) {
+      const i64: TypeKind = { tag: "int", bits: 64, signed: true };
+      return {
+        kind: "VecSlice",
+        vec: lowered,
+        start: { kind: "IntLit", value: 0n, type: i64, span: expr.span },
+        end: { kind: "IntLit", value: BigInt(lowered.type.size), type: i64, span: expr.span },
+        elementType: lowered.type.element,
+        type: { tag: "array", element: lowered.type.element, size: null },
+        span: expr.span,
+      };
+    }
     return lowered;
   }
 
@@ -921,8 +936,30 @@ class LowerCtx {
         // combinators lower through the Vec nodes unchanged. The two must use the same
         // whitelist — the checker accepting what the lowerer cannot emit is a crash, not
         // a diagnostic, and that is how this first surfaced ("unsupported method call: sum").
-        const objType = (objTypeRaw?.tag === "array" && objTypeRaw.size === null
-          && SLICE_COMBINATORS.has(expr.method))
+        const sliceFixedArray = objTypeRaw?.tag === "array" && objTypeRaw.size !== null
+          && ARRAY_COMBINATORS.has(expr.method);
+        // The receiver for a Vec-shaped combinator. A Vec or a slice passes through; a
+        // FIXED array is wrapped in a full-range `VecSlice` first, because `[N x T]` is an
+        // inline layout and every Vec emitter expects the `{ptr,len,cap}` view. This is the
+        // same node `a[0..N]` already produces, which is why no new emitter is needed.
+        const recv = (): import("./hir").HIRExpr => {
+          const lowered = this.lowerExpr(expr.object);
+          if (!sliceFixedArray || objTypeRaw?.tag !== "array" || objTypeRaw.size === null) return lowered;
+          const i64: TypeKind = { tag: "int", bits: 64, signed: true };
+          return {
+            kind: "VecSlice",
+            vec: lowered,
+            start: { kind: "IntLit", value: 0n, type: i64, span: expr.span },
+            end: { kind: "IntLit", value: BigInt(objTypeRaw.size), type: i64, span: expr.span },
+            elementType: objTypeRaw.element,
+            type: { tag: "array", element: objTypeRaw.element, size: null },
+            span: expr.span,
+          };
+        };
+        const objType = (objTypeRaw?.tag === "array"
+          && (objTypeRaw.size === null
+            ? SLICE_COMBINATORS.has(expr.method)
+            : ARRAY_COMBINATORS.has(expr.method)))
           ? { tag: "vec" as const, element: objTypeRaw.element }
           : objTypeRaw;
         // x.addrOf() → the same address-of the old `&x` emitted, so codegen and
@@ -1039,47 +1076,47 @@ class LowerCtx {
         // with size null whose runtime rep is a non-owning %Vec
         if ((objType?.tag === "vec" || objType?.tag === "array") && expr.method === "slice") {
           const elementType = objType.element;
-          return { kind: "VecSlice", vec: this.lowerExpr(expr.object), start: this.lowerExpr(expr.args[0]), end: this.lowerExpr(expr.args[1]), elementType, type, span: expr.span };
+          return { kind: "VecSlice", vec: recv(), start: this.lowerExpr(expr.args[0]), end: this.lowerExpr(expr.args[1]), elementType, type, span: expr.span };
         }
         if (objType?.tag === "array" && objType.size === null && expr.method === "len") {
           return { kind: "ArrayLen", object: this.lowerExpr(expr.object), type, span: expr.span };
         }
         if (objType?.tag === "vec") {
           if (expr.method === "push") {
-            return { kind: "VecPush", vec: this.lowerExpr(expr.object), value: this.lowerExpr(expr.args[0]), type, span: expr.span };
+            return { kind: "VecPush", vec: recv(), value: this.lowerExpr(expr.args[0]), type, span: expr.span };
           }
           if (expr.method === "pop") {
             const optionEnumName = type.tag === "enum" ? type.name : "";
-            return { kind: "VecPop", vec: this.lowerExpr(expr.object), elementType: objType.element, optionEnumName, type, span: expr.span };
+            return { kind: "VecPop", vec: recv(), elementType: objType.element, optionEnumName, type, span: expr.span };
           }
           if (expr.method === "map") {
             const resultElem = type.tag === "vec" ? type.element : { tag: "unknown" as const };
-            return { kind: "VecMap", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, resultElementType: resultElem, type, span: expr.span };
+            return { kind: "VecMap", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, resultElementType: resultElem, type, span: expr.span };
           }
           if (expr.method === "filter") {
-            return { kind: "VecFilter", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecFilter", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "each") {
-            return { kind: "VecEach", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecEach", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "enumerate") {
-            return { kind: "VecEnumerate", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecEnumerate", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "find") {
             const optionEnumName = type.tag === "enum" ? type.name : "";
-            return { kind: "VecFind", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName, type, span: expr.span };
+            return { kind: "VecFind", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName, type, span: expr.span };
           }
           if (expr.method === "any") {
-            return { kind: "VecAny", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecAny", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "all") {
-            return { kind: "VecAll", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecAll", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "fold" || expr.method === "reduce") {
-            return { kind: "VecFold", vec: this.lowerExpr(expr.object), init: this.lowerExpr(expr.args[0]), callback: this.lowerExpr(expr.args[1]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecFold", vec: recv(), init: this.lowerExpr(expr.args[0]), callback: this.lowerExpr(expr.args[1]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "sum") {
-            return { kind: "VecSum", vec: this.lowerExpr(expr.object), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecSum", vec: recv(), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "join") {
             const args: HIRArg[] = [
@@ -1092,7 +1129,7 @@ class LowerCtx {
             return { kind: "VecIsEmpty", object: this.lowerExpr(expr.object), type, span: expr.span };
           }
           if (expr.method === "contains") {
-            return { kind: "VecContains", vec: this.lowerExpr(expr.object), value: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
+            return { kind: "VecContains", vec: recv(), value: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };
           }
           if (expr.method === "reverse") {
             return { kind: "VecReverse", object: this.lowerExpr(expr.object), elementType: objType.element, type, span: expr.span };
@@ -1153,10 +1190,10 @@ class LowerCtx {
             return { kind: "VecMinMax", object: this.lowerExpr(expr.object), elementType: objType.element, isMax: expr.method === "max", optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
           }
           if (expr.method === "indexOf") {
-            return { kind: "VecIndexOf", vec: this.lowerExpr(expr.object), value: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
+            return { kind: "VecIndexOf", vec: recv(), value: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
           }
           if (expr.method === "position") {
-            return { kind: "VecPosition", vec: this.lowerExpr(expr.object), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
+            return { kind: "VecPosition", vec: recv(), callback: this.lowerExpr(expr.args[0]), elementType: objType.element, optionEnumName: type.tag === "enum" ? type.name : "", type, span: expr.span };
           }
           if (expr.method === "extend") {
             return { kind: "VecExtend", object: this.lowerExpr(expr.object), other: this.lowerExpr(expr.args[0]), elementType: objType.element, type, span: expr.span };

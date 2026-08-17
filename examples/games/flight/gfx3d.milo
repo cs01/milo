@@ -302,6 +302,47 @@ pub struct View {
     far: f64,
 }
 
+// Terrain tessellation, and therefore draw distance, as a function of altitude.
+//
+// A fixed quad size and a fixed ring count give a fixed 4.4 km of drawn world,
+// which is ample at 300 m and absurd at 3 km: from up there the ground directly
+// below is already 3 km away, so most of the view is past the edge of the terrain
+// and looking at nothing. That is the grey band under the horizon in every
+// high-altitude frame, and it became much more obvious once there were clouds
+// worth climbing above.
+//
+// Scaling the quad with altitude buys the distance for FREE: the tile count, and
+// so the triangle count, is unchanged. What it spends is near-field detail, which
+// is precisely what stops mattering as you climb — at 3 km a 440 m quad subtends
+// less on screen than a 110 m quad does at 750 m.
+//
+// Quantised to powers of two rather than varying continuously: a grid whose cell
+// size changes every frame re-tessellates every frame and the whole landscape
+// crawls. Stepping at discrete altitudes means it changes rarely, and since both
+// tessellations sample the same heightfield the step is nearly invisible.
+//
+// These live here rather than beside TILE in world3d because `viewOf` needs them
+// and world3d imports this file, not the other way round.
+pub let TILE_BASE: f64 = 110.0
+
+pub let VIEW_TILES_N: i64 = 40
+
+pub fn altScale(camY: f64): f64 {
+    var k = 1.0
+    var lim = 900.0
+    for _ in 0..3 {
+        if camY > lim {
+            k = k * 2.0
+            lim = lim * 2.0
+        }
+    }
+    return k
+}
+
+pub fn farOf(camY: f64): f64 {
+    return (VIEW_TILES_N as f64) * TILE_BASE * altScale(camY)
+}
+
 pub fn viewOf(c: &Camera, w: i64, h: i64): View {
     let f = frameOf(c.yaw, c.pitch, c.roll)
     let scale = (h as f64) * 0.5 / Math.tan(c.fov * 0.5)
@@ -314,7 +355,11 @@ pub fn viewOf(c: &Camera, w: i64, h: i64): View {
         cx: (w as f64) * 0.5,
         cy: (h as f64) * 0.5,
         near: c.near,
-        far: c.far,
+        // The far plane follows the terrain tessellation, which follows altitude.
+        // Derived here rather than stored on the Camera so that every path that
+        // builds a View — the game loop, the screenshot tool, the opening survey —
+        // gets the same answer without having to remember to update a field.
+        far: farOf(c.y),
     }
 }
 

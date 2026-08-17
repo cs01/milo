@@ -30,7 +30,7 @@ from "./plane" import {
 }
 from "./world3d" import {
     World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH,
-    fmtTime, fenceK, FENCE_SOFT
+    fmtTime, fenceK, FENCE_SOFT, terrainTile
 }
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal,
@@ -627,11 +627,15 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
 
     // Walk a grid of quads centred on the aircraft. Anything behind the camera is
     // rejected before any per-vertex work.
-    let baseX = Math.floor(w.cam.x / TILE) as i64
-    let baseZ = Math.floor(w.cam.z / TILE) as i64
+    // The quad size for THIS frame, which grows with altitude so the drawn radius
+    // does too. `viewOf` derives the far plane from the same function, so the grid
+    // and the camera cannot disagree about where the world ends.
+    let tile = terrainTile(w.cam.y)
+    let baseX = Math.floor(w.cam.x / tile) as i64
+    let baseZ = Math.floor(w.cam.z / tile) as i64
     let fwdX = Math.sin(w.cam.yaw)
     let fwdZ = Math.cos(w.cam.yaw)
-    var cc = cornersNew(baseX, baseZ, TILE, VIEW_TILES, 1, 0)
+    var cc = cornersNew(baseX, baseZ, tile, VIEW_TILES, 1, 0)
     // The near field is drawn at half the tile size. A 110 m quad is coarser than
     // the 30 m terrain data under it, which is invisible over open country and
     // ruinous on anything small: Alcatraz is 500 m by 300 m, so the whole island
@@ -640,7 +644,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     // costs about two thousand extra triangles and nothing at range.
     let fineLo = 0 - 2 * (FINE_RINGS - 1)
     let fineHi = 2 * FINE_RINGS
-    var fc = cornersNew(baseX * 2, baseZ * 2, TILE * 0.5, FINE_RINGS * 2, fineLo, fineHi)
+    var fc = cornersNew(baseX * 2, baseZ * 2, tile * 0.5, FINE_RINGS * 2, fineLo, fineHi)
 
     // Front to back, in rings out from the camera tile. The z-buffer then rejects
     // hidden pixels with a single compare instead of shading them — near terrain
@@ -650,14 +654,14 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             let off = ringOffset(ring, step)
             let tx = baseX + off.x
             let tz = baseZ + off.z
-            let x0 = (tx as f64) * TILE
-            let z0 = (tz as f64) * TILE
-            let x1 = x0 + TILE
-            let z1 = z0 + TILE
+            let x0 = (tx as f64) * tile
+            let z0 = (tz as f64) * tile
+            let x1 = x0 + tile
+            let z1 = z0 + tile
             // cheap frustum reject: quad centre must be in front of the camera
-            let mx = x0 + TILE * 0.5 - w.cam.x
-            let mz = z0 + TILE * 0.5 - w.cam.z
-            if mx * fwdX + mz * fwdZ < 0.0 - TILE {
+            let mx = x0 + tile * 0.5 - w.cam.x
+            let mz = z0 + tile * 0.5 - w.cam.z
+            if mx * fwdX + mz * fwdZ < 0.0 - tile {
                 continue
             }
             let d2 = mx * mx + mz * mz
@@ -675,7 +679,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
                 // everywhere except the boundary midpoints, which snap.
                 let hx = tx * 2 - baseX * 2 + FINE_RINGS * 2
                 let hz = tz * 2 - baseZ * 2 + FINE_RINGS * 2
-                let half = TILE * 0.5
+                let half = tile * 0.5
                 for sz in 0..2 {
                     for sx in 0..2 {
                         let f00 = cornerAt(fc, s, w, hx + sx, hz + sz)
@@ -694,7 +698,7 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
             let k01 = cornerAt(cc, s, w, ix, iz + 1)
             let k11 = cornerAt(cc, s, w, ix + 1, iz + 1)
 
-            terrainQuad(s, w, v, ground, k00, k10, k01, k11, x0, z0, TILE, ring)
+            terrainQuad(s, w, v, ground, k00, k10, k01, k11, x0, z0, tile, ring)
         }
     }
 

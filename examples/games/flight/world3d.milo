@@ -8,7 +8,7 @@ from "std/rng" import {
     Rng
 }
 from "./gfx3d" import {
-    Camera, Scene, Vec3
+    Camera, Scene, Vec3, altScale
 }
 from "./live" import {
     LiveEnv, envNew, envSetPlace, envRetime
@@ -52,6 +52,11 @@ pub let TILE: f64 = 110.0 // world units per terrain quad
 
 pub let VIEW_TILES: i64 = 40 // radius of the drawn terrain grid -> 4.4 km
 
+// How big a terrain quad is, given how high the camera is. The scale itself
+// lives in gfx3d, next to the `viewOf` that has to agree with it.
+pub fn terrainTile(camY: f64): f64 {
+    return TILE * altScale(camY)
+}
 // A ring you fly THROUGH, Pilotwings-style: far easier to read at speed than a
 // coin you have to touch, and it tells you which way to be pointing.
 pub struct Ring {

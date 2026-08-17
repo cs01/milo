@@ -84,9 +84,16 @@ Done, each verified against a rendered frame rather than by inspection:
   service caps one at 2048 px.
 - Station and hour on the HUD, and live weather refetched at every place change.
 
-Not done: terrain quads are still 110 m against 30 m DEM posts, so cliffs are
-smoothed; weather is fetched at startup and at place changes but not on a timer
-during a long flight.
+- A quarter-tile terrain tier over the three rings nearest the camera, so the
+  mesh finally samples finer than the 30 m elevation data instead of stepping
+  over every other post.
+- Weather refetched on a green task once every five minutes, yielded to once a
+  frame. Measured at 400 ms to complete with a 20 ms worst-case yield.
+
+Everything in the plan is done. What is left is not on it: the drape could go to
+1 m/px (sixteen requests, a 200 MB texture — the stitching machinery exists and
+only the constant changes), and cloud top height remains the one estimated
+quantity in the chain.
 
 ## What is measured and what is not
 

@@ -17,7 +17,7 @@ pub struct Off {
 from "./gfx3d" import {
     Vec3,
     Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera,
-    triangleV, triangleG, triangleF
+    triangleV, triangleG, triangleF, farOf
 }
 from "./texture" import {
     Texture, Vtx, vtxC
@@ -592,7 +592,14 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         // which has no parallax worth having over a 16 km map.
         s.cloud = 0.0
         s.fogStart = 1500.0
-        s.fogEnd = 4200.0
+        // Tied to the draw distance, which now moves with altitude.
+        //
+        // `fogEnd` no longer colours anything — `sky.aerial` does the atmosphere —
+        // but it still decides where the SEA stops being drawn, and it was left at
+        // a constant 4200 when the terrain started reaching 17 km. From 3 km up
+        // that cut the ocean off in a hard dark wedge a few kilometres out while
+        // the land carried on past it to the horizon.
+        s.fogEnd = farOf(w.cam.y) * 0.95
         // ~30 km visibility. `fogStart`/`fogEnd` still bound the draw distance
         // and the camera, but they no longer decide what the air looks like.
         // The measured visibility when there is one, and a clear-day default
@@ -632,12 +639,17 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
     // the whole city past the haze wall and the shot is a white screen. Pushed
     // out to the draw distance for as long as the camera is up there — the fog
     // still finishes inside the far plane, so the grid edge stays hidden.
+    // Against the far plane the camera is ACTUALLY using. `Camera.far` is a
+    // vestigial field: `viewOf` derives the real one from altitude, so the stored
+    // value is whatever it was when the camera was built and is wrong the moment
+    // the aircraft climbs.
+    let drawFar = farOf(w.cam.y)
     if w.intro > 0.0 {
         let up = Math.clampF64(w.intro / w.introLen, 0.0, 1.0)
-        s.fogEnd = s.fogEnd + (w.cam.far - s.fogEnd) * up
+        s.fogEnd = s.fogEnd + (drawFar - s.fogEnd) * up
     }
-    if s.fogEnd > w.cam.far {
-        s.fogEnd = w.cam.far
+    if s.fogEnd > drawFar {
+        s.fogEnd = drawFar
     }
     if s.fogStart > s.fogEnd * 0.78 {
         s.fogStart = s.fogEnd * 0.78

@@ -178,7 +178,7 @@ Should packages be able to declare a public surface (only listed names importabl
   "license": "MIT",
   "repository": "github.com/foo/milo-http2",
 
-  "milo": ">=0.4.0",             // compiler version constraint
+  "milo": ">=0.4.0",             // compiler version constraint — CHECKED, see below
 
   // A package may be a library, a set of binaries, or both. Omit either.
   "lib": "lib.milo",             // the importable surface — what `import "http2"` resolves to
@@ -198,6 +198,33 @@ Should packages be able to declare a public surface (only listed names importabl
   "nativeHints": { "SDL2": { "brew": "sdl2", "apt": "libsdl2-dev" } }
 }
 ```
+
+### The `milo` constraint
+
+A manifest's `milo` field bounds the compiler versions the package builds against, and it
+is enforced: `milo install` checks the project's own bound before doing anything, and each
+dependency's bound as its tree is resolved, naming the package that objected.
+
+It used to be parsed and ignored — a bound the author wrote to protect themselves that did
+nothing at all. That is the failure this field exists to prevent, so the syntax is
+deliberately small and anything outside it is an ERROR rather than a silent pass:
+
+| form | meaning |
+|---|---|
+| `>=0.4.0` `>0.4.0` `<=0.4.0` `<0.4.0` | a single comparator against a full `X.Y.Z` |
+| `0.4.0` or `=0.4.0` | exactly that version |
+| `^0.4.0` | `>=0.4.0 <0.5.0` — below 1.0 the MINOR is the breaking position |
+| `>=0.4.0 <0.6.0` | space- or comma-separated terms, all of which must hold |
+
+The caret's pre-1.0 reading is the one worth stating twice: `^0.4.0` does **not** admit
+`0.5.0`. While Milo is below 1.0, a minor bump is where breaks land (see
+[breaking-changes.md](../breaking-changes.md)), so the other reading would let a package
+accept the very release that broke it.
+
+Partial versions (`0.4`), ranges with `||`, and `~`/`*`/`latest` are rejected. Milo has
+never published a pre-release, so pre-release precedence rules are not implemented rather
+than guessed at.
+
 
 `lib` resolution keeps today's fallback chain (`lib.milo`, then `<pkgname>.milo`) so existing cache layouts still resolve.
 

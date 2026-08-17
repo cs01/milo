@@ -12,6 +12,7 @@ import { join } from "path";
 import { execFileSync } from "child_process";
 import { langInfo, LANG_JSON_SCHEMA } from "../src/lang-info";
 import { KEYWORDS, SOFT_KEYWORDS } from "../src/tokens";
+import { KEYWORD_DOCS } from "../src/keyword-docs";
 import { PRIMITIVE_TYPE_NAMES } from "../src/types";
 import { BUILTIN_MEMBERS } from "../src/builtin-members";
 import { WARNINGS, WARNING_NAMES, OFF_BY_DEFAULT } from "../src/warnings";
@@ -63,4 +64,20 @@ test("the --deny-all help line is rendered, not retyped", () => {
   const help = execFileSync("bun", ["run", join(ROOT, "src", "main.ts"), "--help"], { encoding: "utf-8" });
   for (const name of OFF_BY_DEFAULT) expect(help).toContain(name);
   expect(WARNINGS.length).toBeGreaterThan(OFF_BY_DEFAULT.length);
+});
+
+test("every keyword carries hover documentation", () => {
+  // A keyword has no type and no declaration site, so the LSP has nothing to fall back
+  // on: an undocumented one hovers to NOTHING, silently. This is the only thing keeping
+  // a newly added keyword from shipping that way.
+  const all = [...KEYWORDS, ...SOFT_KEYWORDS];
+  expect(all.filter(k => !KEYWORD_DOCS[k])).toEqual([]);
+  // The other direction — a doc for a word the language no longer has teaches a lie.
+  expect(Object.keys(KEYWORD_DOCS).filter(k => !all.includes(k))).toEqual([]);
+  // Each entry shows the FORM in a fenced milo block, then explains it.
+  for (const [kw, doc] of Object.entries(KEYWORD_DOCS)) {
+    expect(doc.startsWith("```milo\n")).toBe(true);
+    expect(doc.length).toBeGreaterThan(80);
+    expect(langInfo().keywordDocs[kw]).toBe(doc);
+  }
 });

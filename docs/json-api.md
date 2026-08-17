@@ -15,7 +15,7 @@ JSON on stdout. Tooling reads *that* — never `import { … } from "../src/…"
 milo api --json                      # every public std symbol: signature, params, return, doc, struct fields
 milo api --module std/json --json    # one module
 milo api "parse json" --json         # ranked search results
-milo lang --json                     # keywords, primitive types, operators, builtin methods, warning names
+milo lang --json                     # keywords (+ hover docs), primitive types, operators, builtin methods, warning names
 milo check <file> --json             # diagnostics as data (exit 1 if any error)
 milo prove <file> --json             # per-obligation proof verdicts
 milo safety <file> --safety=X --json # safety-profile compliance
@@ -85,9 +85,11 @@ Works on any package, not just std: the same extractor backs `milo doc <file|dir
 ### `milo lang --json` (schema 1)
 
 `keywords`, `softKeywords` (contextual — legal identifiers elsewhere, which a highlighter
-must know), `primitiveTypes`, `symbols` (operator token name → spelling), `builtinMembers`
-(receiver → the methods the checker dispatches by hand, with signatures and caveats), and
-`warnings` (name + `offByDefault`, i.e. what `--deny=` accepts).
+must know), `keywordDocs` (keyword → markdown help: the form in a fenced `milo` block,
+then what it means — the same text the bundled LSP shows on hover, so an editor plugin
+need not rewrite it from the guide), `primitiveTypes`, `symbols` (operator token name →
+spelling), `builtinMembers` (receiver → the methods the checker dispatches by hand, with
+signatures and caveats), and `warnings` (name + `offByDefault`, i.e. what `--deny=` accepts).
 
 ### `milo check <file> --json` (schema 1)
 

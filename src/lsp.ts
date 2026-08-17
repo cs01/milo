@@ -2,6 +2,8 @@
 // Speaks LSP over JSON-RPC/stdio. Provides diagnostics, hover, go-to-definition.
 
 import { Lexer } from "./lexer";
+import { SOFT_KEYWORDS, type Token } from "./tokens";
+import { KEYWORD_DOCS, CONTRACT_WORD_DOCS } from "./keyword-docs";
 import { formatMiloType } from "./derive-template";
 import { Parser } from "./parser";
 import { TypeChecker, type CheckResult } from "./checker";
@@ -373,6 +375,20 @@ function handleHover(uri: string, line: number, character: number): object | nul
       return { contents: { kind: "markdown", value: hover } };
     }
 
+    // Extern declarations. Skipped by the branch above, so hovering an FFI symbol —
+    // the one call whose safety rule a reader cannot infer from the name — used to
+    // return nothing at all.
+    const ext = program.functions.find(fn => fn.name === word && fn.isExtern);
+    if (ext) {
+      const params = ext.params.map(p => `${p.name}: ${formatMiloType(declaredType(p))}`);
+      if (ext.isVariadic) params.push("...");
+      const ret = formatMiloType(ext.retType);
+      const sig = `${pubPrefix(ext.isPub)}extern fn ${ext.name}(${params.join(", ")}): ${ret}`;
+      let hover = `\`\`\`milo\n${sig}\n\`\`\`${visibilityNote(ext.isPub)}\n\n${externCallNote(ret)}`;
+      hover = appendDocAndModule(hover, source, parsed, sourceDir, word, "fn");
+      return { contents: { kind: "markdown", value: hover } };
+    }
+
     // Impl methods
     for (const impl of program.impls) {
       for (const method of impl.methods) {
@@ -406,10 +422,11 @@ function handleHover(uri: string, line: number, character: number): object | nul
     const primHover = findPrimitiveHover(source, word, line, character);
     if (primHover) return { contents: { kind: "markdown", value: primHover } };
 
-    // Contract clauses. These are the words a reader is most likely to hover, because
-    // nothing about `decreases` or `old` explains itself from context.
-    const contractHover = CONTRACT_HOVERS[word];
-    if (contractHover) return { contents: { kind: "markdown", value: contractHover } };
+    // Keywords and contract clauses. These are the words a reader is most likely to
+    // hover, because nothing about `pub`, `extern` or `decreases` explains itself from
+    // context the way a function signature does.
+    const kwHover = keywordHover(word, tokens, source.split("\n")[line] ?? "", line, character);
+    if (kwHover) return { contents: { kind: "markdown", value: kwHover } };
 
     // Type aliases
     for (const ta of program.typeAliases) {
@@ -752,15 +769,68 @@ function findBuiltinMethodHover(
   return make(recvName, elem);
 }
 
-// Contract vocabulary. `milo prove` discharges these statically; a `--contract-checks`
-// build (the default for `--debug`) also asserts them at runtime.
-const CONTRACT_HOVERS: Record<string, string> = {
-  requires: "```milo\nrequires <bool expr>\n```\nPrecondition. Must hold at every call site — `milo prove` discharges it there, and a contract-checking build asserts it on entry.",
-  ensures: "```milo\nensures <bool expr>\n```\nPostcondition. Holds at every return. `result` names the return value; `old(e)` names what `e` was at entry.",
-  invariant: "```milo\ninvariant <bool expr>\n```\nOn a loop: holds before every iteration. Proved by induction — established on entry, preserved by one pass through the body — and then available to everything after the loop.\n\nOn a `struct` (written after the closing brace, over bare field names): a property of the TYPE. Assumed wherever a value of that type is observed, and owed at every struct literal and every `&mut` function that could break it.",
-  decreases: "```milo\ndecreases <integer expr>\n```\nTermination measure: must be non-negative and strictly fall across every self-recursive call, or every loop iteration.\n\nOn a function this is not optional bookkeeping — a self-recursive call is modelled by assuming that function's own `ensures`, which is induction, and induction over a recursion that may not terminate proves anything. Without a discharged measure such a proof is reported as conditional.",
-  old: "```milo\nold(e): <type of e>\n```\nThe value `e` held at function entry. Legal only inside `ensures`, and only for a scalar (integer, float, bool) — a debug build snapshots it on entry, and copying a Vec or struct there would either alias or clone on every call.\n\nThis is what lets a contract describe a `&mut` parameter:\n```milo\nfn bump(n: &mut i64): void\nensures n == old(n) + 100\n```\nWithout it, `ensures` can only talk about `result`, so a mutating function has no expressible specification — and a caller learns nothing from it.",
-};
+// Whether calling an extern needs `unsafe` is decided in the checker from the argument
+// AND return types (see the `sig.isExtern` branch in checker.ts). The return half is
+// decidable from the declaration alone, and it is the half that forces `unsafe` at
+// EVERY call site, so the hover states it outright and describes the argument rule.
+function externCallNote(ret: string): string {
+  const argRule = "Calls need no `unsafe` while every argument auto-coerces: a scalar, `&T`, a Milo `fn`, `string`/`[T; N]` → `*T`, a matching `*T`, or a by-value `extern struct`. A hand-made raw pointer argument needs one.";
+  if (ret.startsWith("*")) {
+    return `Returns \`${ret}\` — a raw pointer whose provenance the compiler cannot see, so **every call needs an \`unsafe\` block**.\n\nImplemented outside Milo: the C linker resolves the symbol, and nothing on the far side is checked for memory safety.`;
+  }
+  const scalarOrVoid = ret === "void" || ret === "bool" || SCALAR_BYTES[ret] !== undefined;
+  const retNote = scalarOrVoid
+    ? argRule
+    : `Returns \`${ret}\` — safe only if that is a by-value \`extern struct\`; otherwise the call needs an \`unsafe\` block. ${argRule}`;
+  return `${retNote}\n\nImplemented outside Milo: the C linker resolves the symbol, and nothing on the far side is checked for memory safety.`;
+}
+
+// Keyword hovers. `milo prove` discharges the contract clauses statically; a
+// `--contract-checks` build (the default for `--debug`) also asserts them at runtime.
+// The prose lives in src/keyword-docs.ts so `milo lang --json` serves the same text.
+//
+// A hard keyword lexes to its own TokenKind, so the token stream proves the hovered
+// word really is the keyword and not the same letters inside a string literal. A SOFT
+// keyword (`pub`, `from`, `in`, `derive`, `thread_local`) stays a legal identifier, so
+// it only earns the keyword hover in the syntactic position the parser treats as
+// keyword-ish — otherwise hovering the `from` field of `struct Edge { from: i32 }`
+// would explain the import syntax.
+function keywordHover(word: string, tokens: Token[], lineText: string, line: number, character: number): string | null {
+  const doc = KEYWORD_DOCS[word];
+  if (!doc) return CONTRACT_WORD_DOCS[word] ?? null;
+  if (SOFT_KEYWORDS.has(word)) return softKeywordInKeywordPosition(word, lineText, character) ? doc : null;
+  // Hard keyword: require a token of that kind covering the cursor.
+  const col = character + 1;
+  for (const t of tokens) {
+    if (t.line !== line + 1) continue;
+    if (col >= t.col && col < t.col + t.value.length) return t.kind === word ? doc : null;
+  }
+  return null;
+}
+
+// Words that start a top-level declaration, mirroring the parser's `startsDecl` — what
+// makes `pub` a keyword rather than a variable name.
+const DECL_STARTERS = ["fn", "extern", "struct", "enum", "trait", "impl", "type", "interface", "let", "var", "unsafe", "import", "thread_local", "from", "derive"];
+
+function softKeywordInKeywordPosition(word: string, lineText: string, character: number): boolean {
+  let start = character, end = character;
+  while (start > 0 && /\w/.test(lineText[start - 1])) start--;
+  while (end < lineText.length && /\w/.test(lineText[end])) end++;
+  const before = lineText.slice(0, start);
+  const after = lineText.slice(end);
+  switch (word) {
+    // `pub`/`thread_local`/`from` lead a top-level declaration, so nothing but
+    // whitespace (or a preceding `pub`) may come before them on the line.
+    case "pub": return /^\s*$/.test(before) && new RegExp(`^\\s+(${DECL_STARTERS.join("|")})\\b`).test(after);
+    case "thread_local": return /^\s*(pub\s+)?$/.test(before) && /^\s+(let|var)\b/.test(after);
+    case "from": return /^\s*$/.test(before) && /^\s+"/.test(after);
+    // `in` is the for-loop separator; `derive` is either `@derive(...)` or the
+    // `derive Trait { … }` template declaration.
+    case "in": return /\bfor\b/.test(before);
+    case "derive": return before.endsWith("@") || (/^\s*$/.test(before) && /^\s+[A-Za-z_]/.test(after));
+    default: return false;
+  }
+}
 
 // Scalar primitives + the two string types. Keyed by the exact type keyword;
 // the value is the markdown body shown on hover.

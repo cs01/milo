@@ -215,6 +215,29 @@ fn main() {
 `;
 const NS_URI = "file:///tmp/milo-lsp-ns.milo";
 
+// Keyword + extern hovers. A keyword carries no type and no declaration site, so every
+// other hover path had nothing to say about `pub`/`extern`/`fn` — and the extern branch
+// of the symbol lookup was skipped outright, so an FFI declaration hovered to nothing.
+// `Edge.from` is here because `from` is a SOFT keyword: it must stay a field hover.
+const KEYWORD_SRC = `pub extern fn sqlite3_open(filename: *u8, db: *u8): i32
+extern fn malloc(size: u64): *u8
+
+struct Edge {
+    from: i32,
+    to: i32,
+}
+
+pub fn main(): i32 {
+    let n = 1
+    for i in 0..2 {
+        print(i)
+    }
+    let r = sqlite3_open("a.db", 0 as *u8)
+    return 0
+}
+`;
+const KEYWORD_URI = "file:///tmp/milo-lsp-keyword.milo";
+
 let proc: Subprocess<"pipe", "pipe", "inherit">;
 let buf = new Uint8Array(0);
 const pending = new Map<number, (v: any) => void>();
@@ -268,7 +291,7 @@ beforeAll(async () => {
   })();
   await req(1, "initialize", { capabilities: {} });
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
-  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC]] as const) {
+  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC]] as const) {
     await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "milo", version: 1, text } } });
   }
 });
@@ -532,4 +555,52 @@ test("namespace completion offers a type's static methods (Json.pa → parse)", 
   // filtered by "pa" — obj/arr must not appear
   expect(labels).not.toContain("obj");
   expect(labels.every((l: string) => l.startsWith("pa"))).toBe(true);
+});
+
+test("hover on the declaration keywords teaches them (pub / extern / fn / let / in)", async () => {
+  const at = (id: number, line: number, character: number) =>
+    req(id, "textDocument/hover", { textDocument: { uri: KEYWORD_URI }, position: { line, character } });
+
+  const onPub = await at(70, 0, 1);
+  expect(onPub?.contents?.value).toContain("file-private by default");
+  expect(onPub?.contents?.value).toContain("@externalLinkage");
+
+  const onExtern = await at(71, 0, 5);
+  expect(onExtern?.contents?.value).toContain("outside** Milo");
+  expect(onExtern?.contents?.value).toContain("unsafe");
+
+  const onFn = await at(72, 0, 11);
+  expect(onFn?.contents?.value).toContain("Declares a function");
+  expect(onFn?.contents?.value).toContain("void");
+
+  const onLet = await at(73, 9, 5);
+  expect(onLet?.contents?.value).toContain("immutable");
+
+  // `in` is a soft keyword — it earns the hover in for-loop position.
+  const onIn = await at(74, 10, 10);
+  expect(onIn?.contents?.value).toContain("loop variable");
+});
+
+test("a soft keyword used as an ordinary name keeps its own hover", async () => {
+  // `from` as a struct field must hover as the field, not as import syntax.
+  const onField = await req(75, "textDocument/hover", { textDocument: { uri: KEYWORD_URI }, position: { line: 4, character: 5 } });
+  expect(onField?.contents?.value).toContain("Edge.from");
+  expect(onField?.contents?.value).not.toContain("import");
+});
+
+test("hover on an extern declaration shows its signature and the unsafe rule", async () => {
+  // The FFI symbol itself (`sqlite3_open`, line 0 char 18) — the extern branch of the
+  // free-function lookup used to skip these entirely.
+  const scalarRet = await req(76, "textDocument/hover", { textDocument: { uri: KEYWORD_URI }, position: { line: 0, character: 18 } });
+  expect(scalarRet?.contents?.value).toContain("pub extern fn sqlite3_open(filename: *u8, db: *u8): i32");
+  expect(scalarRet?.contents?.value).toContain("auto-coerces");
+  expect(scalarRet?.contents?.value).toContain("C linker");
+
+  // A pointer return forces `unsafe` at EVERY call site — say so, don't leave it to
+  // trial and error.
+  const ptrRet = await req(77, "textDocument/hover", { textDocument: { uri: KEYWORD_URI }, position: { line: 1, character: 12 } });
+  expect(ptrRet?.contents?.value).toContain("extern fn malloc(size: u64): *u8");
+  expect(ptrRet?.contents?.value).toContain("every call needs an `unsafe` block");
+  // Not `pub` — the hover says so rather than staying silent about visibility.
+  expect(ptrRet?.contents?.value).toContain("private");
 });

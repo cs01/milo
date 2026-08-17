@@ -11,6 +11,7 @@
 // This is a PUBLIC surface: bump `schema` on a breaking change. tests/langInfo.test.ts
 // pins the shape and holds every list to the compiler data it is derived from.
 import { KEYWORDS, SOFT_KEYWORDS, TokenKind } from "./tokens";
+import { KEYWORD_DOCS } from "./keyword-docs";
 import { PRIMITIVE_TYPE_NAMES } from "./types";
 import { BUILTIN_MEMBERS } from "./builtin-members";
 import { WARNINGS } from "./warnings";
@@ -45,6 +46,9 @@ export function langInfo() {
     // Reserved only where the grammar expects them; legal identifiers everywhere else,
     // which a highlighter has to know or it paints every `from` in a program.
     softKeywords: [...SOFT_KEYWORDS].sort(),
+    // Markdown help for each keyword, so an editor plugin outside this repo can show
+    // the same hover the bundled LSP does instead of writing its own from the guide.
+    keywordDocs: Object.fromEntries([...KEYWORDS, ...SOFT_KEYWORDS].sort().map(k => [k, KEYWORD_DOCS[k]])),
     primitiveTypes: [...PRIMITIVE_TYPE_NAMES].sort(),
     symbols,
     builtinMembers,
@@ -62,6 +66,7 @@ export function runLangInfo(args: string[]): number {
   writeStdout(
     `keywords        ${info.keywords.join(" ")}\n` +
     `soft keywords   ${info.softKeywords.join(" ")}\n` +
+    `keyword docs    ${Object.keys(info.keywordDocs).length} entries (markdown; --json only)\n` +
     `primitive types ${info.primitiveTypes.join(" ")}\n` +
     `symbols         ${Object.values(info.symbols).join(" ")}\n` +
     `builtin methods ${receivers.join(", ")}\n` +

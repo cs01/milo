@@ -1,0 +1,22 @@
+// @error: cannot take a view of a temporary
+//
+// A view of a temporary has nothing to freeze: `mk()[0..2]` points into a Vec that no
+// binding owns. `freezeViewSource` already rejected the METHOD spelling of this
+// (`mk().view()`), and its own comment is the reason the slice spelling had to be rejected
+// too: that storage survives only because temporaries leak, and it becomes a
+// use-after-free the moment they get drop glue. Three drop-glue paths landed on
+// 2026-08-16 alone, so the gap between the two spellings was closing from the wrong side.
+//
+// One hazard, three spellings, and only one of them errored. See tests/errors/
+// stringSliceOfTemporary.milo for the string half.
+fn mk(): Vec<string> {
+    var v: Vec<string> = Vec.new()
+    v.push("alpha")
+    v.push("beta")
+    return v
+}
+
+fn main() {
+    let s = mk()[0..2]
+    print(s.len)
+}

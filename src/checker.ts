@@ -8114,6 +8114,16 @@ export class TypeChecker {
       const endType = this.checkExpr(expr.args[1]);
       if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
       if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
+      // A view of a TEMPORARY has nothing to freeze: `mk()[0..2]` points into a Vec that
+      // no binding owns. `freezeViewSource` already rejects the method spelling of this
+      // (`mk().view()`), and its comment is the reason to reject the slice one too: that
+      // storage survives today only because temporaries leak, and it becomes a
+      // use-after-free the moment they get drop glue. Three drop-glue paths landed this
+      // session, so the gap between the two spellings is closing from the wrong side.
+      if (!this.isPlaceExpr(expr.object)) {
+        this.error(`cannot take a view of a temporary`, sp,
+          `the '&[T]' would outlive the value it points into — bind the receiver first ('let r = ...' then slice 'r')`);
+      }
       // freeze the source — mutation could realloc/free the memory this view points into
       this.freezeRootOf(expr.object);
       this.borrowedExprs.add(expr);
@@ -8678,6 +8688,11 @@ export class TypeChecker {
         const endType = this.checkExpr(expr.args[1]);
         if (startType.tag !== "int" && startType.tag !== "unknown") this.error(`slice start: expected integer, got ${typeName(startType)}`, sp);
         if (endType.tag !== "int" && endType.tag !== "unknown") this.error(`slice end: expected integer, got ${typeName(endType)}`, sp);
+        // Same temporary hazard as the slice-of-Vec case above, same reasoning.
+        if (!this.isPlaceExpr(expr.object)) {
+          this.error(`cannot take a view of a temporary`, sp,
+            `the '&string' would outlive the value it points into — bind the receiver first ('let r = ...' then slice 'r')`);
+        }
         // mark source as borrowed — prevents mutation/move while slice is live.
         // Walk to the root variable: `buf.data[a..b]` views storage owned by `buf`,
         // so replacing any part of `buf` can free what this points into.

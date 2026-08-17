@@ -1,0 +1,73 @@
+// The dogfood case for user-defined derives, and the measurement that answers "could
+// @derive(Json) move out of the compiler into userland?"
+//
+// This is a complete, RECURSIVE JSON serializer written entirely in Milo — no compiler
+// change, no `src/derive-json.ts`. It works because a trait can be implemented for a
+// primitive, so the template body is uniform (`self.@name.toJ()`) and dispatch is the
+// ordinary trait dispatch rather than a conditional in the template language.
+//
+// **Where it stops, which is the whole answer:** a `Vec<T>`, `Option<T>` or `HashMap<K,V>`
+// field cannot be covered. `impl<T: ToJ> ToJ for Vec<T>` is a parse error (impl blocks take
+// no type parameters of their own) and `impl ToJ for Vec<i64>` parses but the method is
+// never found (builtin container methods do not consult user trait impls). So a userland
+// codec covers structs of primitives and nested structs, and the built-in derive stays for
+// containers, narrow-int range checks and wire renames. See backlog Tier 2.
+// @expect: {"id":7,"name":"x","ok":true,"sub":{"n":3}}
+
+trait ToJ {
+    fn toJ(self: &Self): string
+}
+
+impl ToJ for i64 {
+    fn toJ(self: &Self): string {
+        return $"{self}"
+    }
+}
+
+impl ToJ for bool {
+    fn toJ(self: &Self): string {
+        if self {
+            return "true"
+        }
+        return "false"
+    }
+}
+
+impl ToJ for string {
+    fn toJ(self: &Self): string {
+        return $"\"{self}\""
+    }
+}
+
+derive ToJ {
+    fn toJ(self: &Self): string {
+        var out = "{"
+        @fields {
+            if @index > 0 {
+                out.pushStr(",")
+            }
+            out.pushStr($"\"@name\":")
+            out.pushStr(self.@name.toJ())
+        }
+        return out + "}"
+    }
+}
+
+@derive(ToJ)
+struct Inner {
+    n: i64,
+}
+
+@derive(ToJ)
+struct Outer {
+    id: i64, name: string, ok: bool, sub: Inner,
+}
+
+fn main() {
+    let o = Outer {
+        id: 7, name: "x", ok: true, sub: Inner {
+            n: 3
+        }
+    }
+    print(o.toJ())
+}

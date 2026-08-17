@@ -10,6 +10,7 @@ import { checkVisibility } from "./visibility";
 import { countCSigParams } from "./csig";
 import { memberHint, closest, importHint, stdExportNames, VEC_MEMBERS, HASHMAP_MEMBERS, STRING_MEMBERS, OPTION_MEMBERS, RESULT_MEMBERS, INT_MEMBERS, FLOAT_MEMBERS, BOOL_MEMBERS } from "./suggest";
 import { deriveJsonSource, type JsonPlan, type JsonFieldPlan } from "./derive-json";
+import { expandDeriveTemplate, dumpTokens, DeriveTemplateError } from "./derive-template";
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
 import { basename } from "path";
@@ -1253,7 +1254,7 @@ export class TypeChecker {
         if (attr.name !== "derive") continue;
         for (const traitName of attr.args) {
           const impl = this.synthesizeDeriveImpl(decl, traitName);
-          if (impl) this.registerImpl(impl, { structs: [], enums: [], functions: [], imports: [], traits: [], impls: [], typeAliases: [], interfaces: [], globals: [] }, this._pendingImplFns);
+          if (impl) this.registerImpl(impl, { structs: [], enums: [], functions: [], imports: [], traits: [], impls: [], typeAliases: [], interfaces: [], globals: [], deriveTemplates: [] }, this._pendingImplFns);
         }
       }
     }
@@ -2229,6 +2230,23 @@ export class TypeChecker {
   private processDerives(program: Program): import("./ast").ImplDecl[] {
     const result: import("./ast").ImplDecl[] = [];
     const explicitEq = new Set<string>();
+    for (const tpl of program.deriveTemplates ?? []) {
+      // A template may not take a built-in's name. Silently losing to `Eq` would make a
+      // package's derive a no-op that still type-checks, which is the worst failure a
+      // plugin point can have.
+      if (tpl.name === "Eq" || tpl.name === "Json") {
+        this.error(`'derive ${tpl.name}' collides with the built-in @derive(${tpl.name})`, tpl.span,
+          `rename the template — a user derive cannot replace a built-in one`);
+        continue;
+      }
+      const prev = this.deriveTemplates.get(tpl.name);
+      if (prev && prev !== tpl) {
+        this.error(`'derive ${tpl.name}' is declared twice`, tpl.span,
+          `two modules in this program each define a derive named '${tpl.name}'; rename one`);
+        continue;
+      }
+      this.deriveTemplates.set(tpl.name, tpl);
+    }
     // Derives run before impls are registered, so the user's own methods are not
     // in `this.functions` yet — read them off the AST.
     for (const im of program.impls) {
@@ -2302,9 +2320,48 @@ export class TypeChecker {
   private synthesizeDeriveImpl(s: import("./ast").StructDecl, traitName: string): import("./ast").ImplDecl | null {
     if (traitName === "Eq") return this.deriveEq(s);
     if (traitName === "Json") return this.deriveJson(s);
-    this.error(`cannot derive '${traitName}' — only Eq and Json are supported`, s.span);
+    const tpl = this.deriveTemplates.get(traitName);
+    if (tpl) {
+      // Same one-bit visibility every other declaration has. Without it a template that a
+      // module never exported is still reachable from every file in the program, which is
+      // the opposite of the rule `pub` states everywhere else.
+      if (!tpl.isPub && tpl.span?.file && s.span?.file && tpl.span.file !== s.span.file) {
+        this.error(`'derive ${traitName}' is private to ${tpl.span.file}`, s.span,
+          `mark it 'pub derive ${traitName} { … }' to let other modules derive it`);
+        return null;
+      }
+      return this.expandUserDerive(s, tpl);
+    }
+    const known = ["Eq", "Json", ...this.deriveTemplates.keys()];
+    this.error(`cannot derive '${traitName}' — no built-in derive and no 'derive ${traitName} { … }' template is in scope`, s.span,
+      `available: ${known.map(k => `'${k}'`).join(", ")}. A user-defined derive is a top-level 'derive ${traitName} { … }' block; import the module that declares it`);
     return null;
   }
+
+  // `derive <Trait> { … }` written by a user, expanded for one struct. Failures are
+  // reported against the STRUCT rather than the template: the struct is what selected
+  // this expansion, and it is the half the author of the failing program controls.
+  private expandUserDerive(s: import("./ast").StructDecl, tpl: import("./ast").DeriveTemplate): import("./ast").ImplDecl | null {
+    try {
+      const impl = expandDeriveTemplate(tpl, s, s.span);
+      if (process.env.MILO_DUMP_DERIVES) {
+        process.stderr.write(`// derive ${tpl.name} for ${s.name}\n${dumpTokens(tpl.body)}\n`);
+      }
+      return this.stampOrigin(impl, s);
+    } catch (e) {
+      const msg = e instanceof DeriveTemplateError ? e.message
+        : e instanceof Error ? e.message : String(e);
+      const hint = e instanceof DeriveTemplateError ? e.hint
+        : `set MILO_DUMP_DERIVES=1 to print what 'derive ${tpl.name}' generated`;
+      this.error(`@derive(${tpl.name}) on '${s.name}': ${msg}`, s.span, hint);
+      return null;
+    }
+  }
+
+  // Templates in scope, by trait name. Filled per program in `processDerives` — a derive
+  // reaches this compilation only by being declared in a file the resolver merged, which
+  // is what makes a derive shippable in a package.
+  private deriveTemplates = new Map<string, import("./ast").DeriveTemplate>();
 
   // A synthesized method has no source of its own, so it inherits the struct's file.
   // Without this it reaches the HIR with no origin at all: invisible to DWARF (what the

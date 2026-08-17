@@ -7,6 +7,7 @@ import type {
   MiloType, Param, Expr, Stmt, Function, Program, StructDecl, StructField,
   EnumDecl, EnumVariant, Pattern, MatchArm, Span, ImportDecl, CastExpr,
   TraitDecl, TraitMethod, ImplDecl, Attribute, TypeAlias, InterfaceDecl, GlobalDecl,
+  DeriveTemplate,
 } from "./ast";
 
 export class Parser {
@@ -78,7 +79,7 @@ export class Parser {
       case TokenKind.Var: case TokenKind.Unsafe: case TokenKind.Import:
         return true;
       case TokenKind.Ident:
-        return t.value === "thread_local" || t.value === "from";
+        return t.value === "thread_local" || t.value === "from" || t.value === "derive";
       default:
         return false;
     }
@@ -127,6 +128,7 @@ export class Parser {
     const typeAliases: TypeAlias[] = [];
     const interfaces: InterfaceDecl[] = [];
     const globals: GlobalDecl[] = [];
+    const deriveTemplates: DeriveTemplate[] = [];
     while (!this.at(TokenKind.Eof)) {
       // trailing ';' after a top-level decl is a cosmetic no-op (see parseStmts)
       if (this.match(TokenKind.Semicolon)) continue;
@@ -209,6 +211,13 @@ export class Parser {
         if (attrs) g.attributes = attrs;
         g.isPub = !!pubTok;
         globals.push(g);
+      } else if (this.atSoftKw("derive")
+                 && this.peekN(1).kind === TokenKind.Ident && this.peekN(2).kind === TokenKind.LBrace) {
+        // Contextual, not a keyword: `derive` stays a legal identifier, and the three-token
+        // lookahead is what distinguishes the declaration from `derive(x)` or `let derive = …`.
+        const d = this.parseDeriveTemplate();
+        d.isPub = !!pubTok;
+        deriveTemplates.push(d);
       } else if (this.at(TokenKind.Ident) && this.peek().value === "thread_local") {
         const g = this.parseGlobalDecl();
         if (attrs) g.attributes = attrs;
@@ -230,7 +239,7 @@ export class Parser {
     if (this.moduleWrapping) {
       for (const f of functions) if (!f.isExtern) f.fromWrappingModule = true;
     }
-    return { structs, enums, functions, imports, traits, impls, typeAliases, interfaces, globals, ...(this.moduleWrapping && { moduleWrapping: true }) };
+    return { structs, enums, functions, imports, traits, impls, typeAliases, interfaces, globals, deriveTemplates, ...(this.moduleWrapping && { moduleWrapping: true }) };
   }
 
   private parseImport(): ImportDecl {
@@ -632,6 +641,36 @@ export class Parser {
     }
     args.push(this.expect(TokenKind.Ident).value);
     argKinds.push("ident");
+  }
+
+  // `derive <Trait> { <impl methods> }` — a user-defined `@derive(Trait)`.
+  //
+  // The body is captured as TOKENS and never parsed here. A template is not code: `@name`
+  // in expression position has no meaning until a field name is substituted for it, so
+  // parsing it eagerly could only fail. Brace depth is counted over LBrace/RBrace tokens,
+  // which is exact — an interpolated string is ONE token, so a `{` inside it cannot
+  // unbalance the scan.
+  private parseDeriveTemplate(): DeriveTemplate {
+    const kw = this.advance(); // `derive`
+    const nameTok = this.expect(TokenKind.Ident);
+    const open = this.expect(TokenKind.LBrace);
+    const body: Token[] = [];
+    let depth = 1;
+    while (true) {
+      if (this.at(TokenKind.Eof)) {
+        this.error(`unterminated 'derive ${nameTok.value}' block — no matching '}'`, open);
+      }
+      if (this.at(TokenKind.LBrace)) depth++;
+      else if (this.at(TokenKind.RBrace)) {
+        depth--;
+        if (depth === 0) { this.advance(); break; }
+      }
+      body.push(this.advance());
+    }
+    return {
+      kind: "DeriveTemplate", name: nameTok.value, body,
+      span: { line: kw.line, col: kw.col, file: this.filePath },
+    };
   }
 
   private parseTraitDecl(): TraitDecl {

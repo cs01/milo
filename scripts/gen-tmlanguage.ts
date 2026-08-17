@@ -36,7 +36,7 @@ const SCOPES: { scope: string; words: string[] }[] = [
   { scope: "keyword.other.contract.milo", words: ["requires", "ensures", "invariant", "decreases"] },
   { scope: "storage.type.fn.milo", words: ["fn"] },
   { scope: "storage.modifier.milo", words: ["let", "var", "mut", "move", "extern", "pub", "impl", "thread_local"] },
-  { scope: "keyword.declaration.milo", words: ["struct", "enum", "interface", "trait", "type"] },
+  { scope: "keyword.declaration.milo", words: ["struct", "enum", "interface", "trait", "type", "derive"] },
   { scope: "keyword.operator.cast.milo", words: ["as", "is"] },
   // Painted as constants rather than keywords — a theme colours a literal, not a verb.
   { scope: "constant.language.milo", words: ["true", "false", "null"] },

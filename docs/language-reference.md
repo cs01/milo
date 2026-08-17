@@ -1965,6 +1965,57 @@ struct Config { host: string, port: i32 }
 `fromJsonNode` — see [JSON Serialization](#json-serialization). They compose:
 `@derive(Eq, Json)`.
 
+### Writing your own derive
+
+`derive <Trait> { … }` declares the impl body a `@derive(Trait)` expands to, so a derive
+ships in a library instead of in the compiler:
+
+```milo
+pub trait Describe { fn describe(self: &Self): string }
+
+pub derive Describe {
+    fn describe(self: &Self): string {
+        var out = "@Self("
+        @fields {
+            out.pushStr($"@name=@{self.@name} ")
+        }
+        return out + ")"
+    }
+}
+
+@derive(Describe)
+struct Point { x: i64, y: i64 }
+```
+
+The body is a template, not code. It is expanded per struct by substitution and the result
+is handed to the ordinary parser, so a derive can produce nothing you could not have typed
+by hand, and the generated code is bound by the same checker rules.
+
+| Hole | Substitutes |
+|---|---|
+| `@Self` | the struct's name, as an identifier |
+| `@SelfStr` | the struct's name, as a string literal |
+| `@count` | the number of fields, as an integer literal |
+| `@fields { … }` | repeats the block once per field |
+| `@name` | the field's name, as an identifier — inside `@fields` only |
+| `@nameStr` | the field's name, as a string literal |
+| `@type` | the field's written type |
+| `@typeStr` | the field's written type, as a string literal |
+| `@index` | the field's position, as an integer literal |
+| `@@` | a literal `@` |
+
+Holes also substitute inside string and f-string literals, which is what makes a template
+readable. A field hole outside `@fields` is an error rather than an empty string.
+
+`@fields` is the only control construct, and it repeats over a list the struct declaration
+fixes, so expansion always terminates — this is deliberately a template mechanism and not
+a macro system. Nesting `@fields` inside `@fields` is an error, a template may not take a
+built-in derive's name (`Eq`, `Json`), and a derive is private to its file unless marked
+`pub`.
+
+Generic structs are not supported: `@derive` skips a struct with type parameters, built-in
+or user-defined.
+
 ---
 
 ## Interfaces (Runtime Polymorphism)

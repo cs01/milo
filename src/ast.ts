@@ -260,6 +260,21 @@ export interface ImplDecl {
   span?: Span;
 }
 
+// A user-defined `@derive(Name)`. The body is captured as a raw TOKEN slice rather than
+// parsed: it is a template, not code, and `@name` in expression position is not a valid
+// expression until a field name has been substituted for it. Expansion re-runs the parser
+// over the substituted tokens, so a template is bound by exactly the same grammar and the
+// same checker rules as hand-written code — the property `@derive(Json)` already has for
+// emitting source (see src/derive-json.ts), kept here so a third-party derive cannot
+// produce something a user could not have typed.
+export interface DeriveTemplate {
+  kind: "DeriveTemplate";
+  name: string;              // the trait the generated impl implements
+  body: import("./tokens").Token[]; // impl-block contents, braces excluded
+  span?: Span;
+  isPub?: boolean;
+}
+
 export interface InterfaceDecl {
   kind: "InterfaceDecl";
   name: string;
@@ -310,6 +325,7 @@ export interface Program {
   typeAliases: TypeAlias[];
   interfaces: InterfaceDecl[];
   globals: GlobalDecl[];
+  deriveTemplates: DeriveTemplate[];
   // File-level `@!wrapping` directive: the whole module is modular arithmetic. The parser
   // stamps `fromWrappingModule` on the file's own fns; this flag is kept so the formatter
   // can reprint the directive.

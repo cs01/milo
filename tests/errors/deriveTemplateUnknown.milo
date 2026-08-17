@@ -1,0 +1,14 @@
+// A `@derive` naming nothing — no built-in and no template in scope. The diagnostic lists
+// what IS available, because a user-defined derive has no other reference: it is not in
+// the compiler, so there is nothing to grep.
+// @error: cannot derive 'Describe'
+
+@derive(Describe)
+struct Point {
+    x: i64,
+}
+
+fn main() {
+    let p = Point { x: 1 }
+    print(p.x)
+}

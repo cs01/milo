@@ -27,6 +27,7 @@ function resolveImportsPlayground(program: Program): Program {
   const typeAliases: typeof program.typeAliases = [];
   const interfaces: typeof program.interfaces = [];
   const globals: typeof program.globals = [];
+  const deriveTemplates: typeof program.deriveTemplates = [];
 
   function processImports(prog: Program) {
     for (const imp of prog.imports) {
@@ -67,6 +68,8 @@ function resolveImportsPlayground(program: Program): Program {
       typeAliases.push(...imported.typeAliases);
       interfaces.push(...imported.interfaces);
       globals.push(...imported.globals);
+  deriveTemplates.push(...imported.deriveTemplates);
+    deriveTemplates.push(...imported.deriveTemplates);
       processImports(imported);
     }
   }
@@ -84,6 +87,8 @@ function resolveImportsPlayground(program: Program): Program {
     typeAliases.push(...prelude.typeAliases);
     interfaces.push(...prelude.interfaces);
     globals.push(...prelude.globals);
+  deriveTemplates.push(...prelude.deriveTemplates);
+    deriveTemplates.push(...prelude.deriveTemplates);
     processImports(prelude);
   }
 
@@ -95,6 +100,7 @@ function resolveImportsPlayground(program: Program): Program {
   typeAliases.push(...program.typeAliases);
   interfaces.push(...program.interfaces);
   globals.push(...program.globals);
+  deriveTemplates.push(...program.deriveTemplates);
   processImports(program);
 
   function dedup<T extends { name: string }>(arr: T[]): T[] {
@@ -109,7 +115,7 @@ function resolveImportsPlayground(program: Program): Program {
     return result;
   }
 
-  return { structs: dedup(structs), enums: dedup(enums), functions: dedup(functions), imports: [], traits: dedup(traits), impls, typeAliases: dedup(typeAliases), interfaces: dedup(interfaces), globals };
+  return { structs: dedup(structs), enums: dedup(enums), functions: dedup(functions), imports: [], traits: dedup(traits), impls, typeAliases: dedup(typeAliases), interfaces: dedup(interfaces), globals, deriveTemplates: dedup(deriveTemplates) };
 }
 
 export interface CompileResult {

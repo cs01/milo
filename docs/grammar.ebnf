@@ -16,8 +16,22 @@ program     = { attribute | declaration } ;
 
 declaration = import_decl
             | [ "pub" ] ( struct_decl | enum_decl | fn_decl | extern_decl
-                        | trait_decl | interface_decl | type_alias | global_decl )
+                        | trait_decl | interface_decl | type_alias | global_decl
+                        | derive_decl )
             | impl_decl ;
+
+(* ── User-defined derives ── *)
+(* `derive Trait { … }` declares the body a `@derive(Trait)` expands to. The body is NOT
+   parsed here: it is a template, and a hole like the field-name one is not an expression
+   until a field name has been substituted for it, so the parser only balances braces. The
+   holes are `@Self`, `@SelfStr`, `@count`, and — inside a `@fields { … }` repetition —
+   `@name`, `@nameStr`, `@type`, `@typeStr`, `@index`; each also substitutes inside a
+   string or f-string literal. After substitution the result must parse as the body of an
+   `impl Trait for Struct` block, so a template can express nothing hand-written code
+   cannot. `@fields` is the only control construct and repeats over a list whose length the
+   struct declaration fixes, so expansion always terminates. *)
+derive_decl = "derive" IDENT "{" balanced_tokens "}" ;
+balanced_tokens = { TOKEN | "{" balanced_tokens "}" } ;
 
 (* ── Imports ── *)
 (* There is no glob form and no bare `import "path"`; the resolver picks a platform arm

@@ -145,10 +145,10 @@ function stripLiterals(line: string): string {
     .replace(/\/\/.*$/, "");
 }
 
-const ITEM_START = /^(from |import |extern |fn |struct |enum |impl |unsafe impl |trait |interface |type |@)/;
+const ITEM_START = /^(pub )?(from |import |extern |fn |struct |enum |impl |unsafe impl |trait |interface |type |derive |@)/;
 // item kinds that always have a `{...}` body — their opening brace may be on a
 // later line (e.g. fn signatures with requires/ensures clauses)
-const NEEDS_BODY = /^(fn |struct |enum |impl |unsafe impl |trait |interface )/;
+const NEEDS_BODY = /^(pub )?(fn |struct |enum |impl |unsafe impl |trait |interface |derive )/;
 
 // Fragments (no fn main) are split into top-level items and loose statements;
 // statements get wrapped in a synthetic main. Doc order is preserved within each group.

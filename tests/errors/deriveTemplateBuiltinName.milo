@@ -1,0 +1,12 @@
+// A template may not take a built-in derive's name. Letting it lose silently to `Eq` would
+// make a package's derive a no-op that still type-checks — the worst failure an extension
+// point can have, because nothing anywhere reports it.
+// @error: collides with the built-in @derive(Eq)
+
+derive Eq {
+    fn eq(self: &Self, other: &Self): bool { return true }
+}
+
+fn main() {
+    print(1)
+}

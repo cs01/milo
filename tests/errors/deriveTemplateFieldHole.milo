@@ -1,0 +1,20 @@
+// `@name` names a field, so it only means something inside the repetition that supplies
+// one. Rejecting is the point: the alternative — substituting an empty string — produces
+// code the user never wrote, failing somewhere it cannot be read.
+// @error: it is not inside a '@fields { … }' block
+
+trait Describe { fn describe(self: &Self): string }
+
+derive Describe {
+    fn describe(self: &Self): string { return "@name" }
+}
+
+@derive(Describe)
+struct Point {
+    x: i64,
+}
+
+fn main() {
+    let p = Point { x: 1 }
+    print(p.describe())
+}

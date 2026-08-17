@@ -2,6 +2,7 @@
 // Speaks LSP over JSON-RPC/stdio. Provides diagnostics, hover, go-to-definition.
 
 import { Lexer } from "./lexer";
+import { formatMiloType } from "./derive-template";
 import { Parser } from "./parser";
 import { TypeChecker, type CheckResult } from "./checker";
 import { BUILTIN_MEMBERS, memberDetail, type BuiltinMember, type BuiltinReceiver } from "./builtin-members";
@@ -118,25 +119,6 @@ function inferLiteralType(expr: Expr): string | null {
 
 // ── Type formatting ──
 
-function formatMiloType(t: import("./ast").MiloType): string {
-  if (t.isFn && t.fnParams && t.fnRet) {
-    return `(${t.fnParams.map(formatMiloType).join(", ")}) => ${formatMiloType(t.fnRet)}`;
-  }
-  let base = t.name;
-  if (t.rangeMin !== undefined && t.rangeMax !== undefined) {
-    base += `(${t.rangeMin}..${t.rangeMax})`;
-  }
-  if (t.typeArgs?.length) {
-    base += `<${t.typeArgs.map(formatMiloType).join(", ")}>`;
-  }
-  if (t.isArray) {
-    return t.arraySize !== null ? `[${base}; ${t.arraySize}]` : `[${base}]`;
-  }
-  if (t.isRef) return `&${base}`;
-  if (t.isRefMut) return `&mut ${base}`;
-  if (t.isPtr) return `${"*".repeat(t.ptrDepth ?? 1)}${base}`;
-  return base;
-}
 
 // ── Visibility markers for declaration hovers ──
 // Declarations are file-private by default; `pub` exports them (importable from

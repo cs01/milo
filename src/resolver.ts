@@ -164,6 +164,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   const typeAliases: typeof program.typeAliases = [];
   const interfaces: typeof program.interfaces = [];
   const globals: typeof program.globals = [];
+  const deriveTemplates: typeof program.deriveTemplates = [];
 
   const deps = findManifest(sourceDir);
 
@@ -544,6 +545,7 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
     typeAliases.push(...u.prog.typeAliases);
     interfaces.push(...u.prog.interfaces);
     globals.push(...u.prog.globals);
+    deriveTemplates.push(...u.prog.deriveTemplates);
   }
 
   // Same-name top-level fns collapse in the flat namespace: dedup (below) keeps
@@ -716,5 +718,5 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   // the separate arrays above), so its impls are the user's own.
   const userImplKeys = new Set<string>();
   for (const impl of program.impls) for (const m of impl.methods) userImplKeys.add(`${impl.typeName}.${m.name}`);
-  return { structs: dedup(structs), enums: dedup(enums), functions: dedup(functions), imports: [], traits: dedup(traits), impls, typeAliases: dedup(typeAliases), interfaces: dedup(interfaces), globals: dedup(globals), declOrigins, packageNames, userFnNames, userImplKeys, entryFile: entryFile ?? undefined, unusedImports, shadowedStdlib };
+  return { structs: dedup(structs), enums: dedup(enums), functions: dedup(functions), imports: [], traits: dedup(traits), impls, typeAliases: dedup(typeAliases), interfaces: dedup(interfaces), globals: dedup(globals), deriveTemplates: dedup(deriveTemplates), declOrigins, packageNames, userFnNames, userImplKeys, entryFile: entryFile ?? undefined, unusedImports, shadowedStdlib };
 }

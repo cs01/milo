@@ -110,7 +110,7 @@
         },
         {
           "name": "keyword.declaration.milo",
-          "match": "\\b(struct|enum|interface|trait|type)\\b"
+          "match": "\\b(struct|enum|interface|trait|type|derive)\\b"
         },
         {
           "name": "keyword.operator.cast.milo",

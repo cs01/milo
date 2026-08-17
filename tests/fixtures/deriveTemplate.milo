@@ -1,0 +1,48 @@
+// A user-defined `@derive(Trait)`. The generator is written in Milo, not in the compiler:
+// `@derive(Json)` is 366 lines of TypeScript, which makes every new derive a compiler PR,
+// and this is the extension point that removes that.
+//
+// Every hole is exercised: `@Self`/`@SelfStr` outside the repetition, `@count` (the field
+// count as an integer literal), and inside `@fields` the field's name, its name as a
+// string, its written type, its type as a string, and its index. Each also substitutes
+// inside a string or f-string, which is what makes a template readable.
+// @expect: Point<3>: x:i64=1 y:i64=2 label:string=here
+// @expect: Point x,y,label
+
+trait Describe {
+    fn describe(self: &Self): string
+    fn fieldList(self: &Self): string
+}
+
+derive Describe {
+    fn describe(self: &Self): string {
+        var out = "@Self<@count>:"
+        @fields {
+            out.pushStr($" @name:@typeStr={self.@name}")
+        }
+        return out
+    }
+
+    fn fieldList(self: &Self): string {
+        var names: Vec<string> = Vec.new()
+        @fields {
+            names.push("@name")
+        }
+        return @SelfStr + " " + names.join(",")
+    }
+}
+
+@derive(Describe)
+struct Point {
+    x: i64,
+    y: i64,
+    label: string,
+}
+
+fn main() {
+    let p = Point {
+        x: 1, y: 2, label: "here"
+    }
+    print(p.describe())
+    print(p.fieldList())
+}

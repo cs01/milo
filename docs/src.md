@@ -34,6 +34,7 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 | `src/codegen.ts` | HIR -> LLVM IR emission, including drop glue, monomorphization and the per-target calling conventions. |
 | `src/csig.ts` | Parsing for the C signature text in `@cSig("<header>", "<signature>")`. |
 | `src/derive-json.ts` | @derive(Json) — generates `toJson` / `fromJson` / `fromJsonNode` for a struct. |
+| `src/derive-template.ts` | User-defined `@derive(Trait)` — the template mechanism that lets a derive ship in a package instead of a compiler PR. |
 | `src/diagnostics.ts` | Elm-style error formatting: source context, carets and severity, shared by the CLI and the LSP so a message reads the same in a terminal and an editor. |
 | `src/fmtbin.ts` | Resolves the one milo-fmt binary that every formatter entry point shells out to (`milo fmt`, the LSP's textDocument/formatting handler, the pre-commit hook). |
 | `src/headergen.ts` | C header generator for `milo build-lib`. |

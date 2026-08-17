@@ -124,5 +124,5 @@ export const KEYWORDS = new Set([
 // tests/tmLanguage.test.ts holds this list to what the parser actually looks for, so
 // the editor grammar generated from it cannot drift.
 export const SOFT_KEYWORDS = new Set([
-  "from", "in", "pub", "thread_local",
+  "derive", "from", "in", "pub", "thread_local",
 ]);

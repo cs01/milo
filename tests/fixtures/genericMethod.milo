@@ -1,0 +1,52 @@
+// A method carrying its OWN type parameter — one not on the type it is implemented for.
+//
+// This did not work at all: impl methods are monomorphized eagerly when the STRUCT is
+// instantiated, substituting only the struct's parameters, so a method-level `R` survived
+// as a literal type name and `resolveMethod` handed back a signature mentioning it. The
+// call reported `expected (&i64) => R, got (&i64) => i64` — naming a type nobody declared.
+//
+// Now the method is kept as a template and instantiated per call, the same lifecycle a
+// generic free function gets. Two different `R` for one method are two functions, which is
+// what the two calls below prove. Note both levels compose: `Box<T>` is already concrete
+// in `T` (eagerly) and generic only in `R` (lazily) by the time the call site is reached.
+//
+// It also needed the structural unifier to descend into FUNCTION types, which it never
+// did — that arm is why a callback can carry a type parameter at all.
+// @expect: 42
+// @expect: v=21
+// @expect: 7
+
+struct Box<T> {
+    v: T,
+}
+
+impl Box<T> {
+    fn map<R>(self: &Self, f: (&T) => R): R {
+        return f(self.v)
+    }
+}
+
+struct Plain {
+    n: i64,
+}
+
+impl Plain {
+    // The same thing on a NON-generic type: the template path must not depend on the
+    // receiver being generic.
+    fn pick<R>(self: &Self, f: (&i64) => R): R {
+        return f(self.n)
+    }
+}
+
+fn main() {
+    let b = Box {
+        v: 21
+    }
+    print(b.map((x: &i64): i64 => x * 2))
+    print(b.map((x: &i64): string => $"v={x}"))
+
+    let p = Plain {
+        n: 7
+    }
+    print(p.pick((n: &i64): i64 => n))
+}

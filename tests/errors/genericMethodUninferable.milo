@@ -1,0 +1,21 @@
+// A method type parameter nothing fixes. `R` appears only in the return type, no argument
+// mentions it, and the call's result is discarded — so there is no concrete type to
+// instantiate with. Rejecting names what would have to change; the alternative is picking
+// a type the program never asked for.
+// @error: cannot infer 'R' for 'Holder.make'
+
+struct Holder {
+    n: i64,
+}
+
+impl Holder {
+    fn make<R>(self: &Self): R {
+        return zeroed<R>()
+    }
+}
+
+fn main() {
+    let h = Holder { n: 1 }
+    h.make()
+    print(h.n)
+}

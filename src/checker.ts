@@ -415,6 +415,17 @@ export class TypeChecker {
   private traitImpls = new Map<string, ImplInfo[]>();
   private inherentImpls = new Map<string, ImplInfo>();
   private genericImpls = new Map<string, { impl: import("./ast").ImplDecl; program: Program }[]>();
+  // Methods carrying their OWN type parameters (`fn map<R>(…)`), keyed `Type$method`.
+  //
+  // These cannot be registered as a concrete signature the way every other method is: `R`
+  // is not known until a call site supplies it, and resolving it eagerly produced a
+  // signature mentioning a struct type literally named "R" — which is why
+  // `b.map((x: &i64): i64 => x * 2)` used to report *"expected (&i64) => R, got
+  // (&i64) => i64"*. So the declaration is kept as a template and instantiated per call,
+  // the same lifecycle `monomorphizeFn` gives a generic free function. The struct's own
+  // parameters are still substituted eagerly in `monomorphizeStruct`, so a method on
+  // `Arena<T>` arrives here already concrete in `T` and generic only in `R`.
+  private genericMethods = new Map<string, { decl: Function; owner: string }>();
   private _pendingImplFns: Function[] = [];
   // Trait bounds on a generic STRUCT's type params, checked after every impl has
   // registered. A struct is monomorphized as soon as a field mentions it, which can
@@ -1394,6 +1405,76 @@ export class TypeChecker {
 
     return mangled;
     } finally { this.monoDepth--; }
+  }
+
+  // Instantiate a method that carries its own type parameters, for one concrete argument
+  // list. Mirrors `monomorphizeFn`: substitute, register the concrete signature so the body
+  // and any recursive call can be checked, then check it. The mangled name is what codegen
+  // emits, so two instantiations of `map<R>` are two functions, exactly as two
+  // instantiations of a generic free fn are.
+  private monomorphizeMethod(key: string, typeArgs: TypeKind[]): string | null {
+    const tpl = this.genericMethods.get(key);
+    if (!tpl) return null;
+    const names = (tpl.decl.typeParams ?? []).map(t => t.name);
+    const mangled = `${key}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
+    if (this.functions.has(mangled)) return mangled;
+
+    if (this.monoDepth >= TypeChecker.MAX_MONO_DEPTH) {
+      if (!this.monoDepthErrored) {
+        this.monoDepthErrored = true;
+        this.error(`generic instantiation exceeded depth ${TypeChecker.MAX_MONO_DEPTH} while monomorphizing '${key}'`);
+      }
+      this.functions.set(mangled, { params: [], ret: { tag: "unknown" }, variadic: false });
+      return mangled;
+    }
+    this.monoDepth++;
+    try {
+      for (let i = 0; i < (tpl.decl.typeParams ?? []).length; i++) {
+        for (const bound of tpl.decl.typeParams![i]!.bounds) {
+          if (!this.typeImplementsTrait(typeName(typeArgs[i]!), bound)) {
+            this.error(`type '${typeName(typeArgs[i]!)}' does not implement trait '${bound}'`);
+          }
+        }
+      }
+      const concrete: Function = {
+        ...tpl.decl,
+        name: mangled,
+        typeParams: [],
+        params: tpl.decl.params.map(p => ({
+          name: p.name,
+          type: this.substituteMiloType(declaredType(p), names, typeArgs),
+        })),
+        retType: this.substituteMiloType(tpl.decl.retType, names, typeArgs),
+        body: this.substituteBody(tpl.decl.body, names, typeArgs),
+      };
+      const params = concrete.params.map(p => ({ type: this.resolve(declaredType(p)), name: p.name }));
+      const ret = this.resolve(concrete.retType);
+      this.functions.set(mangled, { params, ret, variadic: false });
+      this.monomorphizedFns.push(concrete);
+      this.checkFunction(concrete);
+      return mangled;
+    } finally { this.monoDepth--; }
+  }
+
+  // Work out a generic method's own type arguments from the call. Each parameter's
+  // declared type is unified structurally against the argument's actual type — the same
+  // `inferTypeParamsFromHint` a generic free-function call uses — and the return hint
+  // supplies any parameter no argument mentions.
+  private inferMethodTypeArgs(key: string, expr: Extract<Expr, { kind: "MethodCall" }>): TypeKind[] | null {
+    const tpl = must(this.genericMethods, key, "generic methods");
+    const names = (tpl.decl.typeParams ?? []).map(t => t.name);
+    const typeMap = new Map<string, TypeKind>();
+    // +1 on the declared side: the template still carries `self` as its first parameter.
+    for (let i = 0; i < expr.args.length; i++) {
+      const declared = tpl.decl.params[i + 1];
+      if (!declared) break;
+      const argType = this.checkExpr(expr.args[i]!);
+      if (argType.tag === "unknown") return null;
+      this.inferTypeParamsFromHint(declaredType(declared), argType, names, typeMap);
+    }
+    if (this.returnHint) this.inferTypeParamsFromHint(tpl.decl.retType, this.returnHint, names, typeMap);
+    if (names.some(n => !typeMap.has(n))) return null;
+    return names.map(n => must(typeMap, n, "method type map"));
   }
 
   private substituteBody(stmts: Stmt[], typeParams: string[], typeArgs: TypeKind[], baseName?: string, mangledName?: string): Stmt[] {
@@ -3756,6 +3837,13 @@ export class TypeChecker {
             params: m.params.map(p => ({ name: p.name, type: this.substituteSelfInMiloType(declaredType(p), typeName) })),
             retType: this.substituteSelfInMiloType(m.retType, typeName),
           };
+          // A method with its own type parameters is a template, not a signature. Checking
+          // its body here would type `R` as a struct nobody declared; the call site
+          // instantiates it instead.
+          if (m.typeParams && m.typeParams.length > 0) {
+            this.genericMethods.set(mangled, { decl: concreteFn, owner: typeName });
+            continue;
+          }
           const params = concreteFn.params.map(p => ({ type: this.resolve(declaredType(p)), name: p.name }));
           const ret = this.resolve(concreteFn.retType);
           this.functions.set(mangled, { params, ret, variadic: false });
@@ -5184,6 +5272,18 @@ export class TypeChecker {
     // caller's per-field re-check, so we don't need to diagnose it here.
     if (typeParams.includes(retType.name) && !retType.typeArgs?.length) {
       if (!typeMap.has(retType.name)) typeMap.set(retType.name, hint);
+      return;
+    }
+    // A function type: unify parameter against parameter and result against result. Without
+    // this arm a callback could not carry a type parameter at all — `fn map<R>(f: (&T) => R)`
+    // handed `(x: &i64): i64 => …` bound nothing, so `R` stayed unresolved and the call
+    // reported "expected (&i64) => R, got (&i64) => i64", naming a type nobody declared.
+    if (retType.isFn && retType.fnParams && retType.fnRet && hint.tag === "fn") {
+      for (let i = 0; i < retType.fnParams.length && i < hint.params.length; i++) {
+        const p = hint.params[i]!;
+        this.inferTypeParamsFromHint(retType.fnParams[i]!, p.tag === "ref" ? p.inner : p, typeParams, typeMap);
+      }
+      this.inferTypeParamsFromHint(retType.fnRet, hint.ret, typeParams, typeMap);
       return;
     }
     // Recurse through the built-in generic containers so `Vec<T>` / `[T]` fields infer T
@@ -8937,6 +9037,47 @@ export class TypeChecker {
       }
     }
     const objTName = typeName(bareObjType);
+    // A method carrying its own type parameters is instantiated here, before the ordinary
+    // resolution path: until a call supplies them there is no signature to resolve against.
+    const genericKey = `${objTName}$${expr.method}`;
+    if (this.genericMethods.has(genericKey)) {
+      const typeArgs = this.inferMethodTypeArgs(genericKey, expr);
+      if (!typeArgs) {
+        const tpl = must(this.genericMethods, genericKey, "generic methods");
+        const unresolved = (tpl.decl.typeParams ?? []).map(t => `'${t.name}'`).join(", ");
+        this.error(`cannot infer ${unresolved} for '${objTName}.${expr.method}'`, sp,
+          `nothing in the arguments or the expected return type fixes it — annotate the call's result, or the closure's return type`);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      const mangled = this.monomorphizeMethod(genericKey, typeArgs);
+      if (mangled) {
+        const sig = must(this.functions, mangled, "monomorphized method");
+        const selfParam = sig.params[0];
+        if (selfParam?.type.tag === "ref") {
+          if (selfParam.type.mutable) this.errorIfFrozen(expr.object, `call '${expr.method}' on`, sp);
+          this.autoBorrowed.set(expr.object, { mutable: selfParam.type.mutable });
+        } else {
+          this.tryMove(expr.object);
+        }
+        if (expr.args.length !== sig.params.length - 1) {
+          this.error(`'${expr.method}' expects ${sig.params.length - 1} argument(s), got ${expr.args.length}`, sp);
+        }
+        for (let i = 0; i < expr.args.length; i++) {
+          const expected = sig.params[i + 1];
+          if (!expected) break;
+          const bare = expected.type.tag === "ref" ? expected.type.inner : expected.type;
+          const argType = this.checkExprWithHint(expr.args[i]!, bare);
+          if (!typeEq(bare, argType) && argType.tag !== "unknown") {
+            this.error(`'${expr.method}' argument ${i + 1}: expected ${typeName(bare)}, got ${typeName(argType)}`, expr.args[i]!.span);
+          }
+          if (expected.type.tag === "ref") this.setAutoBorrowChecked(expr.args[i]!, expected.type.mutable, sp);
+          else this.tryMove(expr.args[i]!);
+        }
+        this.resolvedMethods.set(expr, mangled);
+        return this.setType(expr, sig.ret);
+      }
+    }
+
     const resolved = this.resolveMethod(objTName, expr.method);
     if (resolved) {
       const { mangled, sig } = resolved;

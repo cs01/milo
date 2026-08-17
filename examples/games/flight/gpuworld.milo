@@ -114,8 +114,11 @@ void main() {
     // `tw` fades the detail texture toward 1.0, which is a no-op multiplier —
     // that is how terrain and water share one draw call, and how the untextured
     // stream works at all: it carries tw = 0 and never sees its white texture.
+    // `vTw` is 0 untextured, 1 textured, 2 textured glass. See `prism`.
+    float glass = clamp(vTw - 1.0, 0.0, 1.0);
+    float tw = min(vTw, 1.0);
     vec3 texel = texture(uTex, vUv).rgb;
-    vec3 albedo = vTint * mix(vec3(1.0), texel, vTw);
+    vec3 albedo = vTint * mix(vec3(1.0), texel, tw);
 
     // `vLight` is `ambient + (1 - ambient) * NdotL`, baked per vertex, and those
     // two halves cannot be pulled apart again from the single scalar that
@@ -136,6 +139,36 @@ void main() {
     // against the blue overhead now fade into different colours, which is what
     // distance actually looks like and what one fog colour could never give.
     vec3 rd = normalize(vWorld - uEye);
+
+    // Glass, which is to say: a mirror with a slight tint.
+    //
+    // A curtain wall is not a diffuse surface with windows drawn on it, and
+    // lighting it as one is why every tower in this city read as an old concrete
+    // block. What you actually see in one is the sky — pale near the horizon,
+    // deep blue higher up, the sun where the angle happens to be right — and the
+    // building's own colour is a minor correction on top.
+    //
+    // The normal comes from the screen-space derivatives of the world position
+    // rather than from the vertex, because a vertex normal would be an eleventh
+    // float through the whole pipeline to say something the rasteriser already
+    // knows: two neighbouring fragments on a flat wall differ by exactly the two
+    // tangents of that wall.
+    if (glass > 0.001) {
+        vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+        if (dot(n, -rd) < 0.0) { n = -n; }
+        vec3 r = reflect(rd, n);
+        // Never let the reflected ray point into the ground: a vertical wall
+        // reflects almost horizontally, and half a degree of numerical noise
+        // there swaps sky for dirt across a whole face.
+        r.y = max(r.y, 0.015);
+        vec3 mirrored = skyColor(r, true);
+        // Schlick, with a floor. Glass at normal incidence still returns a few
+        // percent, and at the grazing angles a street-level view is full of it
+        // returns almost everything.
+        float fres = 0.05 + 0.85 * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 4.0);
+        col = mix(col, mirrored, clamp(fres, 0.0, 0.90) * glass);
+    }
+
     col = aerial(col, rd, vDepth, uEye.y, vWorld.y);
 
     fragColor = vec4(col, vDepth);

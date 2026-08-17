@@ -1708,11 +1708,37 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
     // Concrete, brick and glass, picked off the building id so a given building
     // is always the same colour and a street is not uniform.
     let tint = propHash(b, b * 31 + 7)
-    var col = rgb(0.36, 0.36, 0.37).lerp(rgb(0.52, 0.50, 0.47), tint)
+    var wall = rgb(0.36, 0.36, 0.37).lerp(rgb(0.52, 0.50, 0.47), tint)
+    // Anything this tall is a curtain wall, and a curtain wall is mostly a
+    // MIRROR — its own colour barely matters because most of what leaves it is
+    // reflected sky. So the albedo goes dark and blue and the shader does the
+    // rest; painting glass a light grey and lighting it diffusely is what makes
+    // rendered towers look like concrete with windows drawn on.
+    var glass = 0.0
     if w.city.bHeight[b] > 45.0 {
-        // Towers are glass: darker, bluer, and they take more of the sky.
-        col = rgb(0.20, 0.25, 0.31).lerp(rgb(0.30, 0.37, 0.44), tint)
+        // Curtain walls are not all the same glass, and a skyline where they are
+        // reads as one building repeated. Three families, off the building id so a
+        // given tower is always itself: mostly the cool blue-green of standard
+        // low-E coating, a bronze minority from the seventies, and a few near-black
+        // mirrors. The albedo stays dark in every case — what differs is the tint
+        // it lends to the sky it reflects.
+        let g = propHash(b, b * 17 + 3)
+        if g < 0.12 {
+            wall = rgb(0.13, 0.09, 0.05).lerp(rgb(0.20, 0.14, 0.07), tint)
+        } else if g < 0.24 {
+            wall = rgb(0.03, 0.03, 0.04).lerp(rgb(0.06, 0.06, 0.07), tint)
+        } else {
+            wall = rgb(0.05, 0.10, 0.11).lerp(rgb(0.09, 0.16, 0.18), tint)
+        }
+        // How mirrored, by height. A twelve-storey block with punched windows is
+        // only slightly reflective; a four-hundred-metre tower is a mirror. Riding
+        // this on the same float the flag uses means the shader gets the strength
+        // for free — see the `tw` note at the wall vertices.
+        glass = Math.clampF64((w.city.bHeight[b] - 40.0) / 130.0, 0.34, 1.0)
     }
+    // What the roof is, as opposed to what the walls are. Defaults to the wall
+    // material for a place with no aerial photograph to sample.
+    var roofTop = wall
     if w.city.orthoLoaded {
         // The photograph is looking straight down at this roof, so it already
         // knows what colour it is. Painting fifteen thousand roofs one invented
@@ -1738,7 +1764,22 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
         let roofCol = rgb((rs.r + s1.r + s2.r + s3.r + s4.r) / 5.0, (rs.g + s1.g + s2.g + s3.g + s4.g) / 5.0, (rs.b + s1.b + s2.b + s3.b + s4.b) / 5.0)
         // Lifted off the raw sample: the texel already carries the sun that lit
         // it, and it is about to be multiplied by a wall's shading term too.
-        col = roofCol.scale(1.35)
+        let roofLit = roofCol.scale(1.35)
+        // The ROOF takes the photograph. The WALLS do not, and that was the bug
+        // behind every building looking like an old dark warehouse: one colour was
+        // sampled from the drape and used for both, so every façade in every city
+        // was painted the colour of its own roof — which from directly above is
+        // tar, gravel and air handlers. Roofs really are that colour; walls are
+        // not, and a glass tower least of all.
+        //
+        // Low buildings keep half of it, because a photograph still carries
+        // something true about a neighbourhood: brick blocks and white stucco do
+        // differ, and losing that entirely made a city uniform in the other
+        // direction.
+        roofTop = roofLit
+        if glass < 0.5 {
+            wall = wall.lerp(roofLit, 0.5)
+        }
     }
 
     px.clear()
@@ -1804,19 +1845,24 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
         // wall sees almost no sky; without it every building looks like it is
         // floating a little off the ground.
         let ao = lt * 0.45
-        let a0 = vtxC(px[i], y0, pz[i], 0.0, 0.0, ao, 1.0, 1.0, 1.0, 1.0)
-        let a1 = vtxC(px[i], y1, pz[i], 0.0, fv, lt, 1.0, 1.0, 1.0, 1.0)
-        let b1 = vtxC(px[j], y1, pz[j], fu, fv, lt, 1.0, 1.0, 1.0, 1.0)
-        let b0 = vtxC(px[j], y0, pz[j], fu, 0.0, ao, 1.0, 1.0, 1.0, 1.0)
-        triangleV(s, v, facade, a0, a1, b1, col.r, col.g, col.b)
-        triangleV(s, v, facade, a0, b1, b0, col.r, col.g, col.b)
+        // `tw` carries two things: 1 means "textured", and 2 means "textured AND
+        // glass". Riding the flag on an existing float keeps the vertex at ten
+        // floats — a eleventh would have meant touching the layout, the mesh
+        // attributes and every push site to say one bit.
+        let wtw = 1.0 + glass
+        let a0 = vtxC(px[i], y0, pz[i], 0.0, 0.0, ao, 1.0, 1.0, 1.0, wtw)
+        let a1 = vtxC(px[i], y1, pz[i], 0.0, fv, lt, 1.0, 1.0, 1.0, wtw)
+        let b1 = vtxC(px[j], y1, pz[j], fu, fv, lt, 1.0, 1.0, 1.0, wtw)
+        let b0 = vtxC(px[j], y0, pz[j], fu, 0.0, ao, 1.0, 1.0, 1.0, wtw)
+        triangleV(s, v, facade, a0, a1, b1, wall.r, wall.g, wall.b)
+        triangleV(s, v, facade, a0, b1, b0, wall.r, wall.g, wall.b)
     }
 
     // Roof. Flat is a fan wound the opposite way round from the base ring, which
     // is what makes it face up rather than down; a shaped roof is built on top of
     // that ring instead. Shapes are dropped at LOD range — a pyramid four pixels
     // tall and a flat top four pixels tall are the same four pixels.
-    let roof = col.scale(shade(s, 0.0, 1.0, 0.0, 0.42) * 1.06)
+    let roof = roofTop.scale(shade(s, 0.0, 1.0, 0.0, 0.42) * 1.06)
     let kind = cityRoofKind(w.city, b)
     var rh = cityRoofHeight(w.city, b)
     // The roof eats into the height rather than sitting on top of it: OSM's
@@ -1831,7 +1877,7 @@ fn prism(s: &mut Scene, w: &World, v: &View, facade: &Texture, px: &mut Vec<f64>
         }
         return
     }
-    shapedRoof(s, v, px, pz, m, y1 - rh, y1, kind, roof, col)
+    shapedRoof(s, v, px, pz, m, y1 - rh, y1, kind, roof, roofTop)
 }
 
 // The roof shapes OSM tags and this renderer builds, standing on the ring the

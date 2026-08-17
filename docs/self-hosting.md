@@ -6,6 +6,33 @@ update-when: the bootstrap converges or diverges, or the fixture parity number m
 last-verified: 2026-08-06 (fixpoint HOLDS stage2==stage3; 586/586 fixtures; 750/750 ASan-clean; 117/247 negative tests)
 -->
 
+## `flybyGeometry` left the manifest (2026-08-17)
+
+It is the only fixture ever removed from `tests/selfhost-manifest.txt` for a reason that is
+not a compiler regression, so the reason is written down rather than inferred from a diff.
+
+The fixture imports `examples/games/flight/world3d`, and that example grew a dependency on
+the `gl` package. Two things had to be fixed before the failure was even legible, and both
+were real bugs found by chasing it:
+
+- **`src-milo`'s resolver read the manifest once, from the ENTRY file's directory**, so a
+  package import meant whatever the entry's `milo.json` said. `cloud.milo` sits beside a
+  manifest declaring `gl`, and its `from "gl"` resolved when the entry was the example next
+  door and failed when the entry was a test fixture two directories away. Fixed to resolve
+  per importing-file directory, mirroring the same fix in `src/resolver.ts`.
+- **`src-milo`'s `forget` builtin shadowed a user function of the same name.** `milo-gl`
+  defines `fn forget(v: &mut Vec<u32>, id: u32)` and every call to it was rejected with
+  *"'forget' takes exactly one argument"*. `src/checker.ts` guards the builtin with
+  `&& !this.functions.has("forget")`; `src-milo` now does too. A name-matched builtin
+  quietly beating the program's own function is the one thing it must not do.
+
+What remains is a real gap, not a wart: **`src-milo` has no per-package symbol mangling.**
+`src/mangle.ts` gives each package's symbols a `$`-prefixed identity, so `gl`'s `forget`
+cannot collide with `std/runtime`'s call to the builtin. Without it the flat namespace takes
+the package's definition program-wide and `std/runtime.milo` fails with *"function 'forget'
+expects 2 args, got 1"*. Until that lands, no fixture reaching a package that defines a
+top-level name colliding with a builtin can build under `milo-self`.
+
 ## The three things that get measured, and the one that used to not be
 
 | harness | measures | catches |

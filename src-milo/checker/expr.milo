@@ -1502,7 +1502,13 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<ExprNode>>, ty
     // emit the owning-closure drop glue that `forget` exists to suppress, so checking
     // the argument and yielding void IS the whole behaviour here; std/runtime.milo
     // calls it and without this arm the fixpoint died at "undefined function 'forget'".
-    if func == "forget" {
+    //
+    // Guarded on there being no user function of the name, exactly as src/checker.ts is.
+    // Without the guard the builtin SHADOWS a user's own `forget`: the milo-gl package
+    // defines `fn forget(v: &mut Vec<u32>, id: u32)` and every call to it was rejected
+    // with "'forget' takes exactly one argument" — a builtin quietly winning against the
+    // program's own function, which is the one thing a name-matched builtin must not do.
+    if func == "forget" && !ck.functions.contains(func) {
         if args.len != 1 {
             error(ck, "'forget' takes exactly one argument", cloneSpan(span))
             return tyVoid()

@@ -1,5 +1,5 @@
-
 addressOf
+aesGcmLengthGuards
 aliasBehindRef
 aliasResultFromConversion
 arena_clear
@@ -7,8 +7,10 @@ arenaBasic
 arenaContracts
 arenaCrossArena
 arenaHandles
+arenaMemCoexist
 arenaMethod
 arenaModify
+arenaRead
 arenaWith
 argparseAbsentVsEmpty
 arithmetic
@@ -42,9 +44,11 @@ bitCount
 bitRotate
 blockScopeDrop
 booleanLogic
+borrowed_literal_arg_temp
 borrowIndexFieldPrecision
 borrowMutateAfterLoop
 borrowValidSlice
+boundsCheckShadowedVec
 boundsElision
 break_drop
 breakContinue
@@ -74,15 +78,20 @@ closureCapture
 closureCaptureClosure
 closureCaptureHeap
 closureCaptureMutableLocal
+closureCapturesDropped
 closureEmptyParams
 closureInferParams
 closureLet
 closureMapFilter
+closureMoveNested
 closureMultiCapture
 closureMutCapture
 closureNoCapture
+closureNonRetainingArg
 closureStoredMove
+closureWrapperMethodForward
 coalesceHeapPayload
+coalesceUnboundTempDrop
 commandBuilder
 commandEnv
 commandStdioDirection
@@ -93,6 +102,7 @@ contracts
 contractsCallSite
 cryptoAesGcm
 cryptoSha1
+cryptoShaCoexist
 cSig
 csvStrict
 cValue
@@ -111,6 +121,7 @@ displayStructEnum
 dlSelfSymbol
 dropAccounting
 dropEarlyReturn
+dropEmptyContainerField
 dropMatchBinding
 dropRunsAfterFieldClone
 dropString
@@ -129,6 +140,7 @@ enumMultiPayload
 enumPayload
 enumPayloadOptionLayout
 enumRepr
+enumTempBorrowDrop
 enumTryFrom
 enumWildcard
 envSetRemove
@@ -163,7 +175,6 @@ floatExponent
 floatLiteralNarrowing
 floatNanCompare
 floatRoundTrip
-flybyGeometry
 fnArgI64Lit
 fnInStruct
 fnPtrDispatch
@@ -176,6 +187,7 @@ fnToPtr
 forArray
 forBreak
 forContinue
+forgetSuppressesDrop
 forHashmap
 forInBlockScopeDrop
 forInRvalueIterator
@@ -250,7 +262,9 @@ hmacSha256
 hmacSha2Vectors
 html
 httpAbsentVsEmpty
+httpFetchCoexist
 httpMiddleware
+httpRenderResponse
 if_expr
 ifElse
 ifExprCoerce
@@ -267,6 +281,7 @@ importNamedMulti
 importString
 importTransitive
 indexCloneNoLeak
+inflateCorruptInput
 inflateGzip
 intConstCoerce
 interfaceBasic
@@ -299,6 +314,7 @@ jsonRawStrRoundTrip
 jsonStringify
 jsonStringifyEmpty
 jsonStringifyEscape
+jsonSurrogatePairs
 jsonUnicodeEscape
 jsonValidate
 jwtClaims
@@ -307,6 +323,7 @@ keysDecode
 lenMethod
 letElse
 letInWhile
+lintBorrowThatClones
 logicalOps
 loopBreakDrop
 loopInvariant
@@ -327,11 +344,13 @@ matchTempBindMutate
 mime
 module_globals
 moduleWrapping
+moveClosureType
 moveFieldThenReassign
 moveIfElse
 moveVarIntoEnumReturn
 multipart
 multiWidthTypes
+mutParamWriteIsUse
 mutSlice
 mutSliceDisjointArgs
 nestedCalls
@@ -359,6 +378,7 @@ pbkdf2Vectors
 png_roundtrip
 pngDecode
 poolAlloc
+poolBlockSizeGuard
 preludeStringMethods
 printContainers
 printFormat
@@ -390,6 +410,7 @@ rangeEnforced
 rangePropagation
 refHeap
 regexOnView
+regexUtf8CodePoints
 replaceFieldOutOfMutBorrow
 replaceSwap
 resultAndThen
@@ -439,6 +460,7 @@ sliceViewReturn
 socketBind
 softKeywordFromIn
 sortByKeyString
+spawnCapturingClosureLeak
 spawnMoveClosures
 spawnMoveHeapString
 stdBase64

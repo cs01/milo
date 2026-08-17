@@ -354,22 +354,49 @@ fn resolvePkgImport(rs: &ResolverState, importPath: &string, pkgName: &string, s
 // entry doesn't resolve to a file already in the cache — see resolvePkgImport),
 // then relative to source dir, then stdlib dir, then platform-specific.
 pub fn resolvePath(rs: &ResolverState, dir: &string, importPath: &string): string {
-    if !rs.deps.isEmpty() {
-        var pkgName = importPath.clone()
-        match importPath.indexOf("/") {
-            Option.Some(idx) => {
-                pkgName = importPath.substr(0, idx)
-            }
-            Option.None => {
-            }
+    var pkgName = importPath.clone()
+    match importPath.indexOf("/") {
+        Option.Some(idx) => {
+            pkgName = importPath.substr(0, idx)
         }
+        Option.None => {
+        }
+    }
+    // A package import means whatever the manifest NEAREST THE IMPORTING FILE says, not
+    // whatever the entry point's manifest says. Reading it once from the entry's directory
+    // (what rs.deps is) made an import's meaning depend on where compilation started: a
+    // library file sitting beside a milo.json that declares `gl` resolved `from "gl"` when
+    // the entry was the example next door, and failed when the entry was a test fixture two
+    // directories away — same file, same import, two answers. Mirrors the same fix in
+    // src/resolver.ts; tests/fixtures/flybyGeometry.milo is what caught it.
+    //
+    // rs.deps stays as the fallback so nothing that resolves today stops: walking up from
+    // the importing file reaches the project root anyway in the ordinary case.
+    // A bool plus a plain string rather than an Option: matching an Option<string> twice
+    // moves it, and this needs two lookups with the second conditional on the first.
+    var found = false
+    var pkgSpec = ""
+    let dirDeps = findManifestDeps(dir.clone())
+    match dirDeps.get(pkgName) {
+        Option.Some(spec) => {
+            pkgSpec = spec.clone()
+            found = true
+        }
+        Option.None => {
+        }
+    }
+    if !found && !rs.deps.isEmpty() {
         match rs.deps.get(pkgName) {
             Option.Some(spec) => {
-                return resolvePkgImport(rs, importPath, pkgName, spec)
+                pkgSpec = spec.clone()
+                found = true
             }
             Option.None => {
             }
         }
+    }
+    if found {
+        return resolvePkgImport(rs, importPath, pkgName, pkgSpec)
     }
 
     var withExt = importPath.clone()

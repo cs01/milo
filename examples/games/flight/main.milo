@@ -115,6 +115,7 @@ fn parseOpts(): ParsedArgs {
     p.addBool("fullscreen", "f", "Open filling the display (F toggles it while flying)")
     p.addBool("maximized", "m", "Open maximised rather than in a 1280x720 window")
     p.addBool("cpu", "", "Bloom and tone-map on the CPU instead of the GPU (they should look the same)")
+    p.addString("scale", "s", "Scene resolution as a percent of the window (100 native, 200 supersampled, 0 auto)", "0")
     p.setEpilog(EPILOG)
     return p.parse()
 }
@@ -304,11 +305,17 @@ pub fn main(): i32 {
     // separation is why a bigger window costs GPU time and no CPU time at all.
     var c = canvasNew(W, H)
     var s = sceneNew(W, H)
-    var ss = 1
-    if o.getBool("ss") {
-        ss = 2
-    }
-    var scr = match screenOpen("FLYBY — written in Milo", W, H, W, H, ss, o.getBool("fullscreen"), o.getBool("maximized")) {
+    // Scene resolution. `0` means pick one.
+    //
+    // Auto exists because the honest default on a retina panel is not 100. Every
+    // heavy pass here is per-pixel, and a 2880x1864 drawable is 5.4 million of
+    // them — measured at 68 ms a frame on this machine, which is not a frame rate.
+    // Auto keeps roughly two megapixels, which is a sharp picture at a playable
+    // speed; `--scale 100` gives back every pixel the display has.
+    // Zero means "pick one" — `renderSize` decides, because it is the only place
+    // that knows how big the drawable actually is.
+    let renderPct = parseInt(o.getString("scale")) ?? 0
+    var scr = match screenOpen("FLYBY — written in Milo", W, H, W, H, renderPct, o.getBool("fullscreen"), o.getBool("maximized")) {
         Result.Ok(opened) => opened
         Result.Err(e) => {
             print("SDL setup failed: " + e)

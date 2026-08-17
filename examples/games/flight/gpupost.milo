@@ -580,11 +580,10 @@ void main() {
     float maxT = 60000.0;
     if (depth > 0.0) { maxT = depth / cosF; }
 
-    // Offset each ray a fraction of a step. Marching every pixel from the same
-    // place makes the layer boundaries land on the same planes across the whole
-    // frame, which reads as a set of concentric shells; jittering turns that
-    // banding into noise, which the eye discards.
-    float jitter = fract(sin(dot(vUv, vec2(12.9898, 78.233))) * 43758.5453);
+    // Offset each ray a fraction of a step, so the layer boundaries do not all
+    // land on the same planes across the frame. See `cloudDither` for why this is
+    // interleaved gradient noise and not a hash.
+    float jitter = cloudDither(gl_FragCoord.xy);
     vec4 cl = cloudMarch(uEye, rd, maxT, jitter);
     col = col * cl.a + cl.rgb;
 

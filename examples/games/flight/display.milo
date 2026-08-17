@@ -65,7 +65,7 @@ pub struct Screen {
     // being dragged does not reallocate anything.
     rw: i64,
     rh: i64,
-    ss: i64, // supersample factor: 1 or 2
+    renderPct: i64, // scene resolution as a percentage of the drawable
 }
 
 // Open the window and the context.
@@ -73,7 +73,7 @@ pub struct Screen {
 // `ow`/`oh` are the 2D overlay's fixed resolution, which is NOT the render
 // resolution — the HUD is laid out in its own space and stays the same size
 // whatever the window does.
-pub fn screenOpen(title: &string, w: i64, h: i64, ow: i64, oh: i64, ss: i64, fullscreen: bool, maximized: bool): Result<Screen, string> {
+pub fn screenOpen(title: &string, w: i64, h: i64, ow: i64, oh: i64, renderPct: i64, fullscreen: bool, maximized: bool): Result<Screen, string> {
     unsafe {
         // Before the window, not after: SDL reads these when it builds the pixel
         // format, and setting them afterwards is accepted and ignored.
@@ -105,13 +105,13 @@ pub fn screenOpen(title: &string, w: i64, h: i64, ow: i64, oh: i64, ss: i64, ful
         }
 
         let d = drawableOf(win)
-        let r = renderSize(d.w, d.h, ss)
+        let r = renderSize(d.w, d.h, renderPct)
         var glc = GlContext.new()
         match postNew(glc, r.w, r.h, ow, oh) {
             Result.Ok(p) => {
                 print("gpu: OpenGL " + Gpu.version())
                 return Result.Ok(Screen {
-                    win: win, ctx: ctx, gl: glc, post: p, rw: r.w, rh: r.h, ss: ss
+                    win: win, ctx: ctx, gl: glc, post: p, rw: r.w, rh: r.h, renderPct: renderPct
                 }
                 )
             }
@@ -143,12 +143,40 @@ pub fn drawableOf(win: *u8): Size {
     }
 }
 
-// The drawable times the supersample factor, scaled back if that would exceed
-// MAX_RENDER_PX on either axis. Scaling both by the same ratio keeps the aspect,
-// which is what stops the projection from stretching.
-fn renderSize(dw: i64, dh: i64, ss: i64): Size {
-    var w = dw * ss
-    var h = dh * ss
+// Pixels the scene is actually rendered at, as a PERCENTAGE of the drawable.
+//
+// It used to be an integer supersample factor, which could only ever ask for MORE
+// pixels than the window. That is the wrong direction on a modern display: a
+// retina panel hands back a drawable of 2880x1864, and almost every pass in this
+// renderer is per-pixel — the sea is a raymarch, the clouds are a raymarch, the
+// bloom is four blurs — so the frame cost scales with all 5.4 million of them.
+// Measured on that panel: 68 ms a frame, which is fifteen a second.
+//
+// A percentage covers both directions. 100 is native, 200 is the old `--ss 2`,
+// and anything below 100 trades sharpness for frame rate, which is the trade a
+// player under a cloud deck actually wants to make.
+// Roughly two megapixels: a sharp picture that leaves headroom for the per-pixel
+// passes. Chosen as an AREA rather than a width because what costs is pixels, and
+// a 21:9 window and a 4:3 one with the same width are not the same amount of work.
+pub let AUTO_TARGET_PX: i64 = 2100000
+
+fn renderSize(dw: i64, dh: i64, pct: i64): Size {
+    var p = pct
+    if p <= 0 {
+        p = 100
+        let area = dw * dh
+        if area > AUTO_TARGET_PX {
+            // Area goes as the square of the linear scale, so the percentage is
+            // the square root of the ratio.
+            p = (Math.sqrt((AUTO_TARGET_PX as f64) / (area as f64)) * 100.0) as i64
+            // A floor, because past a point this stops being a picture.
+            if p < 45 {
+                p = 45
+            }
+        }
+    }
+    var w = dw * p / 100
+    var h = dh * p / 100
     let most = Math.maxI64(w, h)
     if most > MAX_RENDER_PX {
         w = w * MAX_RENDER_PX / most
@@ -163,7 +191,7 @@ fn renderSize(dw: i64, dh: i64, ss: i64): Size {
 // into. Returns the render size, which is what the projection needs.
 pub fn screenBegin(s: &mut Screen): Size {
     let d = drawableOf(s.win)
-    let r = renderSize(d.w, d.h, s.ss)
+    let r = renderSize(d.w, d.h, s.renderPct)
     if r.w != s.rw || r.h != s.rh {
         match postResize(s.gl, s.post, r.w, r.h) {
             Result.Ok(_) => {

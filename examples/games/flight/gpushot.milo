@@ -23,6 +23,9 @@ from "std/png" import {
 from "std/strconv" import {
     formatFloat
 }
+from "std/time" import {
+    epochMillis
+}
 from "std/args" import {
     args
 }
@@ -210,10 +213,17 @@ pub fn main(): i32 {
     // Fly for a while so the camera is somewhere worth photographing, then shoot
     // the last frame. The autopilot steers on its own with no input at all.
     var first = true
+    let WARMUP = 30
+    var loopStart = epochMillis()
     for i in 0..frames {
         // Off the frame path in the sense that matters: this yields to the
         // fetching task and returns, it never waits on the network itself.
         envWeatherTick(w.env, w.city.reach)
+        // Timing starts after a warm-up so shader compiles, the first upload and
+        // the driver's lazy setup are not charged to the steady-state frame cost.
+        if i == WARMUP {
+            loopStart = epochMillis()
+        }
         worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, false)
         if mark >= 0 {
             aimAtMark(w, place, mark, dist)
@@ -262,6 +272,11 @@ pub fn main(): i32 {
                     match writeFile(out, bytes) {
                         Result.Ok(_) => {
                             print($"wrote {out}  alt {w.cam.y as i64} m  err {Gpu.error()}")
+                            if frames > WARMUP {
+                                let ms = epochMillis() - loopStart
+                                let n = (frames - WARMUP) as i64
+                                print("render: " + ((ms / n) as i64).toString() + " ms/frame over " + n.toString() + " frames at " + W.toString() + "x" + H.toString())
+                            }
                         }
                         Result.Err(e) => {
                             print($"write: {e}")

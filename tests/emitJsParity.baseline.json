@@ -10,6 +10,7 @@
   "arenaMemCoexist.milo": "noEmit",
   "arenaMethod.milo": "noEmit",
   "arenaModify.milo": "noEmit",
+  "arenaRead.milo": "noEmit",
   "arenaWith.milo": "noEmit",
   "arena_clear.milo": "noEmit",
   "arraySlice.milo": "noEmit",

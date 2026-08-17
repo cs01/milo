@@ -95,6 +95,48 @@ Everything in the plan is done. What is left is not on it: the drape could go to
 only the constant changes), and cloud top height remains the one estimated
 quantity in the chain.
 
+## Frame rate
+
+Every heavy pass here is per-pixel — the sea is a raymarch, the clouds are a
+raymarch, the bloom is four blurs — so cost scales with the drawable, and a
+retina panel hands back 2880x1864. Measured there before any of this: 68 ms a
+frame over San Francisco, 75 ms over Manhattan. Fifteen and thirteen a second.
+
+Four things, each measured rather than assumed:
+
+- **The scene renders at about two megapixels by default**, not at the full
+  drawable. `--scale` overrides it: 100 for native, 45 if frame rate matters more
+  than sharpness.
+- **The cloud light-march runs one octave of noise, not three.** It is computing
+  how much cloud lies between a point and the sun, which is a deliberately blurry
+  number, and it was doing four fifths of the shader's work to get it.
+- **The shadow map is 1024, not 2048.** It is a fill cost paid every frame, and
+  over Manhattan every texel is overdrawn by a stack of towers: the shadow pass
+  alone was 14 ms of a 36 ms frame. At half the side it costs about 2 ms and the
+  shadows read the same, because what the eye reads at that range is the pattern
+  down the avenues rather than its edge sharpness.
+- **Buildings are culled at about six pixels tall, not three.** In a city the size
+  of Manhattan that difference is thousands of prisms a frame, each recorded,
+  uploaded and rasterised twice, to show a smudge.
+
+Result: 20 ms over San Francisco, 26 ms over Manhattan.
+
+## Materials
+
+Walls have their own material and roofs take the photograph. They used to share
+one colour sampled from the drape, so every façade in every city was painted the
+colour of its own roof — tar, gravel and air handlers seen from above, which is
+why the cities read as uniformly old and dark.
+
+Anything over 45 m is a curtain wall, and a curtain wall is a mirror with a
+slight tint: the albedo is dark and the shader reflects `skyColor` off it through
+a Schlick term, so a face turned to the sun blazes and a face turned away goes
+deep. The normal comes from the screen-space derivatives of the world position —
+a vertex normal would have been an eleventh float through the whole pipeline to
+say what the rasteriser already knows. Three glass families off the building id
+(blue-green, bronze, near-black) and reflectivity scaled by height, so a
+twelve-storey block is subtly shiny and a 400 m tower is a mirror.
+
 ## What is measured and what is not
 
 Worth keeping straight, because a rendered sky looks equally convincing either

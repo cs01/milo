@@ -29,21 +29,24 @@ from "./vec3" import {
     Vec3, v3
 }
 
-// Half the road width in metres. Ten cars have to be able to run three abreast
-// and still leave room to pass, and the reference this game is aiming at is a
-// wide arcade boulevard rather than a real circuit.
-pub let HALF_WIDTH: f64 = 11.0
+// Half the road width in metres. Cars have to be able to run three abreast and
+// still leave room to pass, but the width is set from the *frame* rather than
+// from the racing: a boulevard wide enough to be comfortable puts the buildings
+// so far out that they leave the picture, and a street race whose street is off
+// screen is a ribbon in a field. Fifteen metres kerb to kerb is seven car widths
+// and keeps both facades in shot.
+pub let HALF_WIDTH: f64 = 7.5
 
 // The dirt shoulder outside the road proper, before the barrier. Running wide
 // costs grip here rather than ending the lap, which is the arcade bargain: a
 // mistake is slow, not fatal.
-pub let SHOULDER: f64 = 4.5
+pub let SHOULDER: f64 = 2.2
 
 // Where the barrier stands. Beyond this the car is redirected, hard. Spelled as
 // a literal rather than as `HALF_WIDTH + SHOULDER`: a global whose initializer
 // reads other globals is only run by an entry point, so writing it that way
 // makes this module fail to type-check on its own.
-pub let WALL: f64 = 15.5
+pub let WALL: f64 = 9.7
 
 // Metres between centreline samples. At 2.5 m a 2.7 km lap is about 1100
 // samples, which is small enough to scan linearly when a search hint goes stale

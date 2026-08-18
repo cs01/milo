@@ -73,7 +73,7 @@ from "./vec3" import {
     v3
 }
 from "./world" import {
-    BUCKETS, buildWorld
+    B_PAD, BUCKETS, PAD_FLOATS, buildWorld
 }
 
 fn argValue(name: &string, fallback: &string): string {
@@ -249,6 +249,9 @@ pub fn main(): i32 {
     var prevF = false
     var fullscreen = false
     var raceTime = 0.0
+    // Stops one pad firing on several consecutive frames while the car is
+    // still on top of it.
+    var padCooldown = 0.0
     var warmup = argValue("--warmup", "0").parseInt() ?? 0
     let poseBoost = argPresent("--boost")
     let orbitDeg = argValue("--orbit", "-999").parseF64() ?? -999.0
@@ -335,6 +338,50 @@ pub fn main(): i32 {
             cam.kick(dt * 1.4)
         }
         cam.follow(player, dt)
+        // Boost pads. Tested against the car's own (s, lateral) rather than in
+        // world space: the pads were placed in those coordinates, and comparing
+        // arc lengths is one subtract where a world-space overlap test is a
+        // search. The wrap guard matters because a pad a few metres past the
+        // line is nearly a full lap away in raw `s`.
+        var pi = 0
+        while pi + PAD_FLOATS <= world.pads.len {
+            var ds = player.s - world.pads[pi]
+            if ds > track.length * 0.5 {
+                ds = ds - track.length
+            } else if ds < -track.length * 0.5 {
+                ds = ds + track.length
+            }
+            if Math.abs(ds) < world.pads[pi + 2] && Math.abs(player.lateral - world.pads[pi + 1]) < world.pads[pi + 3] {
+                if padCooldown <= 0.0 {
+                    player.padSurge()
+                    cam.kick(0.42)
+                    gfx.flash = Math.minF64(0.34, gfx.flash + 0.26)
+                    padCooldown = 0.45
+                }
+            }
+            pi = pi + PAD_FLOATS
+        }
+        padCooldown = Math.maxF64(0.0, padCooldown - dt)
+
+        // The pads pulse. One sine on the material's emissive is the whole
+        // animation: the geometry is static and the tint in it already carries
+        // the per-chevron brightness ramp.
+        // The pad flash has to be decayed here: nothing in the renderer does it,
+        // and left alone it pins a constant additive white over the whole frame
+        // from the first pad to the end of the race.
+        gfx.flash = Math.maxF64(0.0, gfx.flash - dt * 1.9)
+
+        let pulse = 0.72 + 0.46 * Math.sin(gfx.time * 7.0)
+        world.mats[B_PAD].emissive = v3(pulse, pulse, pulse)
+
+        // The frame-streak amount. It starts at two thirds of top speed rather
+        // than at zero, because a blur that is always on is not a speed cue, it
+        // is a dirty lens: what the eye reads is the frame CHANGING, so the
+        // effect has to be absent for most of the speed range and arrive
+        // suddenly near the top of it. The bottle then doubles it.
+        let sp01 = Math.clampF64(Math.abs(player.forwardSpeed()) / 95.0, 0.0, 1.4)
+        let rushWant = Math.maxF64(0.0, (sp01 - 0.62) / 0.38) + 1.15 * player.boost
+        gfx.rush = gfx.rush + (Math.minF64(rushWant, 1.7) - gfx.rush) * (1.0 - Math.exp(-7.0 * dt))
         // A capture-only orbit, for looking at the car itself rather than at the
         // race: the chase camera is the wrong tool for judging bodywork.
         if orbitDeg > -900.0 {

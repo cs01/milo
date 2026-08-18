@@ -1,11 +1,18 @@
-// The sunset the race runs under, tabulated once at startup.
+// The sky the race runs under, tabulated once at startup.
 //
 // There is no atmospheric model here. What the reflection lookup and the ambient
-// term need is the radiance of a *city at dusk* in every direction: a violet
-// zenith, a bank of cloud lit orange along its underside, a low sun sitting just
-// above the skyline, and a hot band of haze all the way round the horizon. It is
-// stored lat-long (u = azimuth, v = zenith angle), the same layout the shader
-// already samples.
+// term need is the radiance of a *city at golden hour* in every direction: a
+// real blue zenith, a bank of cloud lit warm along its underside, a sun about 24
+// degrees up, and a band of haze all the way round the horizon. It is stored
+// lat-long (u = azimuth, v = zenith angle), the same layout the shader already
+// samples.
+//
+// This used to be a violet-to-magenta sunset with the sun almost on the deck. It
+// looked striking on its own and washed the whole game one colour: every surface
+// in the frame is lit out of this table, so a magenta sky makes magenta asphalt,
+// magenta concrete and magenta paint, and the neon loses its job because there
+// is nothing left for it to be coloured *against*. The low sun compounded it by
+// never actually striking a facade, so the city read as a silhouette.
 //
 // Two things come out of it and both decide how the game looks:
 //
@@ -53,10 +60,12 @@ pub struct Sky {
 
 // Where the sun sits, as a bearing and a height above the horizon. The bearing
 // is the whole reason the sky is not radially symmetric: the hot half and the
-// cold half are what tell you which way down the circuit you are pointing.
+// cold half are what tell you which way down the circuit you are pointing. The
+// height has to be enough to actually land on a vertical facade - grazing the
+// horizon looks like the most dramatic choice and lights nothing.
 let SUN_AZ: f64 = -1.05
 
-let SUN_Y: f64 = 0.135
+let SUN_Y: f64 = 0.415
 
 // Smooth pulse, 1 at `c` and 0 more than `w` away.
 fn lobe(x: f64, c: f64, w: f64): f64 {
@@ -125,30 +134,30 @@ fn skyRadiance(dir: &Vec3): Vec3 {
     // which is most of what keeps a car from looking like it is lit by one lamp.
     if up < 0.0 {
         let d = -up
-        var g = v3(0.115, 0.075, 0.115).scale(1.0 - 0.6 * d)
-        g = g + v3(0.30, 0.13, 0.06).scale(toward * (1.0 - sstep(0.0, 0.35, d)))
+        var g = v3(0.105, 0.105, 0.125).scale(1.0 - 0.6 * d)
+        g = g + v3(0.34, 0.19, 0.09).scale(toward * (1.0 - sstep(0.0, 0.35, d)))
         return g
     }
 
     // The vertical ramp: violet overhead, magenta through the middle, hot at the
     // horizon. Three stops rather than two, because a two-stop gradient behind a
     // skyline is the tell that the backdrop is a ramp.
-    let zenith = v3(0.055, 0.075, 0.295)
-    let middle = v3(0.42, 0.145, 0.44)
-    let horizon = v3(0.95, 0.30, 0.30)
+    let zenith = v3(0.055, 0.155, 0.520)
+    let middle = v3(0.245, 0.365, 0.680)
+    let horizon = v3(0.88, 0.60, 0.46)
     var col = middle.lerp(zenith, sstep(0.20, 0.85, up))
     col = horizon.lerp(col, sstep(0.0, 0.24, up))
 
     // The sun's half of the sky runs orange, the far half stays magenta. This is
     // one multiply and it is what makes the horizon read as a sunset rather than
     // as a pink fog bank.
-    col = col + v3(0.62, 0.24, 0.02).scale(toward * (1.0 - sstep(0.0, 0.45, up)))
+    col = col + v3(0.66, 0.30, 0.04).scale(toward * (1.0 - sstep(0.0, 0.45, up)))
 
     // Cloud. Lit hot along its underside near the sun and left violet away from
     // it, and thinning with height so the deck opens up overhead.
     let cl = cloudMask(up, az)
-    let lit = v3(1.55, 0.62, 0.30).lerp(v3(0.26, 0.13, 0.34), 1.0 - toward)
-    let hi = v3(0.30, 0.20, 0.42)
+    let lit = v3(1.85, 1.15, 0.72).lerp(v3(0.34, 0.36, 0.50), 1.0 - toward)
+    let hi = v3(0.78, 0.83, 0.96)
     let cloud = lit.lerp(hi, sstep(0.15, 0.75, up))
     col = col.lerp(cloud, cl * 0.82)
 
@@ -163,7 +172,7 @@ fn skyRadiance(dir: &Vec3): Vec3 {
     // The skyline haze: a bright band right at the horizon all the way round,
     // because the circuit is a loop and there is city on every side of it.
     let band = lobe(up, 0.012, 0.075)
-    col = col + v3(0.55, 0.26, 0.30).scale(band * (0.5 + 0.5 * toward))
+    col = col + v3(0.58, 0.44, 0.40).scale(band * (0.5 + 0.5 * toward))
 
     return col
 }
@@ -235,11 +244,11 @@ pub fn buildSky(intensity: f64): Sky {
     // The sun, warm and strong. It has to beat the sky's own fill or the cars
     // come out shadowless and flat, which is the one thing a bright sky costs
     // you over a dark one.
-    let sunC = v3(1.95, 1.24, 0.74).scale(intensity)
+    let sunC = v3(2.85, 2.02, 1.36).scale(intensity)
     // What the road throws back up. Warm asphalt under a low sun bounces amber,
     // and a car's underside picking that up is most of what says the race is
     // happening on a street rather than in a void.
-    let bounce = below.scale(0.80) + v3(0.055, 0.030, 0.028).scale(intensity)
+    let bounce = below.scale(0.80) + v3(0.060, 0.045, 0.038).scale(intensity)
     return Sky {
         table: table, sun: sun, sunColor: sunC, skyUp: skyUp, skyDown: bounce,
     }

@@ -413,8 +413,8 @@ void main() {
     // ahead is the road you are about to be on, and fogging it out is how a
     // bright scene turns back into a grey one.
     float dist = length(uCam - vWorld);
-    float ext = 1.0 - exp(-dist * 0.0026);
-    col = mix(col, skyLookup(-v, 2.0), ext * 0.48);
+    float ext = 1.0 - exp(-dist * 0.0017);
+    col = mix(col, skyLookup(-v, 2.0), ext * 0.30);
 
     fragColor = vec4(col, uAlpha);
     // --debug 3 shows the occlusion buffer on its own, which is the only way to

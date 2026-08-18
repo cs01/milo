@@ -34,25 +34,42 @@ from "./vec3" import {
 }
 
 // Metres behind the car at a standstill, and how much further at top speed.
-let DIST_BASE: f64 = 4.2
+let DIST_BASE: f64 = 7.30
 
-let DIST_SPEED: f64 = 1.0
+// NEGATIVE on purpose: the camera moves IN as the car speeds up, not out. Going
+// the other way is the intuitive choice and it is backwards - pulling back
+// shrinks the road and everything beside it, which is the opposite of what the
+// eye reads as speed. Tucking in while the lens opens is what drags the walls
+// past the edge of the frame.
+let DIST_SPEED: f64 = -1.15
 
-let HEIGHT_BASE: f64 = 2.42
+let HEIGHT_BASE: f64 = 3.35
 
 // Horizontal field of view in radians, parked and flat out. Horizontal rather
 // than vertical because what a player notices is how much of the road is in
 // view side to side, and a vertical fov looks right on one aspect ratio only.
 let FOV_BASE: f64 = 1.05
 
-let FOV_SPEED: f64 = 0.14
+let FOV_SPEED: f64 = 0.34
 
 // The speed the two ends of every range above are measured against.
 let REF_SPEED: f64 = 95.0
 
 pub struct Chase {
-    // Smoothed, in world space. These are the state: everything else is derived
-    // from the car each frame.
+    // The smoothed camera OFFSETS from the car, not smoothed world positions.
+    //
+    // Smoothing the world position makes the lag proportional to speed: an
+    // exponential filter settling at rate r trails a target moving at v by
+    // about v/r, so at 120 m/s the camera sits thirteen metres further back than
+    // it was ever asked to, and the car shrinks to a dot in the middle of the
+    // frame exactly when the player most needs to see it. Smoothing the offset
+    // and adding it to wherever the car is NOW keeps the framing fixed at every
+    // speed while still letting the camera swing behind the car in a corner,
+    // which is the part of the lag that was wanted.
+    eyeOff: Vec3,
+    aimOff: Vec3,
+    // Derived from the two above every frame. Public because the capture orbit
+    // overwrites them directly.
     eye: Vec3,
     target: Vec3,
     fov: f64,
@@ -65,6 +82,8 @@ pub struct Chase {
 
 pub fn newChase(): Chase {
     return Chase {
+        eyeOff: v3(0.0, 3.0, -9.0),
+        aimOff: v3(0.0, 1.0, 0.0),
         eye: v3(0.0, 3.0, -9.0),
         target: v3(0.0, 1.0, 0.0),
         fov: FOV_BASE,
@@ -95,15 +114,15 @@ impl Chase {
         }
 
         let dist = DIST_BASE + DIST_SPEED * k
-        let height = HEIGHT_BASE - 0.30 * k
-        let wantEye = car.pos - behind.scale(dist) + v3(0.0, height, 0.0)
+        let height = HEIGHT_BASE - 0.34 * k
+        let wantEyeOff = v3(0.0, height, 0.0) - behind.scale(dist)
         // Look ahead of the car, further ahead the faster it is going, so a
         // corner arrives on screen before it arrives under the wheels.
-        let wantTarget = car.pos + heading.scale(7.0 + 6.0 * k) + v3(0.0, 0.90, 0.0)
+        let wantAimOff = heading.scale(6.4 + 6.0 * k) + v3(0.0, 0.62, 0.0)
 
         if !self.started {
-            self.eye = wantEye
-            self.target = wantTarget
+            self.eyeOff = wantEyeOff
+            self.aimOff = wantAimOff
             self.started = true
         }
 
@@ -112,8 +131,10 @@ impl Chase {
         // be looking at nothing in particular.
         let eyeRate = 1.0 - Math.exp(-(11.5 - 2.5 * k) * dt)
         let aimRate = 1.0 - Math.exp(-12.0 * dt)
-        self.eye = self.eye + (wantEye - self.eye).scale(eyeRate)
-        self.target = self.target + (wantTarget - self.target).scale(aimRate)
+        self.eyeOff = self.eyeOff + (wantEyeOff - self.eyeOff).scale(eyeRate)
+        self.aimOff = self.aimOff + (wantAimOff - self.aimOff).scale(aimRate)
+        self.eye = car.pos + self.eyeOff
+        self.target = car.pos + self.aimOff
 
         // The camera never goes under the road. Smoothing alone can dip it below
         // zero over a crest, and a frame rendered from inside the tarmac is a
@@ -125,9 +146,13 @@ impl Chase {
         // The boost widens the lens and drops the camera back. A turbo you can
         // only read off a gauge is a number; a turbo that changes the shape of
         // the frame is a turbo.
-        let want = FOV_BASE + FOV_SPEED * k * k + 0.11 * car.boost
+        let want = FOV_BASE + FOV_SPEED * k * k + 0.30 * car.boost
         self.fov = self.fov + (want - self.fov) * (1.0 - Math.exp(-6.0 * dt))
-        self.shake = Math.maxF64(0.0, self.shake - dt * 2.4)
+        // A constant tremble that only exists at the top of the speed range, so
+        // the car is visibly working for the last thirty miles an hour rather
+        // than gliding.
+        let rumble = Math.maxF64(0.0, k - 0.66) * 0.62 + 0.30 * car.boost
+        self.shake = Math.maxF64(rumble, self.shake - dt * 2.4)
         self.shakeT = self.shakeT + dt
     }
 

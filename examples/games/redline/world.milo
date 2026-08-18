@@ -63,7 +63,12 @@ pub let B_GLASS: i64 = 7
 
 pub let B_GROUND: i64 = 8
 
-pub let BUCKETS: i64 = 9
+// The boost pads get their own bucket only so the frame loop can pulse one
+// material's emissive. Folding them into the neon bucket would mean pulsing
+// every tube on the circuit with them.
+pub let B_PAD: i64 = 9
+
+pub let BUCKETS: i64 = 10
 
 // Height of the barrier wall, and where its neon cap sits.
 let WALL_H: f64 = 1.45
@@ -72,9 +77,15 @@ let WALL_H: f64 = 1.45
 // wants, so the frame loop can copy a slice of this straight across.
 let LIGHT_FLOATS: i64 = 7
 
+// Four floats per pad: arc length along the circuit, lateral offset, half
+// length and half width. The geometry is in the mesh; this is the only copy the
+// frame loop needs to test the car against.
+pub let PAD_FLOATS: i64 = 4
+
 pub struct World {
     meshes: Vec<Mesh>,
     mats: Vec<Material>,
+    pads: Vec<f64>,
     // Every light the circuit could cast, in build order. Far more than the
     // shader can take; see `nearestLights`.
     lightPool: Vec<f64>,
@@ -445,44 +456,59 @@ fn addStartLine(mark: &mut Builder, steel: &mut Builder, neon: &mut Builder, tra
 // can land squarely on another.
 fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
     var rg = rand(0x5eed1234)
+    // Two rows, not one scatter. A single random offset produces a city with an
+    // average distance from the road and no street: what makes a street race
+    // read as a street is that one row of facades stands ON the kerb, tall
+    // enough to leave the top of the frame, and everything else is skyline
+    // behind it. Scattering over the same range gives every building a
+    // one-in-N chance of being that wall and so builds it nowhere.
     var s = 0.0
     while s < track.length {
         var side = -1.0
         while side < 2.0 {
-            if rg.f() < 0.14 {
-                side = side + 2.0
-                continue
+            // The front row: shallow blocks shoulder to shoulder along the
+            // pavement, stepped along the road so the facade line is not one
+            // extruded slab.
+            if rg.f() > 0.12 {
+                let halfZ = rg.range(7.0, 13.0)
+                let halfX = rg.range(5.0, 9.0)
+                var height = rg.range(26.0, 52.0)
+                if rg.f() > 0.72 {
+                    height = rg.range(58.0, 96.0)
+                }
+                let off = (WALL + 1.4 + rg.range(0.0, 2.2) + halfX) * side
+                tryBuilding(city, neon, steel, pool, track, rg.f(), off, s + rg.jitter(3.0), halfX, halfZ, height, rg)
             }
-            let halfX = rg.range(8.0, 17.0)
-            let halfZ = rg.range(8.0, 17.0)
-            // Three kinds of building, because a skyline of one kind is a bar
-            // chart. The near ones are low so the street has a wall, the far
-            // ones are towers so the skyline has a shape.
-            let near = rg.f()
-            var height = rg.range(14.0, 30.0)
-            if near > 0.45 {
-                height = rg.range(34.0, 74.0)
+            // The back row: towers, far enough behind the front row that the
+            // gaps between the near blocks look into a city rather than into
+            // the ground plane.
+            if rg.f() > 0.42 {
+                let halfX = rg.range(9.0, 18.0)
+                let halfZ = rg.range(9.0, 18.0)
+                var height = rg.range(60.0, 120.0)
+                if rg.f() > 0.62 {
+                    height = rg.range(125.0, 200.0)
+                }
+                let off = (WALL + 26.0 + rg.range(0.0, 46.0) + Math.maxF64(halfX, halfZ)) * side
+                tryBuilding(city, neon, steel, pool, track, rg.f(), off, s + rg.jitter(14.0), halfX, halfZ, height, rg)
             }
-            if near > 0.80 {
-                height = rg.range(80.0, 155.0)
-            }
-            let off = (WALL + 3.0 + rg.range(1.5, 44.0) + Math.maxF64(halfX, halfZ)) * side
-            let c = track.pointAt(s + rg.jitter(9.0), off)
-
-            // Reject anything that lands on any part of the lap, not just this
-            // part. `locate` with a cold hint scans the whole table, which is
-            // exactly what is wanted here and costs nothing at build time.
-            let probe = track.locate(c.x, c.z, 0)
-            if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 2.5 {
-                side = side + 2.0
-                continue
-            }
-
-            addBuilding(city, neon, steel, pool, c, halfX, halfZ, height, rg)
             side = side + 2.0
         }
-        s = s + 30.0
+        s = s + 17.0
     }
+}
+
+// Place one building if it clears every part of the lap. The loop passes near
+// itself in two places, so a block placed off one straight can land squarely on
+// another: `locate` with a cold hint scans the whole table, which is exactly
+// what is wanted at build time and costs nothing there.
+fn tryBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, track: &Track, _u: f64, off: f64, s: f64, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
+    let c = track.pointAt(s, off)
+    let probe = track.locate(c.x, c.z, 0)
+    if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 1.0 {
+        return
+    }
+    addBuilding(city, neon, steel, pool, c, halfX, halfZ, height, rg)
 }
 
 // One building: a plinth, a shaft that steps back as it rises, a cornice at
@@ -494,23 +520,42 @@ fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &
 // having floors, and the cornice line that comes with each step is what catches
 // the sun.
 fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
-    // Warm masonry, cool masonry, or a dark curtain-wall tower.
+    // Six facade stocks. A real skyline is not one material at six
+    // brightnesses: the cream block next to the brick one next to the teal
+    // curtain wall is what says "these were built by different people in
+    // different decades", and it is the only cue at this distance that the
+    // silhouette is a city rather than a ridge. The saturation matters as much
+    // as the value, because ACES rolls everything toward white at the top end
+    // and a facade that started grey ends the frame as grey.
     let hue = rg.f()
-    var tr = 0.62
-    var tg = 0.50
-    var tb = 0.40
-    if hue > 0.72 {
-        tr = 0.34
-        tg = 0.38
-        tb = 0.46
-    } else if hue > 0.44 {
-        tr = 0.60
-        tg = 0.58
-        tb = 0.52
-    } else if hue > 0.22 {
-        tr = 0.66
-        tg = 0.42
+    var tr = 0.86
+    var tg = 0.79
+    var tb = 0.66
+    if hue > 0.84 {
+        // Teal curtain wall.
+        tr = 0.19
+        tg = 0.46
+        tb = 0.45
+    } else if hue > 0.68 {
+        // Blue-black glass tower.
+        tr = 0.15
+        tg = 0.21
         tb = 0.33
+    } else if hue > 0.50 {
+        // Terracotta / red brick.
+        tr = 0.74
+        tg = 0.31
+        tb = 0.23
+    } else if hue > 0.34 {
+        // Warm sandstone.
+        tr = 0.84
+        tg = 0.63
+        tb = 0.37
+    } else if hue > 0.17 {
+        // Cool precast concrete.
+        tr = 0.62
+        tg = 0.67
+        tb = 0.72
     }
     city.setUvScale(1.0 / 12.0)
     city.setAo(0.80)
@@ -615,49 +660,161 @@ fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool
         }
     }
 
-    // The shopfront band at street level, which is the only part of a building
-    // anybody driving past actually reads.
-    neon.setUvScale(1.0)
-    neon.setAo(1.0)
+    // Street level. This is the only part of a building anybody driving past
+    // actually reads, and a bare plinth is what makes a dense city still feel
+    // empty: at eye height the reference is nothing but awnings, lit windows
+    // and signs hung out over the pavement, and none of that is in the
+    // silhouette a box gives you.
     var face = 0
     while face < 4 {
-        if rg.f() < 0.45 {
+        if rg.f() < 0.30 {
             face = face + 1
             continue
         }
-        let warm = rg.f()
-        var r = 2.1
-        var g = 1.5
-        var b = 0.8
-        if warm > 0.7 {
-            r = 0.6
-            g = 1.9
-            b = 2.3
-        } else if warm > 0.45 {
-            r = 2.4
-            g = 0.7
-            b = 1.6
-        }
-        neon.setTint(r, g, b)
         let alongX = face < 2
         let dir = if face % 2 == 0 {
             1.0
         } else {
             -1.0
         }
-        if alongX {
-            neon.box(v3(c.x, 3.4, c.z + dir * (halfZ + 0.55)), halfX * 0.72, 0.34, 0.08)
-            // The awning over it, in the dark trim colour.
-            city.setTint(0.16, 0.14, 0.16)
-            city.box(v3(c.x, 4.05, c.z + dir * (halfZ + 0.95)), halfX * 0.78, 0.10, 0.55)
-            pushLight(pool, v3(c.x, 3.2, c.z + dir * (halfZ + 1.6)), r, g, b, 16.0)
+        let span = if alongX {
+            halfX
         } else {
-            neon.box(v3(c.x + dir * (halfX + 0.55), 3.4, c.z), 0.08, 0.34, halfZ * 0.72)
-            city.setTint(0.16, 0.14, 0.16)
-            city.box(v3(c.x + dir * (halfX + 0.95), 4.05, c.z), 0.55, 0.10, halfZ * 0.78)
-            pushLight(pool, v3(c.x + dir * (halfX + 1.6), 3.2, c.z), r, g, b, 16.0)
+            halfZ
         }
+        let depth = if alongX {
+            halfZ
+        } else {
+            halfX
+        }
+        addShopRow(city, neon, pool, c, span, depth, alongX, dir, rg)
         face = face + 1
+    }
+}
+
+// One saturated awning colour. Primaries, not tints: the shopfronts are the
+// only thing in the frame at the driver's own eye height, so they are what sets
+// how colourful the street reads, and a row of tasteful muted canopies reads as
+// no canopies at all.
+fn awningColor(k: i64): Vec3 {
+    if k == 0 {
+        return v3(0.78, 0.10, 0.09)
+    }
+    if k == 1 {
+        return v3(0.09, 0.42, 0.20)
+    }
+    if k == 2 {
+        return v3(0.09, 0.22, 0.58)
+    }
+    if k == 3 {
+        return v3(0.86, 0.62, 0.06)
+    }
+    if k == 4 {
+        return v3(0.72, 0.30, 0.05)
+    }
+    return v3(0.55, 0.09, 0.42)
+}
+
+// A row of two to four shop units along one face of a plinth: lit window, awning
+// over it, a signboard above the awning, and on some of them a blade sign hung
+// out perpendicular to the wall.
+//
+// `span` is the half length of the face and `depth` the half extent of the
+// building the other way, so one body of code serves the X faces and the Z
+// faces; `place` is what maps a (along, out) pair back into world space.
+fn addShopRow(city: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, span: f64, depth: f64, alongX: bool, dir: f64, rg: &mut Rand) {
+    let units = 2 + (rg.f() * 3.0) as i64
+    let w = (span * 2.0) / (units as f64)
+    var i = 0
+    while i < units {
+        let mid = -span + w * ((i as f64) + 0.5)
+        let hw = w * 0.42
+        let col = awningColor((rg.f() * 6.0) as i64)
+
+        // The window: a wide band of warm interior light behind the glass. Its
+        // own emissive is what puts a pool of light on the pavement, which is
+        // most of why a lit shop reads as occupied rather than as a decal.
+        // Interior light, not a lightbox. An emissive above about 1.0 on a
+        // surface this large clips through the tone map and the whole unit
+        // comes back as a white slab with no colour left in it: the shopfronts
+        // have to sit UNDER the neon tubes in brightness or they eat the street.
+        let glow = rg.f()
+        var gr = 0.92
+        var gg = 0.70
+        var gb = 0.42
+        if glow > 0.72 {
+            gr = 0.22
+            gg = 0.78
+            gb = 0.96
+        } else if glow > 0.48 {
+            gr = 1.04
+            gg = 0.32
+            gb = 0.68
+        }
+        neon.setUvScale(1.0)
+        neon.setAo(1.0)
+        neon.setTint(gr, gg, gb)
+        shopBox(neon, c, alongX, dir, depth, mid, hw, 0.95, 2.80, 0.10, 0.18)
+
+        // The awning: a slab out over the pavement with a valance hanging off
+        // its front edge. Flat rather than sloped on purpose - a slope costs a
+        // rotated transform per unit and from the road the front edge is the
+        // whole read.
+        city.setUvScale(0.5)
+        city.setAo(0.72)
+        city.setTint(col.x, col.y, col.z)
+        shopBox(city, c, alongX, dir, depth, mid, hw + 0.14, 3.30, 3.52, 0.20, 2.05)
+        city.setTint(col.x * 1.25, col.y * 1.25, col.z * 1.25)
+        shopBox(city, c, alongX, dir, depth, mid, hw + 0.14, 2.62, 3.30, 1.72, 2.08)
+
+        // The signboard over the awning, dark surround with a lit face.
+        city.setTint(0.10, 0.10, 0.13)
+        shopBox(city, c, alongX, dir, depth, mid, hw + 0.05, 3.60, 4.85, 0.05, 0.32)
+        neon.setTint(gr * 1.30 + 0.25, gg * 1.30 + 0.25, gb * 1.30 + 0.25)
+        shopBox(neon, c, alongX, dir, depth, mid, hw * 0.82, 3.78, 4.66, 0.30, 0.40)
+
+        // A blade sign on some units: a tall panel hung out square to the wall,
+        // which is the one piece of street furniture that breaks the facade
+        // plane and so the one that makes the row read as depth.
+        if rg.f() < 0.42 {
+            let by = 5.4 + rg.range(0.0, 3.4)
+            let bh = rg.range(2.2, 3.6)
+            let bc = awningColor((rg.f() * 6.0) as i64)
+            neon.setTint(bc.x * 3.4 + 0.25, bc.y * 3.4 + 0.25, bc.z * 3.4 + 0.25)
+            bladeSign(neon, c, alongX, dir, depth, mid, by, by + bh)
+            pushLight(pool, shopPoint(c, alongX, dir, depth, mid, by + bh * 0.5, 1.5), bc.x * 2.2 + 0.2, bc.y * 2.2 + 0.2, bc.z * 2.2 + 0.2, 15.0)
+        }
+
+        pushLight(pool, shopPoint(c, alongX, dir, depth, mid, 2.4, 2.2), gr * 2.2, gg * 2.2, gb * 2.2, 14.0)
+        i = i + 1
+    }
+}
+
+// A point on the shop face: `along` runs across the face, `out` stands off it.
+fn shopPoint(c: &Vec3, alongX: bool, dir: f64, depth: f64, along: f64, y: f64, out: f64): Vec3 {
+    if alongX {
+        return v3(c.x + along, y, c.z + dir * (depth + out))
+    }
+    return v3(c.x + dir * (depth + out), y, c.z + along)
+}
+
+// A box on the shop face, given its half length across the face, its vertical
+// span, and how far its near and far walls stand off the facade.
+fn shopBox(b: &mut Builder, c: &Vec3, alongX: bool, dir: f64, depth: f64, along: f64, hw: f64, y0: f64, y1: f64, out0: f64, out1: f64) {
+    b.resetXform()
+    let lo = shopPoint(c, alongX, dir, depth, along - hw, y0, out0)
+    let hi = shopPoint(c, alongX, dir, depth, along + hw, y1, out1)
+    b.boxSpan(lo, hi)
+}
+
+// A blade sign: a thin panel square to the wall, so it is read edge-on by the
+// facade and face-on by anybody coming down the street.
+fn bladeSign(b: &mut Builder, c: &Vec3, alongX: bool, dir: f64, depth: f64, along: f64, y0: f64, y1: f64) {
+    b.resetXform()
+    if alongX {
+        b.boxSpan(v3(c.x + along - 0.07, y0, c.z + dir * (depth + 0.30)), v3(c.x + along + 0.07, y1, c.z + dir * (depth + 2.05)))
+    } else {
+        b.boxSpan(v3(c.x + dir * (depth + 0.30), y0, c.z + along - 0.07), v3(c.x + dir * (depth + 2.05), y1, c.z + along + 0.07))
     }
 }
 
@@ -831,6 +988,81 @@ fn addGround(b: &mut Builder, track: &Track) {
 }
 
 // ---------------------------------------------------------------------------
+// Boost pads
+// ---------------------------------------------------------------------------
+
+// Half the length of a pad along the road, and half its width across it. Wide
+// enough that hitting one is a small steering decision rather than a shot at a
+// target, because a pad you can miss at 200 mph is a pad that only punishes.
+pub let PAD_HALF_LEN: f64 = 5.5
+
+pub let PAD_HALF_W: f64 = 2.3
+
+// Chevrons painted flat on the road, three per pad, pointing the way you are
+// going. They sit 3 cm proud: co-planar with the tarmac they z-fight, and the
+// fight is worse the further away they are, which is exactly where the player
+// needs to see them.
+fn addBoostPads(b: &mut Builder, pads: &mut Vec<f64>, track: &Track) {
+    b.setUvScale(1.0)
+    b.setAo(1.0)
+    // Spaced by arc length rather than by sample index, so the gap between pads
+    // is the same on the hairpin as it is on the pit straight.
+    let spacing = 148.0
+    let n = (track.length / spacing) as i64
+    var i = 0
+    while i < n {
+        let s = 26.0 + (i as f64) * spacing
+        // Alternate which lane they sit in. A pad always on the racing line is
+        // free; one that moves is a reason to be somewhere other than the apex.
+        let lane = ((i % 3) as f64 - 1.0) * (HALF_WIDTH * 0.46)
+        pads.push(s)
+        pads.push(lane)
+        pads.push(PAD_HALF_LEN)
+        pads.push(PAD_HALF_W)
+
+        var k = 0
+        while k < 3 {
+            // Front to back, brightest at the far end so the pad reads as an
+            // arrow pointing away from you rather than as three stripes.
+            let t = (k as f64) / 2.0
+            let cs = s - PAD_HALF_LEN + 0.9 + (k as f64) * 2.7
+            let glow = 1.5 + t * 2.6
+            chevron(b, track, cs, lane, 0.55 + t * 0.35, glow)
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// One chevron: two arms meeting on the centre of the lane, built out of six
+// quads laid on the road. Every corner comes from `track.pointAt`, so a pad on a
+// curve bends with the road instead of standing off it as a flat card.
+fn chevron(b: &mut Builder, track: &Track, s: f64, lane: f64, cyan: f64, glow: f64) {
+    let up = v3(0.0, 1.0, 0.0)
+    let y = 0.03
+    // Cyan through white: the tip is nearly white and the tails keep the colour,
+    // which is what makes it read as hot rather than as painted.
+    b.setTint(glow * (1.0 - cyan * 0.72), glow, glow * (1.0 + cyan * 0.12))
+    // A long, narrow chevron. At the wide angle a short one gives, the arms are
+    // nearly across the road and the shape reads as a bar with a kink in it
+    // rather than as something pointing anywhere.
+    let tip = 3.4
+    let back = 0.0
+    let thick = 0.85
+    var side = -1.0
+    while side < 2.0 {
+        let xo = lane
+        // Outer edge of this arm, and the inner edge parallel to it.
+        let a = track.pointAt(s + back, xo + side * PAD_HALF_W)
+        let c = track.pointAt(s + tip, xo)
+        let a2 = track.pointAt(s + back + thick, xo + side * PAD_HALF_W)
+        let c2 = track.pointAt(s + tip + thick, xo)
+        pushQuadN(b, v3(a.x, y, a.z), v3(c.x, y, c.z), v3(c2.x, y, c2.z), v3(a2.x, y, a2.z), up, 0.0, 0.0, 1.0, 1.0, side > 0.0)
+        side = side + 2.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
     var builders: Vec<Builder> = Vec.new()
@@ -847,6 +1079,8 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
     addStartLine(builders[B_MARK], builders[B_STEEL], builders[B_NEON], track, pool)
     addCity(builders[B_CITY], builders[B_NEON], builders[B_STEEL], track, pool)
     addGround(builders[B_GROUND], track)
+    var pads: Vec<f64> = Vec.new()
+    addBoostPads(builders[B_PAD], pads, track)
 
     var meshes: Vec<Mesh> = Vec.new()
     for i in 0..BUCKETS {
@@ -859,7 +1093,7 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
 
     // Road. Dark, rough, and barely metallic: the wet look comes from the
     // roughness variation baked into the surface map, not from metalness.
-    var road = material(TEX_ASPHALT, 0.34, 0.34, 0.40, 0.74, 0.02)
+    var road = material(TEX_ASPHALT, 0.30, 0.295, 0.285, 0.86, 0.02)
     road.normalStrength = 0.7
     // A second copy of the aggregate at a quarter the size. The road runs from
     // under the bumper to four hundred metres away and one texture scale cannot
@@ -904,12 +1138,19 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
     var glassM = material(TEX_GLASS, 0.05, 0.06, 0.09, 0.10, 0.40)
     mats.push(glassM)
 
-    var ground = material(TEX_ASPHALT, 0.14, 0.13, 0.19, 0.94, 0.0)
+    var ground = material(TEX_ASPHALT, 0.145, 0.140, 0.135, 0.94, 0.0)
     ground.normalStrength = 0.5
     mats.push(ground)
 
+    // The boost pads. Black albedo and a white emissive so the vertex tint is
+    // the whole colour, the same trick the neon bucket uses; the frame loop
+    // rewrites `emissive` every frame to make them pulse.
+    var pad = material(TEX_PAINT, 0.02, 0.02, 0.02, 0.45, 0.0)
+    pad.emissive = v3(1.0, 1.0, 1.0)
+    mats.push(pad)
+
     return World {
-        meshes: meshes, mats: mats, lightPool: pool,
+        meshes: meshes, mats: mats, pads: pads, lightPool: pool,
     }
 }
 

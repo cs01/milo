@@ -75,6 +75,11 @@ uniform float uGrain;
 uniform float uTime;
 uniform float uFlash;
 uniform float uSaturation;
+// How hard the frame streaks outward, and how hard the channels split at the
+// edge. Both are driven by speed, and both are why a number on a gauge turns
+// into a sensation.
+uniform float uRush;
+uniform float uAberration;
 
 // Narkowicz's fit of the ACES curve.
 vec3 aces(vec3 x) {
@@ -121,8 +126,37 @@ float hash12(vec2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
+// Radial streak: march back along the line from the centre of the frame and
+// average. This is the single biggest speed cue in the game and it costs eight
+// taps. The weight ramps with the square of the radius, so the middle of the
+// screen - where the car and the next corner are - stays sharp and only the
+// periphery smears, which is how peripheral vision actually behaves and also
+// the only version of this effect that does not make the player nauseous.
+vec3 rush(vec2 uv, float amount) {
+    vec2 d = uv - 0.5;
+    float r2 = max(dot(d, d) * 4.0 - 0.22, 0.0) / 0.78;
+    float k = amount * clamp(r2, 0.0, 1.0);
+    if (k < 0.0015) return fxaa(uv);
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 8; i++) {
+        float t = float(i) / 7.0;
+        float w = 1.0 - t * 0.55;
+        acc += texture(uScene, uv - d * k * t).rgb * w;
+        wsum += w;
+    }
+    return acc / wsum;
+}
+
 void main() {
-    vec3 col = fxaa(vUv);
+    vec3 col = rush(vUv, uRush);
+    // Channel split, outward and tiny. Real glass does this and at speed the
+    // eye reads it as the frame being dragged rather than as a lens fault.
+    if (uAberration > 0.0005) {
+        vec2 d = (vUv - 0.5) * uAberration;
+        col.r = rush(vUv + d, uRush).r;
+        col.b = rush(vUv - d, uRush).b;
+    }
     col += texture(uBloom, vUv).rgb * uBloomAmount;
     col += vec3(1.0, 0.86, 0.66) * uFlash;
     col *= uExposure;

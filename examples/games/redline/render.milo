@@ -135,6 +135,10 @@ pub struct Gfx {
     debug: f64,
     exposure: f64,
     bloomAmount: f64,
+    // How hard the composite streaks the frame outward, 0 parked and about 1 at
+    // top speed with the bottle lit. The frame loop sets it; it is not derived
+    // from anything the renderer knows.
+    rush: f64,
     // Additive white the composite adds before tone mapping, the muzzle flash
     // lighting the whole frame for two frames rather than only the barrel.
     flash: f64,
@@ -331,6 +335,7 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
         // a tube's glow out past its own silhouette, and without it every neon
         // in here is a coloured wire.
         bloomAmount: 0.20,
+        rush: 0.0,
         flash: 0.0,
         time: 0.0,
     }
@@ -570,11 +575,15 @@ impl Gfx {
         self.composite.uniform2F("uTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
         self.composite.uniformF("uBloomAmount", self.bloomAmount)
         self.composite.uniformF("uExposure", self.exposure)
-        self.composite.uniformF("uVignette", 0.30)
+        // The vignette closes down as the frame streaks, which narrows the
+        // apparent field exactly when the lens is widening it.
+        self.composite.uniformF("uVignette", 0.30 + 0.16 * self.rush)
         self.composite.uniformF("uGrain", 0.010)
-        self.composite.uniformF("uSaturation", 1.28)
+        self.composite.uniformF("uSaturation", 1.38)
         self.composite.uniformF("uTime", self.time)
         self.composite.uniformF("uFlash", self.flash)
+        self.composite.uniformF("uRush", self.rush * 0.026)
+        self.composite.uniformF("uAberration", self.rush * 0.0010)
         self.quad.draw()
     }
 

@@ -1,10 +1,10 @@
 # REDLINE
 
-A street race through a city at golden hour. One closed circuit, 2.8 km, three
-lanes wide, walled on both sides by a continuous bar of light that follows every
-corner, with shopfronts and towers standing right on the kerb. You drive a
-Countach with the arrow keys, hold the turbo down the straights, clip the boost
-pads, and the whole game is how late you can leave the braking.
+A street race through a city at night, in the rain. One closed circuit, 2.8 km,
+three lanes wide, running between an unbroken wall of lit buildings that stands
+on the kerb the whole way round. You drive a Countach with the arrow keys, hold
+the turbo down the straights, clip the boost pads, and the whole game is how late
+you can leave the braking.
 
 ```bash
 milo run examples/games/redline/main.milo --release
@@ -103,15 +103,19 @@ that was wanted in the first place.
 
 ## The pads
 
-Fifteen sets of three chevrons a lap, laid flat on the tarmac and pulsing. They
+Five sets of three chevrons a lap — better than five hundred metres apart — laid
+flat on the tarmac and pulsing. There were nineteen, snapped to the three lanes,
+and at that spacing they stopped being a thing you aimed for and became the road
+surface with extra lights on it: a bonus you meet every few seconds is not a
+bonus, and one that sits on the racing line is free. They are now scattered
+anywhere across the width, and the only thing that makes one worth steering for
+is that the next one is a long way off.
+
+They They
 add speed directly instead of topping up the bottle and leaving you to press the
 button: the pad is a thing you drove over, so the payoff has to be immediate or
 it reads as a pickup rather than as a ramp. They also part-fill the tank, which
 is what stops a lap being one long straight with the turbo empty.
-
-They alternate between the three lanes. A pad that always sits on the racing line
-is free, and a free bonus is not a decision; one that moves is a reason to be
-somewhere other than the apex.
 
 ## How it looks
 
@@ -122,18 +126,38 @@ OpenGL 3.3 core context: a sky integrated once at startup into a lat-long
 radiance table, a depth+normal prepass feeding screen-space ambient occlusion,
 shadow maps, GGX with sky irradiance for ambient, bloom and an ACES tone map.
 
-The sky is a real blue overhead running to a warm haze at the horizon, with the
-sun 24 degrees up and behind the cloud deck. It used to be a violet-to-magenta
-sunset with the sun almost on the deck, which looked striking in isolation and
-washed the entire game one colour: everything in the frame is lit by that table,
-so a magenta sky makes magenta asphalt, magenta concrete and magenta paint, and
-the neon loses its job because there is nothing left for it to be coloured
-*against*. A low sun made it worse by never actually striking a facade.
+At night the sky is not the light source, the city is, and what the radiance
+table has to get right is therefore not brightness but *ratio*: dark enough that
+a lit window, a sign and a headlight are the brightest things in the frame,
+coloured enough that a surface facing up is not the same colour as one facing the
+street. The cloud deck is lit from underneath, which is the single thing that
+says night in a city rather than night in a field — there is no sun above it, so
+the only light reaching it is the orange coming back up off the streets, and the
+overcast ends up brighter and warmer than the clear sky above it.
 
-The sky is bright and saturated on purpose. The neon keeps its job by being
-*coloured* rather than by being the only thing on screen with any light in it,
-and every emissive tint in the game is above the bloom threshold, so the tubes
-still glow against a lit sky. ACES desaturates whatever it rolls off, which is
+Two things had to be added back that a literal reading of "night" removes. The
+sky's irradiance on an up-facing surface gets a small floor, because physically
+it is nearly zero and taken literally that makes every facade not directly under
+a lamp pure black — a real city sits inside a bowl of its own scattered light,
+and the light pool only carries sixteen sources where a city has thousands. And
+the street lamps are warm white rather than neon: they are the only thing lighting
+the pavement and the bottom of the facades, and a magenta street lamp leaves the
+buildings exactly as black as no lamp at all.
+
+An earlier pass ran this as a violet-to-magenta sunset. Every surface is lit out
+of this table, so a magenta sky made magenta asphalt, magenta concrete and
+magenta paint, and the neon lost its job because nothing was left for it to be
+coloured *against*. That lesson survives the move to night: the sky stays close
+to neutral and the lights carry the hue.
+
+The barriers used to carry the colour — a 54 cm panel down each inner face
+running a cyan-to-magenta ramp along the lap, half out of phase side to side. As
+a way of telling the two barriers apart it worked. As a thing to look at for a
+whole lap it was a coloured bar the height of the car pinned to each side of the
+frame, and once the city behind it was solid there was no room left for it. What
+is left is a thin strip along the top edge, which is all the barrier has to do:
+say where the road ends. The lights now live on the buildings, where a city keeps
+them. ACES desaturates whatever it rolls off, which is
 right for film and wrong for a cabinet, so the composite pushes saturation back
 up after the tone map and before the transfer.
 
@@ -250,6 +274,37 @@ Three things carry the look:
 Two things in here are self-lit that physically should not be. The rumble strips
 carry a faint emissive because a red kerb under moonlight is black, and the edge
 of the road is the one thing that has to be readable at every point on the lap.
+
+## Rain
+
+The curtain is one tile drawn eight times, not a particle system. Rain is
+statistically uniform, so there is nothing to simulate: what the eye reads is
+density and streak length, and a static mesh has both. The tile holds its streaks
+at positions in `[0, RAIN_CELL)` on every axis, which makes the field *periodic*,
+and periodicity is the whole trick — a translation by any whole number of cells
+is invisible, so the frame loop keeps the block centred on the camera by snapping
+to the cell grid and makes the rain fall by sliding it down and wrapping. Both
+motions are one matrix and nothing is ever re-uploaded.
+
+One tile snapped to the camera does not work: a single tile of random content
+does not tile, so the entire field reshuffles the moment the camera crosses a
+cell boundary. Eight copies of one periodic tile do.
+
+Each streak is two quads crossed at right angles, because a single quad
+disappears edge-on and at any moment a third of the field would be. And they are
+hair thin — four to ten millimetres. The first pass used centimetre-wide quads
+and produced a field of white bars: a raindrop at speed is a streak a few
+millimetres across, and the moment it is wide enough to read as a shape it stops
+reading as rain. Length carries it instead.
+
+The road's roughness drops for the wet look. At night it is lit almost entirely
+by things beside it, and a rough surface returns that as a dull even grey;
+letting the kerbs, the shopfronts and the car's own lamps streak down it is most
+of what makes a wet street read as wet. The back tyres throw a rooster tail out
+of it, built once at unit length and stretched by a matrix, and it only appears
+above walking pace — a stationary rooster tail reads as the car leaking.
+
+`--rain 0` turns all of it off.
 
 ## Capture
 

@@ -194,6 +194,11 @@ fn addMarkings(b: &mut Builder, track: &Track) {
     addStripe(b, track, HALF_WIDTH - 0.55, 0.14, 0.0, 0.0, 0.95, 0.95, 0.98)
     addStripe(b, track, -HALF_WIDTH / 3.0, 0.12, 4.0, 5.0, 0.90, 0.90, 0.95)
     addStripe(b, track, HALF_WIDTH / 3.0, 0.12, 4.0, 5.0, 0.90, 0.90, 0.95)
+    // The double yellow down the middle. It is the one marking that says "public
+    // road" rather than "circuit", and on a dark surface at night it is also the
+    // only thing besides the kerbs telling you where the middle is.
+    addStripe(b, track, -0.30, 0.13, 0.0, 0.0, 0.92, 0.68, 0.06)
+    addStripe(b, track, 0.30, 0.13, 0.0, 0.0, 0.92, 0.68, 0.06)
 }
 
 // Rumble strips down both edges, alternating red and white every three metres.
@@ -269,42 +274,29 @@ fn addBarriers(wall: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut
             pushQuadN(wall, v3(a.x, 0.0, a.z), v3(c.x, 0.0, c.z), v3(c.x, WALL_H, c.z), v3(a.x, WALL_H, a.z), nrm, s0, 0.0, s1, WALL_H, side > 0.0)
             pushQuadN(wall, v3(a.x, WALL_H, a.z), v3(c.x, WALL_H, c.z), v3(d.x, WALL_H, d.z), v3(e.x, WALL_H, e.z), up, s0, 0.0, s1, thick, side > 0.0)
 
-            // The neon. Colour drifts along the lap between cyan and magenta,
-            // out of phase on the two sides, so the two barriers are never the
-            // same colour at the same place and a glance tells you which side of
-            // the road you are looking at.
-            let phase = s0 * 0.0032 + (if side > 0.0 {
-                Math.pi()
-            } else {
-                0.0
-            }
-            )
-            let mix = 0.5 + 0.5 * Math.sin(phase)
-            // Cyan at one end, magenta at the other. What keeps a tube coloured
-            // rather than white is the RATIO between the channels, not the
-            // overall level: raise the dim channels to make it brighter and ACES
-            // rolls all three toward white together, which is how a neon scene
-            // ends up looking like a fluorescent one.
-            let r = 0.10 + 2.50 * mix
-            let g = 1.60 - 1.50 * mix
-            let bl = 2.40 - 1.10 * mix
-            neon.setTint(r, g, bl)
+            // A thin lit strip along the top edge, and nothing else.
+            //
+            // This used to be a 54 cm panel down the inner face running a cyan-
+            // to-magenta ramp along the lap, out of phase on the two sides. As a
+            // way of telling the two barriers apart it worked; as a thing to look
+            // at for a whole lap it was a coloured bar the height of the car
+            // pinned to each side of the frame, and once the city behind it was
+            // solid there was no room left for it. The barrier's job at night is
+            // to say where the edge of the road is, and a strip does that. What
+            // reads as neon now is the shopfronts and the signs, which are on the
+            // buildings, where a city keeps its lights.
+            neon.setTint(1.55, 1.32, 1.05)
             neon.setUvScale(1.0)
             neon.setAo(1.0)
             let nx = nrm.scale(0.06)
-            // Two lit bands on the inner face, not one tube along the top edge.
-            // A thin cap reads as a white wire at any distance and vanishes at
-            // the vanishing point; a broad panel is what makes the barrier a
-            // wall of light and gives the wet road something to reflect.
-            emitBand(neon, a, c, nx, nrm, 0.42, 0.96, side > 0.0)
-            emitBand(neon, a, c, nx, nrm, WALL_H + 0.02, WALL_H + 0.14, side > 0.0)
+            emitBand(neon, a, c, nx, nrm, WALL_H - 0.10, WALL_H + 0.02, side > 0.0)
 
             // A light every twelve metres or so along each barrier. Dense
             // enough that the road under the cap is lit continuously once the
             // frame loop picks the nearest ones.
             if i % 5 == 0 {
                 let p = track.pointAt(s0, inner * 0.94)
-                pushLight(pool, v3(p.x, WALL_H + 0.35, p.z), r * 1.3, g * 1.3, bl * 1.3, 24.0)
+                pushLight(pool, v3(p.x, WALL_H + 0.35, p.z), 1.5, 1.28, 1.00, 17.0)
             }
         }
         side = side + 2.0
@@ -350,12 +342,17 @@ fn addFurniture(steel: &mut Builder, neon: &mut Builder, track: &Track, pool: &m
         let nrm = track.normalAt(s).scale(side)
         let head = v3(base.x - nrm.x * 2.2, 7.2, base.z - nrm.z * 2.2)
         steel.boxSpan(v3(Math.minF64(base.x, head.x) - 0.09, 7.0, Math.minF64(base.z, head.z) - 0.09), v3(Math.maxF64(base.x, head.x) + 0.09, 7.2, Math.maxF64(base.z, head.z) + 0.09))
-        neon.setTint(1.90, 1.00, 2.20)
+        // Warm white, not neon. At night these are the only thing lighting the
+        // pavement and the bottom of the facades, and a magenta street lamp
+        // leaves the buildings the same black they were with none: the tubes on
+        // the barrier already own the colour, and what the city needs from these
+        // is plain light with enough reach to actually land on a wall.
+        neon.setTint(2.30, 1.95, 1.40)
         neon.setUvScale(1.0)
         neon.setAo(1.0)
         neon.box(v3(head.x, 6.86, head.z), 0.42, 0.09, 0.42)
-        pushLight(pool, v3(head.x, 6.6, head.z), 3.4, 1.9, 4.0, 26.0)
-        s = s + 38.0
+        pushLight(pool, v3(head.x, 6.5, head.z), 5.4, 4.4, 3.0, 34.0)
+        s = s + 25.0
         flip = !flip
     }
 
@@ -927,17 +924,17 @@ fn addShopRow(city: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &V
         // comes back as a white slab with no colour left in it: the shopfronts
         // have to sit UNDER the neon tubes in brightness or they eat the street.
         let glow = rg.f()
-        var gr = 0.92
-        var gg = 0.70
-        var gb = 0.42
+        var gr = 1.55
+        var gg = 1.18
+        var gb = 0.70
         if glow > 0.72 {
-            gr = 0.22
-            gg = 0.78
-            gb = 0.96
+            gr = 0.34
+            gg = 1.24
+            gb = 1.55
         } else if glow > 0.48 {
-            gr = 1.04
-            gg = 0.32
-            gb = 0.68
+            gr = 1.70
+            gg = 0.52
+            gb = 1.10
         }
         neon.setUvScale(1.0)
         neon.setAo(1.0)
@@ -987,7 +984,7 @@ fn addShopRow(city: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &V
             pushLight(pool, shopPoint(c, alongX, dir, depth, mid, by + bh * 0.5, 1.5), bc.x * 2.2 + 0.2, bc.y * 2.2 + 0.2, bc.z * 2.2 + 0.2, 15.0)
         }
 
-        pushLight(pool, shopPoint(c, alongX, dir, depth, mid, 2.4, 2.2), gr * 2.2, gg * 2.2, gb * 2.2, 14.0)
+        pushLight(pool, shopPoint(c, alongX, dir, depth, mid, 2.4, 2.2), gr * 2.4, gg * 2.4, gb * 2.4, 17.0)
         i = i + 1
     }
 }
@@ -1306,7 +1303,12 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
 
     // Road. Dark, rough, and barely metallic: the wet look comes from the
     // roughness variation baked into the surface map, not from metalness.
-    var road = material(TEX_ASPHALT, 0.30, 0.295, 0.285, 0.86, 0.02)
+    // Glossier than daytime asphalt on purpose. At night the road is lit almost
+    // entirely by things beside it, and a rough surface returns that as a dull
+    // even grey; dropping the roughness lets the barrier tubes, the shopfronts
+    // and the car's own lamps streak down it, which is most of what makes a wet
+    // city street read as a wet city street rather than as grey paper.
+    var road = material(TEX_ASPHALT, 0.145, 0.145, 0.150, 0.44, 0.06)
     road.normalStrength = 0.7
     // A second copy of the aggregate at a quarter the size. The road runs from
     // under the bumper to four hundred metres away and one texture scale cannot

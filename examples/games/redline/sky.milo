@@ -1,18 +1,25 @@
-// The sky the race runs under, tabulated once at startup.
+// The night the race runs under, tabulated once at startup.
 //
 // There is no atmospheric model here. What the reflection lookup and the ambient
-// term need is the radiance of a *city at golden hour* in every direction: a
-// real blue zenith, a bank of cloud lit warm along its underside, a sun about 24
-// degrees up, and a band of haze all the way round the horizon. It is stored
+// term need is the radiance of a *city at night* in every direction: a near-black
+// zenith, a deck of cloud lit from BELOW by the city under it, and a band of
+// sodium glow all the way round the horizon where the streets are. It is stored
 // lat-long (u = azimuth, v = zenith angle), the same layout the shader already
 // samples.
 //
-// This used to be a violet-to-magenta sunset with the sun almost on the deck. It
-// looked striking on its own and washed the whole game one colour: every surface
-// in the frame is lit out of this table, so a magenta sky makes magenta asphalt,
-// magenta concrete and magenta paint, and the neon loses its job because there
-// is nothing left for it to be coloured *against*. The low sun compounded it by
-// never actually striking a facade, so the city read as a silhouette.
+// At night the sky is not the light source, the city is. What this table has to
+// get right is therefore not brightness but the *ratio*: it must be dark enough
+// that a lit window, a neon tube and a headlight are the brightest things in the
+// frame, and coloured enough that a surface facing up is not the same colour as
+// one facing the street. Make it merely dim and the render turns grey; make it
+// black and every shadow becomes a hole.
+//
+// An earlier pass ran this as a violet-to-magenta sunset. Every surface is lit
+// out of this table, so a magenta sky made magenta asphalt, magenta concrete and
+// magenta paint, and the neon lost its job because nothing was left for it to be
+// coloured against. The lesson survives the move to night: the sky's colour is
+// the whole scene's colour, so it stays close to neutral and lets the lights
+// carry the hue.
 //
 // Two things come out of it and both decide how the game looks:
 //
@@ -59,13 +66,14 @@ pub struct Sky {
 }
 
 // Where the sun sits, as a bearing and a height above the horizon. The bearing
-// is the whole reason the sky is not radially symmetric: the hot half and the
-// cold half are what tell you which way down the circuit you are pointing. The
-// height has to be enough to actually land on a vertical facade - grazing the
-// horizon looks like the most dramatic choice and lights nothing.
+// is the whole reason the sky is not radially symmetric: at night this is the
+// downtown glow on one side of the city, and which half of the sky is brighter
+// is what tells you which way round the circuit you are pointing. The elevation
+// has to be enough for the key light to actually land on a vertical facade -
+// grazing the horizon looks like the most dramatic choice and lights nothing.
 let SUN_AZ: f64 = -1.05
 
-let SUN_Y: f64 = 0.415
+let SUN_Y: f64 = 0.30
 
 // Smooth pulse, 1 at `c` and 0 more than `w` away.
 fn lobe(x: f64, c: f64, w: f64): f64 {
@@ -132,47 +140,59 @@ fn skyRadiance(dir: &Vec3): Vec3 {
     // Below the horizon there is no sky, only the haze standing over the city.
     // Warm, so a surface facing down is not the same colour as one facing up,
     // which is most of what keeps a car from looking like it is lit by one lamp.
+    // Below the horizon there is no sky, only the glow standing over the city.
+    // Warm, because that is sodium and shopfront light coming back up off the
+    // streets, and it is most of what keeps a car's underside from being black.
     if up < 0.0 {
         let d = -up
-        var g = v3(0.105, 0.105, 0.125).scale(1.0 - 0.6 * d)
-        g = g + v3(0.34, 0.19, 0.09).scale(toward * (1.0 - sstep(0.0, 0.35, d)))
+        var g = v3(0.030, 0.028, 0.036).scale(1.0 - 0.6 * d)
+        g = g + v3(0.115, 0.062, 0.024).scale(toward * (1.0 - sstep(0.0, 0.35, d)))
         return g
     }
 
     // The vertical ramp: violet overhead, magenta through the middle, hot at the
     // horizon. Three stops rather than two, because a two-stop gradient behind a
     // skyline is the tell that the backdrop is a ramp.
-    let zenith = v3(0.055, 0.155, 0.520)
-    let middle = v3(0.245, 0.365, 0.680)
-    let horizon = v3(0.88, 0.60, 0.46)
+    // Night, in three stops. The zenith is nearly black with just enough blue in
+    // it to stay a colour rather than a hole; the horizon is where the city is,
+    // so it goes warm and comparatively bright, and that contrast is the whole
+    // reason a night skyline reads as a skyline instead of as a silhouette on a
+    // flat backdrop.
+    let zenith = v3(0.006, 0.010, 0.030)
+    let middle = v3(0.020, 0.030, 0.072)
+    let horizon = v3(0.175, 0.135, 0.115)
     var col = middle.lerp(zenith, sstep(0.20, 0.85, up))
     col = horizon.lerp(col, sstep(0.0, 0.24, up))
 
     // The sun's half of the sky runs orange, the far half stays magenta. This is
     // one multiply and it is what makes the horizon read as a sunset rather than
     // as a pink fog bank.
-    col = col + v3(0.66, 0.30, 0.04).scale(toward * (1.0 - sstep(0.0, 0.45, up)))
+    col = col + v3(0.170, 0.088, 0.030).scale(toward * (1.0 - sstep(0.0, 0.45, up)))
 
-    // Cloud. Lit hot along its underside near the sun and left violet away from
-    // it, and thinning with height so the deck opens up overhead.
+    // Cloud, lit from UNDERNEATH. This is the one thing that says night in a
+    // city rather than night in a field: there is no sun on top of the deck, so
+    // the only light reaching it is the orange coming back up off the streets,
+    // which makes the overcast brighter than the clear sky above it and warmer
+    // than anything else up there. Overhead it thins out and goes cold.
     let cl = cloudMask(up, az)
-    let lit = v3(1.85, 1.15, 0.72).lerp(v3(0.34, 0.36, 0.50), 1.0 - toward)
-    let hi = v3(0.78, 0.83, 0.96)
+    let lit = v3(0.235, 0.135, 0.070).lerp(v3(0.055, 0.052, 0.070), 1.0 - toward)
+    let hi = v3(0.030, 0.034, 0.055)
     let cloud = lit.lerp(hi, sstep(0.15, 0.75, up))
     col = col.lerp(cloud, cl * 0.82)
 
-    // The disc, and the glow around it. The disc is far above the bloom
-    // threshold on purpose: the halo the bloom pass builds around it is the
-    // cheapest sunset in graphics.
-    let glow = Math.pow(Math.maxF64(cosSun, 0.0), 14.0)
-    let disc = Math.pow(Math.maxF64(cosSun, 0.0), 900.0)
-    col = col + v3(1.30, 0.52, 0.16).scale(glow)
-    col = col + v3(9.0, 5.4, 2.4).scale(disc)
+    // No disc. There is a broad downtown glow where the key light comes from,
+    // and a moon, which is small and cold and exists so the sky has one hard
+    // thing in it to look at.
+    let glow = Math.pow(Math.maxF64(cosSun, 0.0), 9.0)
+    col = col + v3(0.165, 0.098, 0.042).scale(glow)
+    let moonDir = v3(-0.52, 0.60, 0.61).norm()
+    let moon = Math.pow(Math.maxF64(dir.dot(moonDir), 0.0), 3200.0)
+    col = col + v3(3.4, 3.6, 4.2).scale(moon)
 
     // The skyline haze: a bright band right at the horizon all the way round,
     // because the circuit is a loop and there is city on every side of it.
     let band = lobe(up, 0.012, 0.075)
-    col = col + v3(0.58, 0.44, 0.40).scale(band * (0.5 + 0.5 * toward))
+    col = col + v3(0.155, 0.105, 0.072).scale(band * (0.5 + 0.5 * toward))
 
     return col
 }
@@ -239,16 +259,25 @@ pub fn buildSky(intensity: f64): Sky {
     // Irradiance, not average radiance: the pi is the integral of the cosine
     // over the hemisphere, and dropping it is the classic way a render comes out
     // three times too dark in shadow.
-    let skyUp = v3(upR, upG, upB).scale(Math.pi() / upW)
+    // A small floor under the sky's own irradiance. Physically the night sky
+    // delivers almost nothing to an up-facing surface, and taken literally that
+    // makes every facade not directly under a lamp pure black - which is not
+    // what a city looks like, because a real one is sitting inside a bowl of its
+    // own scattered light. The pool only carries sixteen lights, so this floor is
+    // standing in for the several thousand it cannot.
+    let skyUp = v3(upR, upG, upB).scale(Math.pi() / upW) + v3(0.055, 0.058, 0.080)
     let below = v3(downR, downG, downB).scale(Math.pi() / downW)
-    // The sun, warm and strong. It has to beat the sky's own fill or the cars
-    // come out shadowless and flat, which is the one thing a bright sky costs
-    // you over a dark one.
-    let sunC = v3(2.85, 2.02, 1.36).scale(intensity)
+    // The key light. At night it is not the sun: it is a weak cool directional
+    // standing in for moonlight and the general downtown glow, and its whole job
+    // is to keep the shadow terminator on a curved panel visible. It still has to
+    // beat the sky's own fill or the cars come out shadowless and flat, but it is
+    // an order of magnitude down on the daytime value, because at night the
+    // things that actually light this scene are in the light pool.
+    let sunC = v3(0.30, 0.35, 0.52).scale(intensity)
     // What the road throws back up. Warm asphalt under a low sun bounces amber,
     // and a car's underside picking that up is most of what says the race is
     // happening on a street rather than in a void.
-    let bounce = below.scale(0.80) + v3(0.060, 0.045, 0.038).scale(intensity)
+    let bounce = below.scale(0.80) + v3(0.030, 0.021, 0.014).scale(intensity)
     return Sky {
         table: table, sun: sun, sunColor: sunC, skyUp: skyUp, skyDown: bounce,
     }

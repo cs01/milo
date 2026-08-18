@@ -329,7 +329,7 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
         aoRadius: 0.95,
         lights: Vec.new(),
         debug: 0.0,
-        exposure: 1.0,
+        exposure: 1.22,
         // Far more than a film camera would give you, and the right amount for
         // a room whose subject IS its light sources: the bloom is what carries
         // a tube's glow out past its own silhouette, and without it every neon
@@ -514,6 +514,22 @@ impl Gfx {
     // the occlusion of whatever the gun is covering up.
     fn setAoAmount(self: &Self, amount: f64) {
         self.scene.uniformF("uAoAmount", amount)
+    }
+
+    // Transparent geometry inside the scene pass. Depth WRITE off, depth test
+    // on: the rain has to be occluded by the buildings it is falling behind, and
+    // must not occlude the rain behind it, and thousands of unsorted alpha quads
+    // that write depth do exactly the wrong one of those.
+    fn sceneBlendOn(self: &Self) {
+        Gpu.blendAlpha()
+        Gpu.depthWrite(false)
+        Gpu.cullBackFaces(false)
+    }
+
+    fn sceneBlendOff(self: &Self) {
+        Gpu.blendOff()
+        Gpu.depthWrite(true)
+        Gpu.cullBackFaces(true)
     }
 
     fn sceneDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>, m: &Material) {

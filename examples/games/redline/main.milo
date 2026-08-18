@@ -57,6 +57,9 @@ from "./hud" import {
 from "./mat4" import {
     identity, invertViewProj, multiply, scaleXyz, translation
 }
+from "./rain" import {
+    buildRain, rainMaterial, sprayMaterial, sprayMatrix, tileMatrix
+}
 from "./render" import {
     newGfx, sceneAttrs
 }
@@ -222,6 +225,11 @@ pub fn main(): i32 {
     print($"circuit: {(track.length as i64)} m over {track.n} samples")
 
     var world = buildWorld(gl, track)
+    var rain = buildRain(gl)
+    // How hard it is raining, 0 to 1. A constant for now: the wet road, the
+    // reflections and the spray are all keyed off it, so turning it down is the
+    // one knob that makes the night dry again.
+    let rainAmount = argValue("--rain", "1").parseF64() ?? 1.0
     let carModel = buildCarModel(gl)
     let trimMat = trimMaterial()
     let glassMat = glassMaterial()
@@ -480,6 +488,38 @@ pub fn main(): i32 {
                 gfx.sceneDraw(carModel.wheel, player.wheelMatrix(w), wheelMat)
             }
         }
+        // Rain, and the water the back tyres throw out of it. Both are drawn
+        // last and blended, after every opaque surface has laid down depth, so
+        // the curtain is occluded by the city rather than painted over it.
+        if rainAmount > 0.0 {
+            gfx.sceneBlendOn()
+            let rainM = rainMaterial(rainAmount * 1.05)
+            var ti = 0
+            while ti < 2 {
+                var tj = 0
+                while tj < 2 {
+                    var tl = 0
+                    while tl < 2 {
+                        gfx.sceneDraw(rain.tile, tileMatrix(eye, gfx.time, ti, tj, tl), rainM)
+                        tl = tl + 1
+                    }
+                    tj = tj + 1
+                }
+                ti = ti + 1
+            }
+            // Spray needs the car to actually be rolling. Below walking pace a
+            // stationary rooster tail reads as the car leaking.
+            let wet = Math.clampF64((Math.abs(player.forwardSpeed()) - 6.0) / 60.0, 0.0, 1.0)
+            if wet > 0.02 {
+                let sprayM = sprayMaterial(rainAmount * wet * 0.55)
+                gfx.sceneDraw(rain.spray, sprayMatrix(model, -0.85, -1.22, wet), sprayM)
+                gfx.sceneDraw(rain.spray, sprayMatrix(model, 0.85, -1.22, wet), sprayM)
+                gfx.sceneDraw(rain.spray, sprayMatrix(model, -0.85, 1.22, wet * 0.55), sprayM)
+                gfx.sceneDraw(rain.spray, sprayMatrix(model, 0.85, 1.22, wet * 0.55), sprayM)
+            }
+            gfx.sceneBlendOff()
+        }
+
         // The plume. Stretched along its own axis by the boost and flickered by
         // brightness, which is cheaper and steadier than rebuilding it.
         if player.boost > 0.02 {

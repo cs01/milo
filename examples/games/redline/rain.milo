@@ -1,0 +1,194 @@
+// Rain: the falling curtain, and what the tyres throw up out of it.
+//
+// **The curtain is one tile drawn eight times, not a particle system.** Rain is
+// statistically uniform, so there is nothing to simulate: what the eye reads is
+// density and streak length, both of which a static mesh has. The tile is built
+// once with its streaks at positions in [0, RAIN_CELL) on every axis, which makes the
+// field RAIN_CELL-periodic, and periodicity is the whole trick. A translation by any
+// whole number of cells is invisible, so the frame loop can keep the block
+// centred on the camera by snapping to the cell grid, and it can make the rain
+// fall by sliding it down and wrapping at RAIN_CELL. Both motions are one matrix.
+//
+// The alternative - one tile snapped to the camera - reshuffles the entire field
+// the moment the camera crosses a cell boundary, because a single tile of random
+// content does not tile. Eight copies of one periodic tile do.
+//
+// **Each streak is two crossed quads.** A single quad disappears edge-on, and at
+// any moment a third of the field would be facing the camera edge-on. Crossing
+// two costs four triangles a drop and removes the whole problem without needing
+// the camera in the vertex data.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Mesh
+}
+from "./mat4" import {
+    multiply, scaleXyz, translation
+}
+from "./mesh" import {
+    Builder, builder
+}
+from "./render" import {
+    Material, material, sceneAttrs
+}
+from "./rng" import {
+    Rand, rand
+}
+from "./textures" import {
+    TEX_PAINT
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+// The tile edge, in metres. The drawn block is two cells on a side, so this is
+// half the distance from the camera to the edge of the rain. Big enough that the
+// boundary is outside anything you would look at, small enough that the streaks
+// inside it are dense without needing tens of thousands.
+pub let RAIN_CELL: f64 = 30.0
+
+// Streaks per tile. Eight tiles are drawn, so this is an eighth of what is in
+// the air at once.
+let PER_TILE: i64 = 1500
+
+// How fast the curtain falls, in metres per second. Faster than real rain: real
+// rain at this streak length reads as drifting snow, and the point of the effect
+// is that the weather is going past.
+pub let FALL: f64 = 26.0
+
+pub struct Rain {
+    tile: Mesh,
+    // The spray off one rear tyre, built around the origin pointing back down
+    // -Z, so the frame loop places and stretches it with a matrix.
+    spray: Mesh,
+}
+
+pub fn buildRain(gl: &mut GlContext): Rain {
+    var b = builder()
+    b.setUvScale(1.0)
+    b.setAo(1.0)
+    var rg = rand(0x7a12b5)
+    var i = 0
+    while i < PER_TILE {
+        let x = rg.range(0.0, RAIN_CELL)
+        let y = rg.range(0.0, RAIN_CELL)
+        let z = rg.range(0.0, RAIN_CELL)
+        // Length and brightness vary together, so the field has near drops and
+        // far ones in it rather than one uniform hatch.
+        // Long and HAIR thin. The first pass used centimetre-wide quads and the
+        // result was a field of white bars: a raindrop seen at speed is a streak
+        // a few millimetres across, and the moment it is wide enough to read as
+        // a shape it stops reading as rain. Length is what carries it instead.
+        let len = rg.range(0.95, 2.30)
+        let w = rg.range(0.004, 0.010)
+        let k = rg.range(0.40, 1.10)
+        // A slight lean, different per streak. Uniformly vertical rain reads as
+        // a wire fence.
+        let lean = rg.jitter(0.16)
+        b.setTint(k * 0.72, k * 0.82, k * 1.0)
+        streak(b, v3(x, y, z), len, w, lean)
+        i = i + 1
+    }
+    var m = Mesh.new(gl, sceneAttrs())
+    m.upload(b.data.clone())
+
+    var s = builder()
+    s.setUvScale(1.0)
+    s.setAo(1.0)
+    sprayGeometry(s, rg)
+    var sm = Mesh.new(gl, sceneAttrs())
+    sm.upload(s.data.clone())
+
+    return Rain {
+        tile: m, spray: sm,
+    }
+}
+
+// One streak: two quads crossed at right angles about the fall axis.
+fn streak(b: &mut Builder, p: &Vec3, len: f64, w: f64, lean: f64) {
+    let top = v3(p.x + lean * len, p.y + len, p.z + lean * len * 0.5)
+    // The normal points up rather than at anything in particular: this material
+    // is pure emissive, so nothing reads it, and giving it a real one would cost
+    // a cross product per drop for no pixels.
+    let n = v3(0.0, 1.0, 0.0)
+    b.push(v3(p.x - w, p.y, p.z), n, 0.0, 0.0)
+    b.push(v3(p.x + w, p.y, p.z), n, 1.0, 0.0)
+    b.push(v3(top.x + w, top.y, top.z), n, 1.0, 1.0)
+    b.push(v3(p.x - w, p.y, p.z), n, 0.0, 0.0)
+    b.push(v3(top.x + w, top.y, top.z), n, 1.0, 1.0)
+    b.push(v3(top.x - w, top.y, top.z), n, 0.0, 1.0)
+
+    b.push(v3(p.x, p.y, p.z - w), n, 0.0, 0.0)
+    b.push(v3(p.x, p.y, p.z + w), n, 1.0, 0.0)
+    b.push(v3(top.x, top.y, top.z + w), n, 1.0, 1.0)
+    b.push(v3(p.x, p.y, p.z - w), n, 0.0, 0.0)
+    b.push(v3(top.x, top.y, top.z + w), n, 1.0, 1.0)
+    b.push(v3(top.x, top.y, top.z - w), n, 0.0, 1.0)
+}
+
+// The rooster tail off one tyre: a scatter of small quads in a cone widening and
+// rising behind the contact patch. Built once at unit length and stretched by
+// the matrix, so it grows with speed without being rebuilt.
+fn sprayGeometry(b: &mut Builder, rg: &mut Rand) {
+    let n = v3(0.0, 1.0, 0.0)
+    var i = 0
+    while i < 220 {
+        let t = rg.f()
+        // Back along -Z, spreading and lifting as it goes, and thinning out:
+        // most of the water is close to the tyre.
+        let z = -t * t * 1.0
+        let spread = 0.10 + t * 0.42
+        let x = rg.jitter(spread)
+        let y = 0.04 + t * 0.55 * rg.f() + rg.jitter(0.05)
+        let s = (0.018 + t * 0.062) * rg.range(0.6, 1.4)
+        // Dimmer further back, so the tail fades instead of ending.
+        let k = (1.0 - t * 0.78) * rg.range(0.5, 1.0)
+        b.setTint(k * 0.85, k * 0.92, k * 1.0)
+        b.push(v3(x - s, y - s, z), n, 0.0, 0.0)
+        b.push(v3(x + s, y - s, z), n, 1.0, 0.0)
+        b.push(v3(x + s, y + s, z), n, 1.0, 1.0)
+        b.push(v3(x - s, y - s, z), n, 0.0, 0.0)
+        b.push(v3(x + s, y + s, z), n, 1.0, 1.0)
+        b.push(v3(x - s, y + s, z), n, 0.0, 1.0)
+        i = i + 1
+    }
+}
+
+// Rain and spray are pure emissive with a black albedo, like the neon bucket:
+// the tint in the mesh carries the per-drop brightness, and `k` scales the whole
+// curtain so the frame loop can fade it.
+pub fn rainMaterial(k: f64): Material {
+    var m = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
+    m.emissive = v3(k, k, k)
+    m.alpha = 0.42
+    return m
+}
+
+pub fn sprayMaterial(k: f64): Material {
+    var m = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
+    m.emissive = v3(k * 0.9, k * 0.95, k)
+    m.alpha = 0.30
+    return m
+}
+
+// Where tile (i, j, l) of the block goes this frame. The camera is snapped down
+// to the cell grid and backed off by one cell, so the eight tiles straddle it,
+// and the fall is a slide that wraps at RAIN_CELL - which is invisible precisely
+// because every tile is the same tile.
+pub fn tileMatrix(cam: &Vec3, t: f64, i: i64, j: i64, l: i64): Vec<f32> {
+    let bx = Math.floor(cam.x / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+    let by = Math.floor(cam.y / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+    let bz = Math.floor(cam.z / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+    let drop = t * FALL - Math.floor(t * FALL / RAIN_CELL) * RAIN_CELL
+    return translation(v3(bx + (i as f64) * RAIN_CELL, by + (j as f64) * RAIN_CELL - drop, bz + (l as f64) * RAIN_CELL))
+}
+
+// One rear tyre's spray, placed in the car's frame and stretched by how fast it
+// is going.
+pub fn sprayMatrix(model: &Vec<f32>, x: f64, z: f64, speed01: f64): Vec<f32> {
+    let len = 0.6 + 2.6 * speed01
+    let wide = 0.7 + 0.8 * speed01
+    return multiply(model, multiply(translation(v3(x, 0.0, z)), scaleXyz(wide, wide, len)))
+}

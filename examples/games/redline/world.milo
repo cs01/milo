@@ -359,33 +359,101 @@ fn addFurniture(steel: &mut Builder, neon: &mut Builder, track: &Track, pool: &m
         flip = !flip
     }
 
-    // Arches. Wide enough to clear the barriers, tall enough to drive under
-    // without the camera clipping them.
-    var g = 130.0
-    while g < track.length {
-        let nrm = track.normalAt(g)
-        let l = track.pointAt(g, WALL + 1.6)
-        let r = track.pointAt(g, -(WALL + 1.6))
-        let top = 10.4
-        steel.setUvScale(0.8)
-        steel.setTint(0.26, 0.27, 0.34)
-        steel.setAo(0.85)
-        steel.resetXform()
-        steel.cylinder(v3(l.x, 0.0, l.z), 0.30, top, 8, false)
-        steel.cylinder(v3(r.x, 0.0, r.z), 0.30, top, 8, false)
-        // The cross beam, as a box spanning the two pillars. It is axis-aligned
-        // in the builder's frame, which is only correct because it is built from
-        // the two endpoints rather than from a centre and an extent.
-        steel.boxSpan(v3(Math.minF64(l.x, r.x) - 0.34, top, Math.minF64(l.z, r.z) - 0.34), v3(Math.maxF64(l.x, r.x) + 0.34, top + 1.5, Math.maxF64(l.z, r.z) + 0.34))
-        // Two tubes under the beam, hot, so the arch reads as a gate of light.
-        neon.setTint(2.40, 0.30, 1.60)
-        neon.boxSpan(v3(Math.minF64(l.x, r.x) - 0.30, top - 0.26, Math.minF64(l.z, r.z) - 0.30), v3(Math.maxF64(l.x, r.x) + 0.30, top - 0.10, Math.maxF64(l.z, r.z) + 0.30))
-        neon.setTint(0.35, 1.80, 2.40)
-        neon.boxSpan(v3(Math.minF64(l.x, r.x) - 0.24, top + 1.52, Math.minF64(l.z, r.z) - 0.24), v3(Math.maxF64(l.x, r.x) + 0.24, top + 1.66, Math.maxF64(l.z, r.z) + 0.24))
-        let mid = track.pointAt(g, 0.0)
-        pushLight(pool, v3(mid.x, top - 0.8, mid.z), 6.0, 1.4, 4.5, 34.0)
-        let _ = nrm
-        g = g + 205.0
+}
+
+// Pavement cafes. Four a lap, alternating sides.
+//
+// They are the only thing in the game at human scale, and that is the whole
+// point of them: a street lined with nothing but buildings has no way to tell
+// you how big the buildings are. A chair is a metre of known height parked
+// against a forty-metre facade, so putting four of them on the pavement does
+// more for the sense of scale than another twenty storeys does.
+fn addPatios(city: &mut Builder, steel: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
+    var rg = rand(0xca7e01)
+    let spots = 4
+    var i = 0
+    while i < spots {
+        let s = 90.0 + (i as f64) * (track.length / (spots as f64))
+        let side = if i % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+        // Down the middle of the pavement, so the chairs clear the barrier on
+        // one side and the shopfronts on the other.
+        let lat = (WALL + PAVEMENT * 0.52) * side
+        let shade = awningColor((rg.f() * 6.0) as i64)
+
+        var k = 0
+        while k < 4 {
+            let c = track.pointAt(s + (k as f64) * 3.1, lat)
+            cafeTable(city, steel, c, shade, k % 2 == 0)
+            k = k + 1
+        }
+
+        // A planter at each end, which is what a real pavement cafe is fenced
+        // off from the traffic with.
+        var e = -1.0
+        while e < 2.0 {
+            let p = track.pointAt(s + 1.55 + e * 6.6, lat)
+            city.resetXform()
+            city.setUvScale(0.5)
+            city.setAo(0.8)
+            city.setTint(0.34, 0.30, 0.27)
+            city.box(v3(p.x, 0.30, p.z), 0.42, 0.30, 0.42)
+            city.setTint(0.10, 0.30, 0.11)
+            city.box(v3(p.x, 0.78, p.z), 0.36, 0.24, 0.36)
+            e = e + 2.0
+        }
+
+        // One warm lamp over the whole set. Four table lights would be four of
+        // the sixteen the shader has.
+        let mid = track.pointAt(s + 4.6, lat)
+        pushLight(pool, v3(mid.x, 2.6, mid.z), 2.6, 1.85, 1.05, 13.0)
+        neon.setUvScale(1.0)
+        neon.setAo(1.0)
+        neon.setTint(1.9, 1.35, 0.72)
+        neon.box(v3(mid.x, 2.42, mid.z), 0.16, 0.10, 0.16)
+        i = i + 1
+    }
+}
+
+// One table, its chairs, and every other one an umbrella. The umbrella is what
+// carries the colour; a bare table at this distance is a grey smudge.
+fn cafeTable(city: &mut Builder, steel: &mut Builder, c: &Vec3, shade: &Vec3, umbrella: bool) {
+    steel.resetXform()
+    steel.setUvScale(1.0)
+    steel.setAo(0.75)
+    steel.setTint(0.24, 0.24, 0.27)
+    steel.cylinder(v3(c.x, 0.0, c.z), 0.055, 0.70, 8, false)
+    steel.setTint(0.86, 0.84, 0.80)
+    steel.cylinder(v3(c.x, 0.70, c.z), 0.40, 0.05, 12, true)
+
+    // Two chairs, on the road side and the shop side of the table.
+    var d = -1.0
+    while d < 2.0 {
+        let cx = c.x + d * 0.78
+        steel.setTint(0.22, 0.22, 0.25)
+        steel.boxSpan(v3(cx - 0.20, 0.42, c.z - 0.20), v3(cx + 0.20, 0.47, c.z + 0.20))
+        steel.boxSpan(v3(cx + d * 0.15, 0.47, c.z - 0.19), v3(cx + d * 0.20, 0.86, c.z + 0.19))
+        // Legs as one block rather than four: at a metre tall and thirty metres
+        // away, four 3 cm posts are the same pixel as one dark mass under the
+        // seat, and they cost sixteen times the triangles to say it.
+        steel.setTint(0.16, 0.16, 0.19)
+        steel.boxSpan(v3(cx - 0.16, 0.0, c.z - 0.16), v3(cx + 0.16, 0.42, c.z + 0.16))
+        d = d + 2.0
+    }
+
+    if umbrella {
+        steel.setTint(0.70, 0.70, 0.72)
+        steel.cylinder(v3(c.x, 0.75, c.z), 0.035, 1.55, 6, false)
+        city.resetXform()
+        city.setUvScale(0.4)
+        city.setAo(0.9)
+        city.setTint(shade.x, shade.y, shade.z)
+        city.box(v3(c.x, 2.26, c.z), 1.05, 0.05, 1.05)
+        city.setTint(shade.x * 1.2, shade.y * 1.2, shade.z * 1.2)
+        city.box(v3(c.x, 2.14, c.z), 1.08, 0.07, 1.08)
     }
 }
 
@@ -476,16 +544,35 @@ fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &
             let halfX = rg.range(5.0, 9.0)
             // Height is the only thing left to vary, and it carries the whole
             // silhouette now that the plan is a solid run.
-            var height = rg.range(24.0, 48.0)
+            // Nothing short. The front row's job is to be the side of the
+            // frame, and a 24 m block on a 15 m street tops out barely above the
+            // camera: the eye goes over it, finds the haze behind, and reads the
+            // whole wall as a fence with a view. The shortest thing here is
+            // thirty-six metres, about twelve storeys.
+            var height = rg.range(36.0, 58.0)
             let tall = rg.f()
-            if tall > 0.80 {
-                height = rg.range(80.0, 135.0)
-            } else if tall > 0.52 {
-                height = rg.range(52.0, 78.0)
+            if tall > 0.78 {
+                height = rg.range(92.0, 150.0)
+            } else if tall > 0.48 {
+                height = rg.range(62.0, 90.0)
             }
-            let off = (WALL + 1.3 + halfX) * side
-            tryBuilding(city, neon, steel, pool, track, off, s + halfZ, halfX, halfZ, height, rg)
-            s = s + halfZ * 1.62
+            let off = (WALL + PAVEMENT + halfX) * side
+            let _ = tryBuilding(city, neon, steel, pool, track, off, s + halfZ, halfX, halfZ, height, rg)
+            // Step by arc length ON THE FACADE, not on the centreline.
+            //
+            // The blocks stand thirteen metres out, so on a corner of radius R
+            // the outside of the road covers (R+13)/R metres of facade for every
+            // metre of centreline. Stepping by centreline arc pulls the outer row
+            // apart by exactly that factor, which on a hairpin is a third again
+            // and opens a hole on the outside of every corner while the inside
+            // piles up. Measuring the offset curve directly costs two lookups and
+            // is right for any radius, including the straights where it is 1.
+            let a = track.pointAt(s, off)
+            let b = track.pointAt(s + 8.0, off)
+            let dxs = b.x - a.x
+            let dzs = b.z - a.z
+            let stretch = Math.clampF64(Math.sqrt(dxs * dxs + dzs * dzs) / 8.0, 0.45, 2.4)
+            s = s + halfZ * 1.62 / stretch
         }
         side = side + 2.0
     }
@@ -496,7 +583,7 @@ fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &
     while t < track.length {
         var bside = -1.0
         while bside < 2.0 {
-            if rg.f() > 0.34 {
+            if rg.f() > 0.12 {
                 let halfX = rg.range(9.0, 18.0)
                 let halfZ = rg.range(9.0, 18.0)
                 var height = rg.range(70.0, 130.0)
@@ -504,11 +591,11 @@ fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &
                     height = rg.range(135.0, 210.0)
                 }
                 let off = (WALL + 24.0 + rg.range(0.0, 44.0) + Math.maxF64(halfX, halfZ)) * bside
-                tryBuilding(city, neon, steel, pool, track, off, t + rg.jitter(12.0), halfX, halfZ, height, rg)
+                let _ = tryBuilding(city, neon, steel, pool, track, off, t + rg.jitter(12.0), halfX, halfZ, height, rg)
             }
             bside = bside + 2.0
         }
-        t = t + 26.0
+        t = t + 19.0
     }
 }
 
@@ -516,13 +603,103 @@ fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &
 // itself in two places, so a block placed off one straight can land squarely on
 // another: `locate` with a cold hint scans the whole table, which is exactly
 // what is wanted at build time and costs nothing there.
-fn tryBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, track: &Track, off: f64, s: f64, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
-    let c = track.pointAt(s, off)
-    let probe = track.locate(c.x, c.z, 0)
-    if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 1.0 {
-        return
+fn tryBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, track: &Track, off: f64, s: f64, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand): bool {
+    // Try the block, and if it will not fit, try a thinner one before giving up.
+    //
+    // The circuit passes close to itself in two places, and in that strip a
+    // full-depth block reaches across into the other carriageway, so the test
+    // below rejects it and the front row simply stops - which is where the holes
+    // that opened onto the ground plane were coming from. But a wall does not
+    // have to be deep to be a wall: what the frame needs is something standing on
+    // the pavement, and a slab a couple of metres thick reads from the road
+    // exactly like a building forty metres deep. Shrinking toward the pavement is
+    // strictly better than the alternative, which is nothing at all.
+    // Shrink BOTH ways, and mostly along the road. Thinning the block only
+    // toward the pavement does nothing about the thing that actually fails: the
+    // corners that reach furthest into the other carriageway are the ones at the
+    // ENDS, swung out by half the block's length, so a long slab stays rejected
+    // however thin it gets. Six steps down to a fifth of the original in each
+    // direction, which at the tightest pinch is a two-metre kiosk - still a wall.
+    var shrink = 0
+    while shrink < 6 {
+        let k = 1.0 - (shrink as f64) * 0.16
+        let hx = halfX * k
+        let hz = halfZ * (1.0 - (shrink as f64) * 0.15)
+        // Keep the near face on the pavement as it thins, so the wall stays a
+        // straight line and only its back edge moves in.
+        let sgn = if off > 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+        let o = off - sgn * (halfX - hx)
+        if placeBuilding(city, neon, steel, pool, track, o, s, hx, hz, height, rg) {
+            return true
+        }
+        shrink = shrink + 1
     }
-    addBuilding(city, neon, steel, pool, c, halfX, halfZ, height, rg)
+    return false
+}
+
+// Place one building if its footprint clears every part of the lap. Returns
+// whether it went down.
+fn placeBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, track: &Track, off: f64, s: f64, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand): bool {
+    let c = track.pointAt(s, off)
+
+    // Test the FOOTPRINT, not the centre minus a bounding radius.
+    //
+    // The old test asked whether `|lateral| - max(halfX, halfZ)` cleared the
+    // wall, which is the distance to the corner of a circle drawn round the
+    // block. For the back row, parked forty metres out, that is harmlessly
+    // conservative. For the front row it is fatal: a block deliberately placed
+    // with its near face on the pavement sits about thirteen metres out, and a
+    // radius of eleven demands twenty-two, so most of the wall was silently
+    // thrown away and what came back was the row of holes it was written to
+    // avoid. Checking the four corners is exact, and the only real question it
+    // asks is whether some corner reaches a DIFFERENT pass of the lap.
+    var i = 0
+    while i < 4 {
+        let sx = if i % 2 == 0 {
+            -1.0
+        } else {
+            1.0
+        }
+        let sz = if i < 2 {
+            -1.0
+        } else {
+            1.0
+        }
+        let p = track.locate(c.x + sx * halfX, c.z + sz * halfZ, 0)
+        if Math.abs(p.lateral) < WALL + 0.9 {
+            return false
+        }
+        i = i + 1
+    }
+
+    // Which way the road is from here, as one of the four world-axis faces. The
+    // shopfronts go on that face only: a plinth wearing awnings and blade signs
+    // on all four sides puts a band of lit boxes down the back of every building
+    // in the city, which from the road reads as a striped ribbon threaded
+    // between the towers rather than as a street.
+    let onRoad = track.pointAt(s, 0.0)
+    let dx = onRoad.x - c.x
+    let dz = onRoad.z - c.z
+    var face = 0
+    if Math.abs(dx) > Math.abs(dz) {
+        face = if dx > 0.0 {
+            0
+        } else {
+            1
+        }
+    } else {
+        face = if dz > 0.0 {
+            2
+        } else {
+            3
+        }
+    }
+    addBuilding(city, neon, steel, pool, c, halfX, halfZ, height, face, rg)
+    return true
 }
 
 // One building: a plinth, a shaft that steps back as it rises, a cornice at
@@ -533,7 +710,7 @@ fn tryBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool
 // cues at all; a tower that loses a few metres of plan at two heights reads as
 // having floors, and the cornice line that comes with each step is what catches
 // the sun.
-fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
+fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, halfX: f64, halfZ: f64, height: f64, roadFace: i64, rg: &mut Rand) {
     // Six facade stocks. A real skyline is not one material at six
     // brightnesses: the cream block next to the brick one next to the teal
     // curtain wall is what says "these were built by different people in
@@ -636,7 +813,7 @@ fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool
     city.box(v3(c.x - hx, rh + 0.55, c.z), 0.18, 0.55, hz)
     city.box(v3(c.x + hx, rh + 0.55, c.z), 0.18, 0.55, hz)
 
-    addRoofKit(city, steel, neon, pool, c, hx, hz, rh, rg)
+    addRoofKit(steel, neon, pool, c, hx, hz, rh, rg)
 
     // Signage. Every third building carries a lit sign on one face, and it is
     // the single cheapest thing in this game that says "city": a coloured
@@ -679,31 +856,24 @@ fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool
     // empty: at eye height the reference is nothing but awnings, lit windows
     // and signs hung out over the pavement, and none of that is in the
     // silhouette a box gives you.
-    var face = 0
-    while face < 4 {
-        if rg.f() < 0.30 {
-            face = face + 1
-            continue
-        }
-        let alongX = face < 2
-        let dir = if face % 2 == 0 {
-            1.0
-        } else {
-            -1.0
-        }
-        let span = if alongX {
-            halfX
-        } else {
-            halfZ
-        }
-        let depth = if alongX {
-            halfZ
-        } else {
-            halfX
-        }
-        addShopRow(city, neon, pool, c, span, depth, alongX, dir, rg)
-        face = face + 1
+    let face = roadFace
+    let alongX = face > 1
+    let dir = if face % 2 == 0 {
+        1.0
+    } else {
+        -1.0
     }
+    let span = if alongX {
+        halfX
+    } else {
+        halfZ
+    }
+    let depth = if alongX {
+        halfZ
+    } else {
+        halfX
+    }
+    addShopRow(city, neon, pool, c, span, depth, alongX, dir, rg)
 }
 
 // One saturated awning colour. Primaries, not tints: the shopfronts are the
@@ -712,21 +882,21 @@ fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool
 // no canopies at all.
 fn awningColor(k: i64): Vec3 {
     if k == 0 {
-        return v3(0.78, 0.10, 0.09)
+        return v3(0.52, 0.13, 0.12)
     }
     if k == 1 {
-        return v3(0.09, 0.42, 0.20)
+        return v3(0.11, 0.32, 0.19)
     }
     if k == 2 {
-        return v3(0.09, 0.22, 0.58)
+        return v3(0.11, 0.20, 0.42)
     }
     if k == 3 {
-        return v3(0.86, 0.62, 0.06)
+        return v3(0.60, 0.46, 0.11)
     }
     if k == 4 {
-        return v3(0.72, 0.30, 0.05)
+        return v3(0.52, 0.26, 0.09)
     }
-    return v3(0.55, 0.09, 0.42)
+    return v3(0.40, 0.12, 0.32)
 }
 
 // A row of two to four shop units along one face of a plinth: lit window, awning
@@ -742,7 +912,11 @@ fn addShopRow(city: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &V
     var i = 0
     while i < units {
         let mid = -span + w * ((i as f64) + 0.5)
-        let hw = w * 0.42
+        // A real gap between units. At 0.42 of the bay the awnings of adjacent
+        // shops all but touched, and a row of touching canopies is not a row of
+        // canopies: it is one painted stripe running the length of the building,
+        // which is what these read as from the road.
+        let hw = w * 0.34
         let col = awningColor((rg.f() * 6.0) as i64)
 
         // The window: a wide band of warm interior light behind the glass. Its
@@ -770,22 +944,36 @@ fn addShopRow(city: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &V
         neon.setTint(gr, gg, gb)
         shopBox(neon, c, alongX, dir, depth, mid, hw, 0.95, 2.80, 0.10, 0.18)
 
-        // The awning: a slab out over the pavement with a valance hanging off
-        // its front edge. Flat rather than sloped on purpose - a slope costs a
-        // rotated transform per unit and from the road the front edge is the
-        // whole read.
+        // The awning, as three steps that fall away from the wall. A single
+        // slab with a tall valance hanging off it presents the road a flat
+        // coloured rectangle a metre high and the width of the shop, and a row
+        // of those is a stripe. Stepping it down costs two extra boxes and makes
+        // it read as something sticking out over the pavement, which is the only
+        // reason it is there.
         city.setUvScale(0.5)
         city.setAo(0.72)
-        city.setTint(col.x, col.y, col.z)
-        shopBox(city, c, alongX, dir, depth, mid, hw + 0.14, 3.30, 3.52, 0.20, 2.05)
-        city.setTint(col.x * 1.25, col.y * 1.25, col.z * 1.25)
-        shopBox(city, c, alongX, dir, depth, mid, hw + 0.14, 2.62, 3.30, 1.72, 2.08)
+        var st = 0
+        while st < 3 {
+            let t = (st as f64)
+            let k = if st % 2 == 0 {
+                1.0
+            } else {
+                1.18
+            }
+            city.setTint(col.x * k, col.y * k, col.z * k)
+            shopBox(city, c, alongX, dir, depth, mid, hw + 0.10, 3.30 - t * 0.17, 3.44 - t * 0.17, 0.15 + t * 0.42, 0.60 + t * 0.42)
+            st = st + 1
+        }
+        // The valance is now a lip, not a curtain.
+        city.setTint(col.x * 0.82, col.y * 0.82, col.z * 0.82)
+        shopBox(city, c, alongX, dir, depth, mid, hw + 0.10, 2.72, 2.96, 1.29, 1.44)
 
-        // The signboard over the awning, dark surround with a lit face.
+        // The signboard over the awning, dark surround with a lit face. Narrower
+        // than the shop so the building shows between one board and the next.
         city.setTint(0.10, 0.10, 0.13)
-        shopBox(city, c, alongX, dir, depth, mid, hw + 0.05, 3.60, 4.85, 0.05, 0.32)
-        neon.setTint(gr * 1.30 + 0.25, gg * 1.30 + 0.25, gb * 1.30 + 0.25)
-        shopBox(neon, c, alongX, dir, depth, mid, hw * 0.82, 3.78, 4.66, 0.30, 0.40)
+        shopBox(city, c, alongX, dir, depth, mid, hw * 0.80, 3.66, 4.66, 0.05, 0.26)
+        neon.setTint(gr * 1.15 + 0.18, gg * 1.15 + 0.18, gb * 1.15 + 0.18)
+        shopBox(neon, c, alongX, dir, depth, mid, hw * 0.64, 3.82, 4.50, 0.24, 0.33)
 
         // A blade sign on some units: a tall panel hung out square to the wall,
         // which is the one piece of street furniture that breaks the facade
@@ -826,9 +1014,9 @@ fn shopBox(b: &mut Builder, c: &Vec3, alongX: bool, dir: f64, depth: f64, along:
 fn bladeSign(b: &mut Builder, c: &Vec3, alongX: bool, dir: f64, depth: f64, along: f64, y0: f64, y1: f64) {
     b.resetXform()
     if alongX {
-        b.boxSpan(v3(c.x + along - 0.07, y0, c.z + dir * (depth + 0.30)), v3(c.x + along + 0.07, y1, c.z + dir * (depth + 2.05)))
+        b.boxSpan(v3(c.x + along - 0.07, y0, c.z + dir * (depth + 0.25)), v3(c.x + along + 0.07, y1, c.z + dir * (depth + 1.50)))
     } else {
-        b.boxSpan(v3(c.x + dir * (depth + 0.30), y0, c.z + along - 0.07), v3(c.x + dir * (depth + 2.05), y1, c.z + along + 0.07))
+        b.boxSpan(v3(c.x + dir * (depth + 0.25), y0, c.z + along - 0.07), v3(c.x + dir * (depth + 1.50), y1, c.z + along + 0.07))
     }
 }
 
@@ -836,7 +1024,7 @@ fn bladeSign(b: &mut Builder, c: &Vec3, alongX: bool, dir: f64, depth: f64, alon
 // nothing on it is the tell that a building is scenery: everything real up there
 // exists because the building needs it, and the silhouette it makes is what a
 // skyline actually is.
-fn addRoofKit(city: &mut Builder, steel: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, hx: f64, hz: f64, rh: f64, rg: &mut Rand) {
+fn addRoofKit(steel: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, hx: f64, hz: f64, rh: f64, rg: &mut Rand) {
     steel.setUvScale(0.9)
     steel.setAo(0.8)
     steel.resetXform()
@@ -1008,6 +1196,11 @@ fn addGround(b: &mut Builder, track: &Track) {
 // Half the length of a pad along the road, and half its width across it. Wide
 // enough that hitting one is a small steering decision rather than a shot at a
 // target, because a pad you can miss at 200 mph is a pad that only punishes.
+// How much pavement there is between the barrier and the front row of
+// buildings. Wide enough to stand a cafe table on, which is the only reason it
+// is not simply zero.
+pub let PAVEMENT: f64 = 3.4
+
 pub let PAD_HALF_LEN: f64 = 5.5
 
 pub let PAD_HALF_W: f64 = 2.3
@@ -1019,16 +1212,21 @@ pub let PAD_HALF_W: f64 = 2.3
 fn addBoostPads(b: &mut Builder, pads: &mut Vec<f64>, track: &Track) {
     b.setUvScale(1.0)
     b.setAo(1.0)
-    // Spaced by arc length rather than by sample index, so the gap between pads
-    // is the same on the hairpin as it is on the pit straight.
-    let spacing = 148.0
-    let n = (track.length / spacing) as i64
+    var rg = rand(0xb0057)
+    // Five a lap on a 2.8 km circuit: better than five hundred metres between
+    // them. A bonus you meet every few seconds is not a bonus, it is the road
+    // surface with extra lights on it, and the only thing that makes one worth
+    // steering for is that the next one is a long way off.
+    let count = 5
     var i = 0
-    while i < n {
-        let s = 26.0 + (i as f64) * spacing
-        // Alternate which lane they sit in. A pad always on the racing line is
-        // free; one that moves is a reason to be somewhere other than the apex.
-        let lane = ((i % 3) as f64 - 1.0) * (HALF_WIDTH * 0.46)
+    while i < count {
+        // Jittered along the lap rather than evenly divided, so they do not land
+        // in the same place on every corner.
+        let s = 60.0 + (i as f64) * (track.length / (count as f64)) + rg.range(-60.0, 60.0)
+        // Anywhere across the road, not one of three lanes. Snapping them to
+        // lanes puts most of them on the racing line, where taking one is free;
+        // off the line, taking one is a decision.
+        let lane = rg.range(-HALF_WIDTH * 0.60, HALF_WIDTH * 0.60)
         pads.push(s)
         pads.push(lane)
         pads.push(PAD_HALF_LEN)
@@ -1092,6 +1290,7 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
     addFurniture(builders[B_STEEL], builders[B_NEON], track, pool)
     addStartLine(builders[B_MARK], builders[B_STEEL], builders[B_NEON], track, pool)
     addCity(builders[B_CITY], builders[B_NEON], builders[B_STEEL], track, pool)
+    addPatios(builders[B_CITY], builders[B_STEEL], builders[B_NEON], track, pool)
     addGround(builders[B_GROUND], track)
     var pads: Vec<f64> = Vec.new()
     addBoostPads(builders[B_PAD], pads, track)

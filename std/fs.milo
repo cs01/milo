@@ -554,7 +554,11 @@ pub fn walkDir(root: &string): Result<Vec<WalkEntry>, IoError> {
     pending.push("")
     var head: i64 = 0
     while head < pending.len {
-        let rel = pending[head]
+        // Copied out, and it has to be: the loop below pushes onto `pending`,
+        // and a binding that borrowed the queue could not survive the push. The
+        // clone is spelled out so the copy reads as deliberate rather than as
+        // the implicit one the compiler warns about.
+        let rel = pending[head].clone()
         head = head + 1
         var dirPath = root.clone()
         if rel.len > 0 {
@@ -887,7 +891,9 @@ pub fn removeAll(path: &string): Result<Unit, IoError> {
     dirs.push(path.clone())
     var head: i64 = 0
     while head < dirs.len {
-        let dir = dirs[head]
+        // Copied out for the same reason as in `walkDir`: the body pushes onto
+        // `dirs`, so this cannot borrow it.
+        let dir = dirs[head].clone()
         head = head + 1
         let entries = readDir(dir)?
         for entry in entries {

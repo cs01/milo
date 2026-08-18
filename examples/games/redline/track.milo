@@ -354,6 +354,48 @@ impl Track {
         }
     }
 
+    // Like `locate`, but it never leaves the neighbourhood of the hint.
+    //
+    // `locate` falls back to a scan of the whole table when its window comes up
+    // empty, which is right for build-time placement and wrong for a moving car.
+    // The circuit passes close to itself in two places, and the nearest point on
+    // the WHOLE lap is not the point the car is driving along: nudge a car over
+    // the barrier there and the nearest sample flips to the other pass, whose
+    // lateral is measured from the other side, so the containment stops applying
+    // and the car is free in the strip of ground between the two roads. Which is
+    // exactly where it ended up.
+    //
+    // A car moves at most six metres a frame and the samples are 2.5 m apart, so
+    // the answer is always within a few of the hint; searching a fixed window and
+    // accepting the best in it keeps `s` continuous by construction and cannot
+    // jump passes. The caller must have a live hint - this is not for cold
+    // lookups.
+    fn locateNear(self: &Self, x: f64, z: f64, hint: i64): Loc {
+        let window: i64 = 64
+        var best = wrapC(hint, self.n)
+        var bestD = 1e30
+        var k = -window
+        while k <= window {
+            let i = wrapC(hint + k, self.n)
+            let dx = x - self.xs[i]
+            let dz = z - self.zs[i]
+            let d = dx * dx + dz * dz
+            if d < bestD {
+                bestD = d
+                best = i
+            }
+            k = k + 1
+        }
+        let step = self.length / (self.n as f64)
+        let dx = x - self.xs[best]
+        let dz = z - self.zs[best]
+        let along = dx * self.txs[best] + dz * self.tzs[best]
+        let lateral = -dx * self.tzs[best] + dz * self.txs[best]
+        return Loc {
+            idx: best, s: self.wrapS((best as f64) * step + along), lateral: lateral,
+        }
+    }
+
     // The tightest corner within `dist` metres ahead, as a curvature magnitude.
     // This is what a driver actually reacts to: not how tight the road is here
     // but how tight it is about to be.

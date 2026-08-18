@@ -67,7 +67,7 @@ from "./textures" import {
     TEX_SIZE, makeTextures
 }
 from "./track" import {
-    HALF_WIDTH, buildTrack
+    HALF_WIDTH, WALL, buildTrack
 }
 from "./vec3" import {
     v3

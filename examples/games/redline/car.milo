@@ -115,6 +115,11 @@ let GRIP_DIRT: f64 = 3.6
 
 let GRIP_HANDBRAKE: f64 = 2.1
 
+// How much of the speed heading into a barrier comes back out of it. Small: a
+// barrier that returns most of the energy is a pinball bumper and throws the car
+// across the road, and one that returns none pins it to the wall.
+let WALL_BOUNCE: f64 = 0.28
+
 // ---------------------------------------------------------------------------
 // The shell
 // ---------------------------------------------------------------------------
@@ -1085,7 +1090,7 @@ impl Car {
     // road does back to the car: dirt outside the racing surface, and a barrier
     // outside that.
     fn followTrack(self: &mut Self, track: &Track) {
-        let loc = track.locate(self.pos.x, self.pos.z, self.hint)
+        let loc = track.locateNear(self.pos.x, self.pos.z, self.hint)
         self.hint = loc.idx
         self.lateral = loc.lateral
         self.offTrack = Math.abs(loc.lateral) > HALF_WIDTH
@@ -1112,20 +1117,48 @@ impl Car {
             // it with a force. A spring here oscillates: the car bounces off the
             // wall, comes back, and bounces again, which reads as the game
             // fighting the player.
-            let onWall = track.pointAt(loc.s, sign * WALL)
+            // Put the car back just INSIDE the barrier line rather than exactly
+            // on it, or it re-triggers every frame and sits there buzzing.
+            let onWall = track.pointAt(loc.s, sign * (WALL - 0.18))
             self.pos = v3(onWall.x, 0.0, onWall.z)
 
-            // Cancel the component heading into the wall, and only lightly scrub
-            // the component running along it. The barrier is a redirect, not a
-            // stop: a car that loses its speed to a wall it is merely leaning on
-            // has already lost the race, and reflecting more than the inward
-            // component (or scrubbing hard) turns a graze into a dead halt.
             let nrm = track.normalAt(loc.s).scale(sign)
             let into = self.vel.dot(nrm)
             if into > 0.0 {
-                self.vel = self.vel - nrm.scale(into)
+                // Reflect a little rather than merely cancelling. Cancelling the
+                // inward component exactly leaves the car travelling parallel to
+                // the wall and touching it, so it stays pinned there for as long
+                // as the player holds the same steering, which reads as being
+                // stuck to the barrier rather than as hitting it. A small
+                // restitution pushes it back onto the road. This is an impulse at
+                // the boundary, not a positional spring, so it does not
+                // oscillate the way a penalty force does.
+                self.vel = self.vel - nrm.scale(into * (1.0 + WALL_BOUNCE))
             }
-            self.vel = self.vel.scale(0.97)
+
+            // Redirect the HEADING too, which is the part that was missing.
+            // Killing only the velocity leaves the car still pointing into the
+            // wall with the player still steering into it, so it grinds along
+            // nose-first and every attempt to recover drives it back in. Turning
+            // the nose toward where the car is actually going is what makes a
+            // hit read as a deflection. Scaled by how hard the hit was, so a
+            // graze barely moves it and a real crash swings it straight.
+            let spd = self.vel.len()
+            if spd > 2.0 {
+                let dirv = self.vel.scale(1.0 / spd)
+                let wantYaw = Math.atan2(dirv.x, dirv.z)
+                var dyaw = wantYaw - self.yaw
+                // Shortest way round, or a hit near the seam spins the car.
+                while dyaw > Math.pi() {
+                    dyaw = dyaw - 2.0 * Math.pi()
+                }
+                while dyaw < -Math.pi() {
+                    dyaw = dyaw + 2.0 * Math.pi()
+                }
+                let hard = Math.clampF64(into / 22.0, 0.0, 1.0)
+                self.yaw = self.yaw + dyaw * (0.16 + 0.55 * hard)
+            }
+            self.vel = self.vel.scale(0.965)
         }
     }
 

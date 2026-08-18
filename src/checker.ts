@@ -488,11 +488,14 @@ export class TypeChecker {
     // that work fine), so warning by default would nag every graphics program. The
     // always-on hover note already surfaces the size; projects opt into the hard lint.
     if (!config.denied.has("large-stack-array") && !config.expected?.has("large-stack-array")) config.allowed.add("large-stack-array");
-    // index-clone is OFF unless asked for, pending the count below. Binding an element
-    // out of a container is a normal thing to write and the clone is what keeps the
-    // container intact, so most hits are working code paying a cost the author may well
-    // accept. `--deny=index-clone` turns it into the audit it is meant to be.
-    if (!config.denied.has("index-clone") && !config.expected?.has("index-clone")) config.allowed.add("index-clone");
+    // index-clone is ON by default. It was off on the theory that most hits are working
+    // code paying a cost the author accepted, but the lint does not fire on the cases
+    // where that is true: `isCopy` skips register copies, so a `Vec<Pod>` bind is silent
+    // and only an element that owns heap is reported. What is left is a malloc per
+    // element per iteration written in syntax that looks free, with two free spellings
+    // (`for x in v`, `v[i].n`) sitting right there in the hint. A cost that invisible is
+    // exactly what a default-on warning is for; measured across examples/ it is tens of
+    // hits, not hundreds. `--allow=index-clone` silences it for a project that wants it.
     // unused-unsafe is on by default but fires only in user code (see currentFnIsUser):
     // the permissive safe-extern rule makes most stdlib unsafe blocks technically
     // removable, so warning on imported std would flood every compile.

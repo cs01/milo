@@ -1,9 +1,9 @@
 // Unit tests for the index-clone lint. `let m = v[i]` on a non-Copy element is a deep
 // copy — indexing clones so the container stays intact — and the SAME syntax is free or
 // a malloc depending on a field of the element type that is invisible at the use site.
-// OFF by default (binding an element out of a container is normal code paying a cost the
-// author may well accept; 26 hits across src-milo alone would nag every self-host build)
-// — opt in via `--deny=index-clone`, which is the audit it is meant to be.
+// ON by default: the lint does not fire on the cases where the copy is free (`isCopy`
+// skips register copies), so every hit is a real allocation written in syntax that looks
+// like none. `--allow=index-clone` silences it for a project that wants the copies.
 import { test, expect } from "bun:test";
 import { Lexer } from "../src/lexer";
 import { Parser } from "../src/parser";
@@ -22,10 +22,20 @@ function lint(src: string): string[] {
 const MARK = `struct Mark { name: string, n: i64 }\n`;
 const FILL = `  var v: Vec<Mark> = Vec.new()\n  v.push(Mark { name: "a", n: 1 })\n`;
 
-test("off by default — no opt-in, no diagnostic", () => {
+test("on by default — no opt-in needed", () => {
   const src = `${MARK}fn main() {\n${FILL}  let m = v[0]\n  print(m.n)\n}\n`;
   const prog = new Parser(new Lexer(src).tokenize(), src).parse();
-  expect(new TypeChecker().check(prog).diagnostics.filter(d => d.code === "index-clone")).toEqual([]);
+  const out = new TypeChecker().check(prog).diagnostics.filter(d => d.code === "index-clone");
+  expect(out.length).toBe(1);
+  expect(out[0].severity).toBe("warning");
+});
+
+// The escape hatch has to work, or the default is a mandate rather than a default.
+test("--allow=index-clone silences it", () => {
+  const src = `${MARK}fn main() {\n${FILL}  let m = v[0]\n  print(m.n)\n}\n`;
+  const prog = new Parser(new Lexer(src).tokenize(), src).parse();
+  const cfg = { denied: new Set<string>(), allowed: new Set(["index-clone"]) };
+  expect(new TypeChecker(cfg).check(prog).diagnostics.filter(d => d.code === "index-clone")).toEqual([]);
 });
 
 test("flags a let binding of a struct element with heap fields", () => {

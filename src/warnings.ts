@@ -19,7 +19,7 @@ export const WARNINGS: WarningInfo[] = [
   { name: "bare-targetos" },
   { name: "external-linkage-not-pub" },
   { name: "borrow-that-clones" },
-  { name: "index-clone", offByDefault: true },
+  { name: "index-clone" },
   { name: "large-stack-array", offByDefault: true },
   { name: "manual-option-default" },
   { name: "missing-interpolation" },

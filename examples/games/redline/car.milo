@@ -500,7 +500,13 @@ impl Car {
         } else {
             1.0
         }
-        let yawRate = steerIn * auth * roll * dir * 3.6
+        // Negated, and this is the whole steering convention in one line.
+        // `lookAt` builds its right vector as forward x up, which at yaw 0 puts
+        // screen-right at -X, while increasing yaw swings the nose toward +X.
+        // So growing yaw turns the car LEFT on screen, and a positive steering
+        // input (the right arrow) has to shrink it. Everything cosmetic below is
+        // expressed in terms of `yawRate` so that it follows this one sign.
+        let yawRate = -steerIn * auth * roll * dir * 3.6
         self.yaw = self.yaw + yawRate * dt
 
         // Turning the heading throws the body sideways, and the tyres eat it.
@@ -531,11 +537,19 @@ impl Car {
         self.pos.y = 0.0
 
         // Cosmetics. The body leans out of the corner and squats under power.
-        let wantRoll = Math.clampF64(-yawRate * vf * 0.020, -0.20, 0.20)
+        // The body leans OUT of the corner: turning right throws the mass left,
+        // so the left side drops. The sign was checked on a still with the wheel
+        // held over, not derived: it depends on the roll matrix convention and
+        // on which way the shell's local +X ends up pointing once the yaw
+        // rotation is applied, and getting either backwards leans the car into
+        // the corner like a motorcycle.
+        let wantRoll = Math.clampF64(-yawRate * vf * 0.016, -0.14, 0.14)
         self.roll = self.roll + (wantRoll - self.roll) * Math.minF64(1.0, dt * 6.0)
         let wantPitch = Math.clampF64((brake * 0.055) - (throttle * 0.030), -0.05, 0.07)
         self.pitch = self.pitch + (wantPitch - self.pitch) * Math.minF64(1.0, dt * 5.0)
-        self.steerVis = self.steerVis + (steerIn * 0.45 - self.steerVis) * Math.minF64(1.0, dt * 10.0)
+        // The front wheels point where the driver asked, which under the yaw
+        // convention above is the negative direction.
+        self.steerVis = self.steerVis + (-steerIn * 0.45 - self.steerVis) * Math.minF64(1.0, dt * 10.0)
         self.wheelSpin = self.wheelSpin + (vf / WHEEL_R) * dt
 
         self.followTrack(track)

@@ -234,6 +234,7 @@ pub fn main(): i32 {
     // A capture wants the camera where it sits at pace, not where it sits
     // parked, and the two are several metres apart.
     let poseSpeed = argValue("--speed", "0").parseF64() ?? 0.0
+    let poseSteer = argValue("--steer", "0").parseF64() ?? 0.0
     if poseSpeed > 0.0 {
         player.vel = player.forward().scale(poseSpeed)
     }
@@ -306,8 +307,11 @@ pub fn main(): i32 {
             }
         } else {
             // A capture of a parked car on an empty grid is a capture of a car
-            // park, so the headless path drives.
+            // park, so the headless path drives. `--steer` holds a steering
+            // input, which is the only way to check on a still that the car
+            // turns the way the arrow key asked and leans out of the corner.
             throttle = 1.0
+            steer = poseSteer
         }
 
         // ── simulate ──────────────────────────────────────────────────────────

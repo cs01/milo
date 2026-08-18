@@ -25,72 +25,26 @@ vec3 skyLookup(vec3 d, float lod) {
     return textureLod(uSky, vec2(u, v), lod).rgb;
 }
 
-// Three octaves of value noise on a plane at cloud altitude. It is not a volume
-// and cannot be flown through — nothing here flies — but it is what stops the
-// sky being a gradient, and it moves.
-float hash21(vec2 p) {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float vnoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i);
-    float b = hash21(i + vec2(1.0, 0.0));
-    float c = hash21(i + vec2(0.0, 1.0));
-    float d = hash21(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float s = 0.0;
-    float a = 0.5;
-    for (int i = 0; i < 4; i++) {
-        s += a * vnoise(p);
-        p *= 2.03;
-        a *= 0.5;
-    }
-    return s;
-}
-
 uniform float uTime;
 uniform float uCloudCover;
 
-vec3 skyWithClouds(vec3 d) {
+// What you see where no geometry does. The room is closed, so this is only ever
+// the far end of the vault seen past the edge of a panel — but it has to agree
+// with the table the reflections sample or those edges show as seams.
+//
+// The dither is not decoration: the vault is a near-black gradient over a
+// hundred pixels of screen, which is exactly where 8-bit output bands.
+vec3 roomBackdrop(vec3 d) {
     vec3 col = skyLookup(d, 0.0);
-    // The sun itself: a disc a little wider than the real 0.53 degrees, because a
-    // pixel-exact disc aliases into a flickering dot as the camera turns.
-    float cosSun = dot(normalize(d), uSunDir);
-    float disc = smoothstep(0.99965, 0.99995, cosSun);
-    col += uSunColor * disc * 22.0;
-    // and its glow, which is what a lens actually shows around a bright source
-    col += uSunColor * pow(max(cosSun, 0.0), 900.0) * 1.2;
-
-    if (d.y > 0.005 && uCloudCover > 0.001) {
-        float t = 2400.0 / d.y;
-        vec2 q = (d.xz * t) * 0.00035 + vec2(uTime * 0.0035, 0.0);
-        float n = fbm(q * 1.6);
-        float cover = smoothstep(1.0 - uCloudCover, 1.0 - uCloudCover + 0.28, n);
-        // Thicker cloud where the field is denser, and lit from the sun side:
-        // one fbm sampled a short way towards the sun is a cheap stand-in for the
-        // light march a volume would run.
-        float towards = fbm((q + uSunDir.xz * 0.06) * 1.6);
-        float lit = clamp(0.35 + (towards - n) * 3.0, 0.0, 1.4);
-        vec3 cloudCol = mix(uSunColor * 0.16, uSunColor * 0.55, lit) + skyLookup(vec3(0.0, 1.0, 0.0), 3.0) * 0.5;
-        float fade = smoothstep(0.005, 0.10, d.y);
-        col = mix(col, cloudCol, cover * fade * 0.92);
-    }
-    return col;
+    float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    return col + (n - 0.5) * 0.004;
 }
 "
 
 // Ambient as two irradiance values, not one constant. A face pointing up is lit
-// by the sky, a face pointing down by what the ground bounced back, and the
-// horizon is the mix — which is why an overhang here goes warm underneath and
-// blue on top without either being painted in.
+// by the vault, a face pointing down by what the carpet bounced back, and the
+// horizon is the mix — which is why a soffit in here goes violet underneath and
+// cold on top without either being painted in.
 pub let CHUNK_LIGHT: string = "
 uniform vec3 uSkyUp;
 uniform vec3 uSkyDown;
@@ -116,6 +70,45 @@ float geomSmith(float ndv, float ndl, float a) {
 
 vec3 fresnel(float ct, vec3 f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - ct, 0.0, 1.0), 5.0);
+}
+
+// The neon. Nothing in an arcade is lit by the ceiling: the light comes off the
+// tubes and the sign faces, and a room full of glowing geometry that throws no
+// light on the floor in front of it is the tell that the glow is painted on.
+//
+// Sixteen of them, no shadows, inverse-square with a finite reach so a tube at
+// the far end of the room is not still costing a fragment at the near end. The
+// reach is stored as 1/range^2 so the falloff is a multiply.
+const int MAX_LIGHTS = 16;
+uniform int uLightCount;
+uniform vec3 uLightPos[MAX_LIGHTS];
+uniform vec3 uLightColor[MAX_LIGHTS];
+uniform float uLightInvRange2[MAX_LIGHTS];
+
+vec3 pointLights(vec3 p, vec3 n, vec3 v, vec3 albedo, float rough, float metal, vec3 f0) {
+    vec3 sum = vec3(0.0);
+    float a = rough * rough;
+    for (int i = 0; i < MAX_LIGHTS; i++) {
+        if (i >= uLightCount) break;
+        vec3 d = uLightPos[i] - p;
+        float dist2 = dot(d, d);
+        // Windowed inverse square: the 1/r^2 is the physics, the window is what
+        // makes the cost bounded. Without it every light touches every fragment.
+        float win = clamp(1.0 - dist2 * uLightInvRange2[i], 0.0, 1.0);
+        float atten = win * win / max(dist2, 0.04);
+        if (atten < 0.0002) continue;
+        vec3 l = d * inversesqrt(max(dist2, 1e-6));
+        float ndl = max(dot(n, l), 0.0);
+        if (ndl <= 0.0) continue;
+        vec3 h = normalize(v + l);
+        float ndv = max(dot(n, v), 1e-4);
+        float ndh = max(dot(n, h), 0.0);
+        vec3 f = fresnel(max(dot(v, h), 0.0), f0);
+        vec3 spec = distGGX(ndh, a) * geomSmith(ndv, ndl, rough) * f / max(4.0 * ndv * ndl, 1e-4);
+        vec3 kd = (1.0 - f) * (1.0 - metal);
+        sum += (kd * albedo / PI + spec) * uLightColor[i] * ndl * atten;
+    }
+    return sum;
 }
 "
 
@@ -215,7 +208,7 @@ out vec4 fragColor;
 
     + CHUNK_SKY + "
 void main() {
-    fragColor = vec4(skyWithClouds(normalize(vDir)), 1.0);
+    fragColor = vec4(roomBackdrop(normalize(vDir)), 1.0);
 }
 "
 
@@ -303,6 +296,7 @@ uniform vec3 uAlbedo;
 uniform float uRough;
 uniform float uMetal;
 uniform vec3 uEmissive;
+uniform float uEmissiveMap;
 uniform float uAlpha;
 uniform float uNormalStrength;
 uniform float uDetail;
@@ -388,6 +382,7 @@ void main() {
     // surface is, and a normal map perturbs where it points, not where it is.
     float vis = sunVisibility(vWorld, geoN, dot(geoN, uSunDir));
     vec3 direct = (kd * albedo / PI + spec) * uSunColor * ndl * vis;
+    direct += pointLights(vWorld, n, v, albedo, rough, metal, f0);
 
     // Ambient: diffuse from the sky's irradiance, specular from the sky itself
     // in the mirror direction, blurred by roughness through the mip chain.
@@ -406,17 +401,18 @@ void main() {
     float horiz = clamp(1.0 + dot(r, geoN) * 0.0 + r.y * 2.5, 0.0, 1.0);
     amb += envSpec * ao * mix(0.15, 1.0, horiz) * (0.35 + 0.65 * metal);
 
-    // Emissive is tinted by the vertex colour, so a painted target glows in the
-    // colours it is painted: the red ring on a plate stays a red ring instead of
-    // being washed out by a flat white glow laid over the whole disc.
-    vec3 col = direct + amb + uEmissive * vTint;
+    // Emissive is tinted by the vertex colour, so one neon material paints every
+    // tube in the room: the tint carries the colour and the brightness. With
+    // uEmissiveMap on it is also masked by the albedo texture, which is how a
+    // printed number on a target face glows and the disc around it does not.
+    vec3 col = direct + amb + uEmissive * vTint * mix(vec3(1.0), baseAlbedo, uEmissiveMap);
 
-    // Aerial perspective. Weak, blue, and towards the sky in the view direction
-    // rather than towards a grey — over a few hundred metres of desert air that
-    // is what a camera records.
+    // Haze, towards the room's own radiance in the view direction rather than
+    // towards a grey. A hall thirty metres deep with this much light in the air
+    // is what puts the far end of the vault behind the near end.
     float dist = length(uCam - vWorld);
-    float ext = 1.0 - exp(-dist * 0.0022);
-    col = mix(col, skyLookup(-v, 2.0), ext * 0.9);
+    float ext = 1.0 - exp(-dist * 0.012);
+    col = mix(col, skyLookup(-v, 2.0), ext * 0.55);
 
     fragColor = vec4(col, uAlpha);
     // --debug 3 shows the occlusion buffer on its own, which is the only way to

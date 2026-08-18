@@ -1,13 +1,13 @@
-// Every surface in the range, synthesised at startup.
+// Every surface in the hall, synthesised at startup.
 //
-// Thirteen materials, each a 256x256 albedo plus a 256x256 "surf" map that packs a
+// Six materials, each a 256x256 albedo plus a 256x256 "surf" map that packs a
 // tangent-space normal in RGB and a roughness multiplier in A. Both come out of
 // one height field per material, so the bumps in the normal map are the same
 // bumps the colour shows — a stone that looks raised is raised.
 //
 // Two constraints shape everything here:
 //
-//   - **Seamless.** These are tiled over tens of metres of ground. Every noise
+//   - **Seamless.** These are tiled over tens of metres of floor and wall. Every noise
 //     lattice wraps modulo its own period and every scattered feature (stone,
 //     crack, blade of grass) is stamped through `wrapIdx`, so column 255 meets
 //     column 0 with no discontinuity. A seam is the failure mode; there is no
@@ -18,8 +18,9 @@
 //
 // The albedo is deliberately near-neutral: the shader multiplies it by a
 // per-material colour and a per-vertex tint, so what lives in the texture is
-// *detail*, not identity. Making the wood brown here and brown again in the
-// material would double the saturation.
+// *detail*, not identity. Making the carpet purple here and purple again in the
+// material would double the saturation — and the tint is how one neon material
+// paints tubes in six different colours.
 //
 // Integer overflow traps in Milo rather than wrapping, so the hash keeps every
 // intermediate masked to 32 bits before it multiplies: a 32-bit value times a
@@ -33,31 +34,17 @@ pub let TEX_SIZE: i64 = 256
 
 // The index order is the contract with render.milo — it indexes the returned Vec
 // with these names, never with a literal.
-pub let TEX_GRAVEL: i64 = 0
+pub let TEX_CARPET: i64 = 0
 
-pub let TEX_CONCRETE: i64 = 1
+pub let TEX_TREAD: i64 = 1
 
-pub let TEX_WOOD: i64 = 2
+pub let TEX_PANEL: i64 = 2
 
 pub let TEX_STEEL: i64 = 3
 
-pub let TEX_CANVAS: i64 = 4
+pub let TEX_PAINT: i64 = 4
 
-pub let TEX_RUST: i64 = 5
-
-pub let TEX_PAINT: i64 = 6
-
-pub let TEX_GLASS: i64 = 7
-
-pub let TEX_GRASS: i64 = 8
-
-pub let TEX_SAND: i64 = 9
-
-pub let TEX_PLANK: i64 = 10
-
-pub let TEX_TIN: i64 = 11
-
-pub let TEX_ADOBE: i64 = 12
+pub let TEX_GLASS: i64 = 5
 
 pub struct TexData {
     // 0xAABBGGRR, straight sRGB, alpha 255. What Texture2D.rgba8 wants.
@@ -298,261 +285,160 @@ fn stamp(f: &mut Field, px: i64, py: i64, w: f64, r: f64, g: f64, b: f64, dh: f6
 }
 
 // ---------------------------------------------------------------------------
-// Shared ground
+// 0 — carpet
 // ---------------------------------------------------------------------------
 
-// Packed desert dirt: fine tooth, broad blotching, damp compacted patches. Both
-// GRAVEL and GRASS stand on it, and they have to match where they meet.
-fn dirtBase(f: &mut Field, seed: i64) {
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            let fine = fbm(u, v, 24, 24, 3, seed)
-            let broad = fbm(u, v, 3, 3, 2, seed + 101)
-            // Damp/compacted ground: darker, smoother, and slightly sunk.
-            let damp = smoothstepF(0.52, 0.30, broad)
-            // Grit carries most of the contrast a magnified view can see, so it
-            // is applied after the damp multiply: scaling it with the tone
-            // would flatten the very patches that most want texture.
-            let grit = grainOf(x, y, seed + 55, 0.155, 0.115) + fleckOf(x, y, seed + 56)
-            var lum = 0.50 + (fine - 0.5) * 0.30 + (broad - 0.5) * 0.14
-            lum = lum * (1.0 - damp * 0.26)
-            lum = lum + grit
-            f.r[i] = lum * 1.10
-            f.g[i] = lum * 0.99
-            f.b[i] = lum * 0.83
-            f.h[i] = fine * 0.55 + broad * 0.25 + grit * 0.55 - damp * 0.12
-            f.a[i] = 0.78 - damp * 0.18
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 0 — gravel
-// ---------------------------------------------------------------------------
-
-fn makeGravel(): TexData {
-    var f = newField()
-    dirtBase(f, 1301)
-    // 16x16 cells at ~80% occupancy is a little over 200 stones, spaced enough
-    // that a 7 px one never wants to leave its cell's neighbourhood.
-    let cells = 16
-    let cellPx = TEX_SIZE / cells
-    for cy in 0..cells {
-        for cx in 0..cells {
-            if rand01(cx, cy, 4001) > 0.80 {
-                continue
-            }
-            let jx = rand01(cx, cy, 4002)
-            let jy = rand01(cx, cy, 4003)
-            let sx = ((cx as f64) + jx) * (cellPx as f64)
-            let sy = ((cy as f64) + jy) * (cellPx as f64)
-            let rad = 2.0 + rand01(cx, cy, 4004) * 5.0
-            let tone = 0.42 + rand01(cx, cy, 4005) * 0.16
-            // Stones vary from grey to tan, never towards blue: a cool stone is
-            // a *less warm* stone, not a blue one, and getting that wrong is
-            // what turns a gravel bed into confetti.
-            let warm = rand01(cx, cy, 4006)
-            let lobe = rand01(cx, cy, 4008) * 6.2831853
-            let ir = Math.floor(rad) as i64 + 2
-            let cix = Math.floor(sx) as i64
-            let ciy = Math.floor(sy) as i64
-            for dy in -ir..(ir + 1) {
-                for dx in -ir..(ir + 1) {
-                    let ddx = (cix as f64) + (dx as f64) + 0.5 - sx
-                    let ddy = (ciy as f64) + (dy as f64) + 0.5 - sy
-                    let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                    // A stone is not a disc: the radius wobbles with angle, so
-                    // the silhouette comes out chipped rather than drawn.
-                    let ang = Math.atan2(ddy, ddx)
-                    let rr = rad * lobeRadius(ang, lobe)
-                    if d > rr {
-                        continue
-                    }
-                    // Feathered over the outer texel so the edge does not alias
-                    // into a staircase.
-                    let edge = Math.clampF64(rr - d, 0.0, 1.0)
-                    let dome = Math.sqrt(Math.maxF64(0.0, 1.0 - (d / rr) * (d / rr)))
-                    let px = cix + dx
-                    let py = ciy + dy
-                    // The stone gets the same per-texel grain as the dirt. A
-                    // smooth stone on a gritty bed is the tell that the bed is
-                    // painted rather than photographed, and it is exactly what
-                    // a magnified view puts under the crosshair.
-                    let speck = grainOf(wrapIdx(px), wrapIdx(py), 4007, 0.155, 0.11)
-                    + fleckOf(wrapIdx(px), wrapIdx(py), 4009)
-                    let l = tone + speck + dome * 0.05
-                    stamp(f, px, py, edge, l * (1.00 + warm * 0.10), l * 0.99, l * (0.94 - warm * 0.10), dome * 0.55 * edge + speck * 0.35 * edge, 0.62)
-                }
-            }
-        }
-    }
-    // Grit: the 1-3 px chips that fill the gaps between the stones. Without
-    // them there is a hole in the spectrum between the 1 px hash and the 5 px
-    // stones, and a magnified crop lands squarely in that hole.
-    for k in 0..420 {
-        let gx = rand01(k, 0, 4501) * (TEX_SIZE as f64)
-        let gy = rand01(k, 1, 4501) * (TEX_SIZE as f64)
-        let rad = 0.75 + rand01(k, 2, 4501) * 1.5
-        let tone = 0.34 + rand01(k, 3, 4501) * 0.34
-        let gix = Math.floor(gx) as i64
-        let giy = Math.floor(gy) as i64
-        for dy in -2..3 {
-            for dx in -2..3 {
-                let ddx = (gix as f64) + (dx as f64) + 0.5 - gx
-                let ddy = (giy as f64) + (dy as f64) + 0.5 - gy
-                let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                let w = Math.clampF64(rad - d + 0.35, 0.0, 1.0)
-                if w <= 0.0 {
-                    continue
-                }
-                stamp(f, gix + dx, giy + dy, w, tone * 1.06, tone * 0.99, tone * 0.90, 0.20 * w, 0.70)
-            }
-        }
-    }
-    return packField(f, 2.4)
-}
-
-// ---------------------------------------------------------------------------
-// 1 — concrete
-// ---------------------------------------------------------------------------
-
-// A drunkard's walk that wraps, stamped narrow and dark. Water sits in a crack,
-// so it reads glossier than the slab around it, not rougher.
-fn addCrack(f: &mut Field, sx: f64, sy: f64, dir: f64, steps: i64, seed: i64) {
-    var x = sx
-    var y = sy
-    var a = dir
-    for s in 0..steps {
-        a = a + (rand01(s, 0, seed) - 0.5) * 0.20
-        x = x + Math.cos(a)
-        y = y + Math.sin(a)
-        let w = 0.25 + rand01(s, 1, seed) * 0.30
-        let cix = Math.floor(x) as i64
-        let ciy = Math.floor(y) as i64
-        for dy in -2..3 {
-            for dx in -2..3 {
-                let ddx = (cix as f64) + (dx as f64) + 0.5 - x
-                let ddy = (ciy as f64) + (dy as f64) + 0.5 - y
-                let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                let wgt = smoothstepF(w + 0.8, w - 0.2, d) * 0.62
-                stamp(f, cix + dx, ciy + dy, wgt, 0.32, 0.32, 0.33, -0.30 * wgt, 0.22)
-            }
-        }
-    }
-}
-
-fn makeConcrete(): TexData {
+// Midway carpet: dense short pile with a woven diamond motif in it. The motif is
+// the point — plain noise at this scale reads as static, and a floor that reads
+// as static is the one surface a player is guaranteed to be looking at while
+// they wait for the next target.
+fn makeCarpet(): TexData {
     var f = newField()
     for y in 0..TEX_SIZE {
         let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
         for x in 0..TEX_SIZE {
             let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
             let i = y * TEX_SIZE + x
-            // Aggregate just under the surface: visible as tone, barely as bump.
-            let agg = fbm(u, v, 40, 40, 2, 2201)
-            let blotch = fbm(u, v, 4, 4, 2, 2202)
-            let speck = rand01(x, y, 2203)
-            let lum = 0.55 + (agg - 0.5) * 0.13 + (blotch - 0.5) * 0.10 + (speck - 0.5) * 0.055
-            f.r[i] = lum
-            f.g[i] = lum * 0.995
-            f.b[i] = lum * 0.975
-            f.h[i] = agg * 0.35 + blotch * 0.2 + speck * 0.06
-            f.a[i] = 0.60 + (blotch - 0.5) * 0.10
-        }
-    }
-    for c in 0..5 {
-        let sx = rand01(c, 0, 2301) * (TEX_SIZE as f64)
-        let sy = rand01(c, 1, 2301) * (TEX_SIZE as f64)
-        let dir = rand01(c, 2, 2301) * 6.2831853
-        addCrack(f, sx, sy, dir, 150 + (c * 37), 2400 + c)
-    }
-    return packField(f, 0.9)
-}
-
-// ---------------------------------------------------------------------------
-// 2 — wood
-// ---------------------------------------------------------------------------
-
-fn makeWood(): TexData {
-    var f = newField()
-    // Four knots, placed on a jittered 2x2 so two never land on top of each
-    // other and leave half the plank empty.
-    var kx: Vec<f64> = Vec.new()
-    var ky: Vec<f64> = Vec.new()
-    var kr: Vec<f64> = Vec.new()
-    for k in 0..4 {
-        let gx = k % 2
-        let gy = k / 2
-        kx.push(((gx as f64) + 0.15 + rand01(k, 0, 3101) * 0.7) * 0.5)
-        ky.push(((gy as f64) + 0.15 + rand01(k, 1, 3101) * 0.7) * 0.5)
-        kr.push(0.035 + rand01(k, 2, 3101) * 0.030)
-    }
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            // The grain runs along u, so the band position is a function of v
-            // warped by a noise that varies slowly in u — that warp is the
-            // difference between a plank and a barcode.
-            let warp = (fbm(u, v, 3, 2, 2, 3201) - 0.5) * 0.030
-            let vv = v + warp
-            let coarse = valueNoise(0.5, vv, 1, 14, 3202)
-            let mid = valueNoise(0.5, vv, 1, 42, 3203)
-            // 26 growth rings across the tile: a plank, not a barcode.
-            let line = frac(vv * 26.0)
-            // Distance to the nearest latewood line, in band units.
-            let lineD = Math.abs(line - 0.5) * 2.0
-            let lineStrength = smoothstepF(0.45, 1.0, lineD) * (0.35 + coarse * 0.65)
-            var lum = 0.55 + (coarse - 0.5) * 0.16 + (mid - 0.5) * 0.09
-            lum = lum - lineStrength * 0.17
-            var height = coarse * 0.4 + mid * 0.2 + lineStrength * 0.45
-            var rough = 0.70 + lineStrength * 0.12
-            // Weathering: fine longitudinal checking, silvered where it is worst.
-            let weather = fbm(u, v, 8, 30, 3, 3204)
-            lum = lum + (weather - 0.5) * 0.10
-            let silver = smoothstepF(0.58, 0.78, weather)
-            var rr = lum * 1.09
-            var gg = lum * 0.97
-            var bb = lum * 0.79
-            // Sun-bleached pine goes towards neutral grey. It must never end up
-            // blue-dominant — that reads as mould, not weathering.
-            rr = rr + (lum * 1.00 - rr) * silver * 0.65
-            gg = gg + (lum * 0.99 - gg) * silver * 0.65
-            bb = bb + (lum * 0.95 - bb) * silver * 0.65
-            for k in 0..4 {
-                let du = wrapDelta(u, kx[k])
-                // A knot is where a branch left, and a branch is not round: it
-                // is stretched along the grain and its rings are lopsided. A
-                // perfect circle of rings reads as a painted target.
-                let dv = wrapDelta(v, ky[k]) * 1.9
-                let ang = Math.atan2(dv, du)
-                let d = Math.sqrt(du * du + dv * dv) * (1.0 + 0.16 * Math.sin(ang * 2.0 + (k as f64) * 2.1))
-                if d > kr[k] * 2.2 {
-                    continue
-                }
-                // Rings tighten towards the centre; the knot itself is dark,
-                // dense and noticeably smoother than the surrounding softwood.
-                let rings = 0.5 + 0.5 * Math.sin(d / kr[k] * 13.0)
-                let core = smoothstepF(kr[k] * 2.2, kr[k] * 0.5, d)
-                let dark = core * (0.45 + rings * 0.30)
-                rr = rr - rr * dark * 0.55
-                gg = gg - gg * dark * 0.60
-                bb = bb - bb * dark * 0.62
-                height = height + core * rings * 0.35
-                rough = rough - core * 0.28
-            }
-            f.r[i] = rr
-            f.g[i] = gg
-            f.b[i] = bb
-            f.h[i] = height
-            f.a[i] = Math.clampF64(rough, 0.05, 1.0)
+            // Pile: two lattices an octave apart, plus per-texel grain. Carpet
+            // has no smooth anything, and the grain is most of what sells it.
+            let pile = fbm(u, v, 48, 48, 3, 2201)
+            let broad = fbm(u, v, 4, 4, 2, 2202)
+            let grain = grainOf(x, y, 2203, 0.085, 0.055)
+            // Four diamonds across the tile. |frac - 0.5| summed on both axes is
+            // a diamond field for free, and it divides the tile exactly so the
+            // motif meets itself at the seam.
+            let du = Math.abs(frac(u * 4.0) - 0.5)
+            let dv = Math.abs(frac(v * 4.0) - 0.5)
+            let diamond = smoothstepF(0.26, 0.20, du + dv)
+            let outline = smoothstepF(0.34, 0.30, du + dv) - smoothstepF(0.30, 0.26, du + dv)
+            var lum = 0.42 + (pile - 0.5) * 0.20 + (broad - 0.5) * 0.10 + grain
+            lum = lum + diamond * 0.10 + outline * 0.16
+            f.r[i] = lum * 1.04
+            f.g[i] = lum * 0.94
+            f.b[i] = lum * 1.10
+            f.h[i] = pile * 0.55 + grain * 0.9 + diamond * 0.12
+            f.a[i] = 0.94 - diamond * 0.05
         }
     }
     return packField(f, 1.5)
+}
+
+// ---------------------------------------------------------------------------
+// 1 — tread plate
+// ---------------------------------------------------------------------------
+
+// Diamond plate: the stepped platform tops and the stage edging. Lozenges on a
+// 32 px cell, alternating direction row by row, each comfortably inside its own
+// cell — at 40 degrees the half-diagonal is under 12 px, so nothing crosses a
+// cell boundary and the wrap is free.
+fn makeTread(): TexData {
+    var f = newField()
+    let cell = 32
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            let brush = fbm(u, v, 8, 120, 2, 2301)
+            let speck = rand01(x, y, 2302)
+            var lum = 0.44 + (brush - 0.5) * 0.07 + (speck - 0.5) * 0.035
+            var h = brush * 0.15
+            var rough = 0.42
+
+            let cx = x / cell
+            let cy = y / cell
+            let lx = ((x % cell) as f64) - ((cell as f64) * 0.5) + 0.5
+            let ly = ((y % cell) as f64) - ((cell as f64) * 0.5) + 0.5
+            let ang = if (cx + cy) % 2 == 0 {
+                0.70
+            } else {
+                -0.70
+            }
+            let ca = Math.cos(ang)
+            let sa = Math.sin(ang)
+            let rx = lx * ca + ly * sa
+            let ry = -lx * sa + ly * ca
+            // A rounded slab: flat on top, chamfered on all four sides, which is
+            // what makes the highlight run along the lozenge rather than sit on it.
+            let ex = smoothstepF(11.0, 8.0, Math.abs(rx))
+            let ey = smoothstepF(4.4, 2.4, Math.abs(ry))
+            let raise = ex * ey
+            if raise > 0.0 {
+                lum = lum + raise * 0.14
+                h = h + raise * 1.0
+                rough = rough - raise * 0.12
+            }
+            f.r[i] = lum * 0.99
+            f.g[i] = lum
+            f.b[i] = lum * 1.03
+            f.h[i] = h
+            f.a[i] = rough
+        }
+    }
+    return packField(f, 1.6)
+}
+
+// ---------------------------------------------------------------------------
+// 2 — panel
+// ---------------------------------------------------------------------------
+
+// One painted sheet-metal panel per repeat: a groove all the way round the tile,
+// a chamfer inside it, four rivets, and orange peel over the lot. Set the uv
+// scale so one repeat is one panel and a wall becomes panelling with no extra
+// geometry; leave it tiling small and it is just a busy metal.
+fn makePanel(): TexData {
+    var f = newField()
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            let peel = fbm(u, v, 30, 30, 2, 2401)
+            let speck = rand01(x, y, 2402)
+            // Distance to the nearest tile edge, in texels. The groove is cut on
+            // it, so it lands half on this tile and half on the next and the two
+            // halves make one groove.
+            let ex = Math.minF64(u, 1.0 - u) * (TEX_SIZE as f64)
+            let ey = Math.minF64(v, 1.0 - v) * (TEX_SIZE as f64)
+            let edge = Math.minF64(ex, ey)
+            let groove = smoothstepF(5.0, 2.0, edge)
+            let chamfer = smoothstepF(13.0, 6.0, edge) * (1.0 - groove)
+            var lum = 0.55 + (peel - 0.5) * 0.05 + (speck - 0.5) * 0.025
+            lum = lum - groove * 0.24 + chamfer * 0.06
+            var h = peel * 0.3 - groove * 1.4 + chamfer * 0.35
+            var rough = 0.40 + (peel - 0.5) * 0.06 + groove * 0.30
+
+            // Rivets, one in from each corner of the panel.
+            var rv = 0.0
+            for k in 0..4 {
+                let rxp = if k % 2 == 0 {
+                    22.0
+                } else {
+                    (TEX_SIZE as f64) - 22.0
+                }
+                let ryp = if k / 2 == 0 {
+                    22.0
+                } else {
+                    (TEX_SIZE as f64) - 22.0
+                }
+                let dx = (x as f64) + 0.5 - rxp
+                let dy = (y as f64) + 0.5 - ryp
+                let d = Math.sqrt(dx * dx + dy * dy)
+                rv = Math.maxF64(rv, smoothstepF(4.2, 2.6, d))
+            }
+            if rv > 0.0 {
+                lum = lum + rv * 0.10
+                h = h + rv * 1.1
+                rough = rough - rv * 0.14
+            }
+            f.r[i] = lum
+            f.g[i] = lum * 1.005
+            f.b[i] = lum * 1.02
+            f.h[i] = h
+            f.a[i] = rough
+        }
+    }
+    return packField(f, 1.1)
 }
 
 // ---------------------------------------------------------------------------
@@ -612,84 +498,7 @@ fn makeSteel(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 4 — canvas
-// ---------------------------------------------------------------------------
-
-fn makeCanvas(): TexData {
-    var f = newField()
-    // 26 threads across 256 px is a 9.85 px pitch, and 26 divides the tile
-    // exactly, which is the only reason the weave meets itself at the seam.
-    let threads = 26
-    let tf = threads as f64
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            let fu = u * tf
-            let fv = v * tf
-            let iu = Math.floor(fu) as i64
-            let iv = Math.floor(fv) as i64
-            let cu = frac(fu) - 0.5
-            let cv = frac(fv) - 0.5
-            // Each thread is a half-cylinder across its own axis.
-            let warpH = Math.sqrt(Math.maxF64(0.0, 0.25 - cu * cu)) * 2.0
-            let weftH = Math.sqrt(Math.maxF64(0.0, 0.25 - cv * cv)) * 2.0
-            // Over-under: which of the pair is on top alternates per cell, and
-            // that alternation is the whole read of "woven" rather than "grid".
-            var top = warpH
-            var under = weftH
-            if ((iu + iv) % 2) != 0 {
-                top = weftH
-                under = warpH
-            }
-            let weave = top * 0.80 + under * 0.22
-            let fibre = fbm(u, v, 64, 64, 2, 7101)
-            let fuzz = rand01(x, y, 7102)
-            let lum = 0.38 + weave * 0.22 + (fibre - 0.5) * 0.13 + (fuzz - 0.5) * 0.07
-            f.r[i] = lum * 1.10
-            f.g[i] = lum * 1.00
-            f.b[i] = lum * 0.74
-            f.h[i] = weave * 0.9 + fibre * 0.16 + fuzz * 0.05
-            f.a[i] = 0.93 - weave * 0.06
-        }
-    }
-    return packField(f, 3.6)
-}
-
-// ---------------------------------------------------------------------------
-// 5 — rust
-// ---------------------------------------------------------------------------
-
-fn makeRust(): TexData {
-    var f = newField()
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            let patch = fbm(u, v, 4, 4, 4, 8101)
-            // A ragged boundary, not a soft one: rust creeps under paint and
-            // lifts it in flakes, so the edge is high-frequency.
-            let edgeNoise = fbm(u, v, 22, 22, 2, 8102)
-            let rust = smoothstepF(0.44, 0.60, patch + (edgeNoise - 0.5) * 0.22)
-            let pit = fbm(u, v, 48, 48, 3, 8103)
-            let grain = rand01(x, y, 8104)
-            let paintLum = 0.34 + (fbm(u, v, 8, 8, 2, 8105) - 0.5) * 0.07
-            let rustLum = 0.52 + (pit - 0.5) * 0.30 + (grain - 0.5) * 0.09
-            let lum = paintLum + (rustLum - paintLum) * rust
-            f.r[i] = lum * (1.0 + rust * 0.22)
-            f.g[i] = lum * (1.0 - rust * 0.10)
-            f.b[i] = lum * (1.0 - rust * 0.30)
-            f.h[i] = rust * (pit * 0.75 + grain * 0.18) + (1.0 - rust) * 0.12 + rust * 0.10
-            f.a[i] = 0.30 + rust * 0.55
-        }
-    }
-    return packField(f, 2.0)
-}
-
-// ---------------------------------------------------------------------------
-// 6 — paint
+// 4 — paint
 // ---------------------------------------------------------------------------
 
 fn makePaint(): TexData {
@@ -716,7 +525,7 @@ fn makePaint(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 7 — glass
+// 5 — glass
 // ---------------------------------------------------------------------------
 
 fn makeGlass(): TexData {
@@ -751,536 +560,14 @@ fn makeGlass(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 8 — grass
-// ---------------------------------------------------------------------------
 
-// One blade: a short walk from the clump centre with a constant curvature, so
-// it leans rather than sticking out like a bristle.
-fn addBlade(f: &mut Field, sx: f64, sy: f64, ang: f64, len: f64, curl: f64, tone: f64, seed: i64) {
-    var x = sx
-    var y = sy
-    var a = ang
-    let steps = Math.maxI64(2, Math.floor(len) as i64)
-    for s in 0..steps {
-        a = a + curl
-        x = x + Math.cos(a)
-        y = y + Math.sin(a)
-        // Blades taper, and the tip is the bleached part.
-        let t = (s as f64) / (steps as f64)
-        let w = 0.85 - t * 0.35
-        let l = tone + t * 0.16
-        let cix = Math.floor(x) as i64
-        let ciy = Math.floor(y) as i64
-        for dy in -1..2 {
-            for dx in -1..2 {
-                let ddx = (cix as f64) + (dx as f64) + 0.5 - x
-                let ddy = (ciy as f64) + (dy as f64) + 0.5 - y
-                let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                let wgt = smoothstepF(w + 0.5, w - 0.4, d)
-                if wgt <= 0.0 {
-                    continue
-                }
-                // Same mean as a plain 0..0.08 jitter, twice the spread: a
-                // blade is not one flat tone along its length, and the extra
-                // spread is what survives being magnified six times.
-                let j = rand01(wrapIdx(cix + dx), wrapIdx(ciy + dy), seed) * 0.17 - 0.045
-                stamp(f, cix + dx, ciy + dy, wgt, (l + j) * 1.06, (l + j) * 1.01, (l + j) * 0.74, 0.45 * wgt, 0.80)
-            }
-        }
-    }
-}
-
-fn makeGrass(): TexData {
-    var f = newField()
-    // Same dirt as the gravel so the two tile against each other, minus the
-    // stones — a grass verge is not a gravel bed with plants in it.
-    dirtBase(f, 1301)
-    let cells = 10
-    let cellPx = (TEX_SIZE as f64) / (cells as f64)
-    for cy in 0..cells {
-        for cx in 0..cells {
-            if rand01(cx, cy, 6001) > 0.72 {
-                continue
-            }
-            let ox = ((cx as f64) + rand01(cx, cy, 6002)) * cellPx
-            let oy = ((cy as f64) + rand01(cx, cy, 6003)) * cellPx
-            let blades = 7 + ((latticeHash(cx, cy, 6004) % 7) as i64)
-            // Blades fan around one direction per clump. Spread them over the
-            // full circle instead and every tuft comes out an asterisk.
-            let fan = rand01(cx, cy, 6011) * 6.2831853
-            for b in 0..blades {
-                let ang = fan + (rand01(cx * 32 + b, cy, 6005) - 0.5) * 2.2
-                let len = 5.0 + rand01(cx * 32 + b, cy, 6006) * 10.0
-                let curl = (rand01(cx * 32 + b, cy, 6007) - 0.5) * 0.22
-                let tone = 0.44 + rand01(cx * 32 + b, cy, 6008) * 0.20
-                let jx = (rand01(cx * 32 + b, cy, 6009) - 0.5) * cellPx * 0.55
-                let jy = (rand01(cx * 32 + b, cy, 6010) - 0.5) * cellPx * 0.55
-                addBlade(f, ox + jx, oy + jy, ang, len, curl, tone, 6100 + b)
-            }
-        }
-    }
-    // Thatch: dead blades lying flat, 2-5 px long and hard-edged. Live blades
-    // are 5-15 px and the dirt underneath is 1 px hash, so this is the missing
-    // middle, and it is the band a magnified view resolves best.
-    for k in 0..300 {
-        let sx = rand01(k, 0, 6501) * (TEX_SIZE as f64)
-        let sy = rand01(k, 1, 6501) * (TEX_SIZE as f64)
-        let ang = rand01(k, 2, 6501) * 6.2831853
-        let steps = 2 + ((latticeHash(k, 3, 6501) % 4) as i64)
-        // Half of it is bleached straw, half is rotted-down dark litter.
-        let pale = rand01(k, 4, 6501)
-        var tone = 0.30 + pale * 0.14
-        if pale > 0.5 {
-            tone = 0.58 + pale * 0.22
-        }
-        var tx = sx
-        var ty = sy
-        for s in 0..steps {
-            tx = tx + Math.cos(ang)
-            ty = ty + Math.sin(ang)
-            let tix = Math.floor(tx) as i64
-            let tiy = Math.floor(ty) as i64
-            for dy in -1..2 {
-                for dx in -1..2 {
-                    let ddx = (tix as f64) + (dx as f64) + 0.5 - tx
-                    let ddy = (tiy as f64) + (dy as f64) + 0.5 - ty
-                    let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                    let w = Math.clampF64(1.05 - d, 0.0, 1.0)
-                    if w <= 0.0 {
-                        continue
-                    }
-                    stamp(f, tix + dx, tiy + dy, w * 0.9, tone * 1.10, tone * 1.02, tone * 0.78, 0.18 * w, 0.88)
-                }
-            }
-        }
-    }
-    return packField(f, 2.6)
-}
-
-// ---------------------------------------------------------------------------
-// 9 — sand
-// ---------------------------------------------------------------------------
-
-// Cross-section of one wind ripple. The windward face climbs over two thirds of
-// the wavelength and the lee face drops over the remaining third; a symmetric
-// sine reads as corduroy, and sand blown by a wind that only comes from one
-// direction is not symmetric. Zero at both ends, so the profile tiles.
-fn rippleProfile(t: f64): f64 {
-    if t < 0.66 {
-        return smoothT(t / 0.66)
-    }
-    return 1.0 - smoothT((t - 0.66) / 0.34)
-}
-
-// The street and the desert floor, and the one surface the player actually
-// stares at.
-//
-// This texture is sampled *twice at different scales and multiplied* (roughly
-// once per metre and again seven times per metre), so it has to hold up as a
-// macro pattern and as a micro grain from the same 256 px. That rules out the
-// usual trick of letting one fbm carry everything: an octave sum has its energy
-// spread smoothly across the spectrum and ends up mediocre at both ends. What
-// is here instead is two deliberately separated bands, ripple crests around
-// 26 px and hashed grain at 1-2 px, with the middle left comparatively quiet.
-fn makeSand(): TexData {
-    var f = newField()
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            // Crests wander instead of marching: the phase of the ripple train
-            // is displaced by up to half a wavelength by noise that varies over
-            // the whole tile. Without this warp the field is a sine and the eye
-            // finds the period instantly.
-            let warp = (fbm(u, v, 2, 2, 2, 11101) - 0.5) * 1.20
-            + (fbm(u, v, 5, 5, 2, 11102) - 0.5) * 0.40
-            // Integer coefficients are what keep an oblique wave train periodic
-            // on the tile. |(4,9)| = 9.85 wavelengths across 256 px puts the
-            // crests 26 px apart; the weaker cross train at |(11,-3)| = 11.4
-            // puts its own at 22 px.
-            let p1 = frac(u * 4.0 + v * 9.0 + warp)
-            let p2 = frac(u * 11.0 - v * 3.0 + warp * 0.55)
-            let ripple = rippleProfile(p1) * 0.78 + rippleProfile(p2) * 0.22
-            let broad = fbm(u, v, 3, 3, 2, 11103)
-            // Damp, compacted sand: darker, a little sunk, and measurably
-            // smoother than the loose stuff around it.
-            let damp = smoothstepF(0.46, 0.28, broad)
-            let grain = grainOf(x, y, 11201, 0.185, 0.125) + fleckOf(x, y, 11202)
-            var lum = 0.60 + (ripple - 0.5) * 0.15 + (broad - 0.5) * 0.10
-            // Crests are dry and pale, troughs hold the damp: a second, weaker
-            // reason for the ripples to show besides their shading.
-            lum = lum * (1.0 - damp * 0.22)
-            lum = lum + grain
-            f.r[i] = lum * 1.13
-            f.g[i] = lum * 1.00
-            f.b[i] = lum * 0.78
-            // Grain enters the height field at about a third of its albedo
-            // weight. Any more and the derivative of the per-texel hash swamps
-            // the ripple slope and the normal map turns to static.
-            f.h[i] = ripple * 0.90 + broad * 0.22 + grain * 0.35 - damp * 0.10
-            f.a[i] = 0.85 - damp * 0.16
-        }
-    }
-    // Pebbles blown clear of the sand: too small to be gravel, big enough to
-    // break the ripple lines where they sit.
-    let cells = 20
-    let cellPx = (TEX_SIZE as f64) / (cells as f64)
-    for cy in 0..cells {
-        for cx in 0..cells {
-            if rand01(cx, cy, 11301) > 0.45 {
-                continue
-            }
-            let sx = ((cx as f64) + rand01(cx, cy, 11302)) * cellPx
-            let sy = ((cy as f64) + rand01(cx, cy, 11303)) * cellPx
-            let rad = 1.0 + rand01(cx, cy, 11304) * 2.4
-            let tone = 0.44 + rand01(cx, cy, 11305) * 0.22
-            let lobe = rand01(cx, cy, 11306) * 6.2831853
-            let ir = Math.floor(rad) as i64 + 2
-            let cix = Math.floor(sx) as i64
-            let ciy = Math.floor(sy) as i64
-            for dy in -ir..(ir + 1) {
-                for dx in -ir..(ir + 1) {
-                    let ddx = (cix as f64) + (dx as f64) + 0.5 - sx
-                    let ddy = (ciy as f64) + (dy as f64) + 0.5 - sy
-                    let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                    let rr = rad * lobeRadius(Math.atan2(ddy, ddx), lobe)
-                    if d > rr {
-                        continue
-                    }
-                    let edge = Math.clampF64(rr - d, 0.0, 1.0)
-                    let dome = Math.sqrt(Math.maxF64(0.0, 1.0 - (d / rr) * (d / rr)))
-                    let sp = grainOf(wrapIdx(cix + dx), wrapIdx(ciy + dy), 11307, 0.14, 0.09)
-                    let l = tone + sp + dome * 0.06
-                    stamp(f, cix + dx, ciy + dy, edge, l * 1.06, l * 1.00, l * 0.88, dome * 0.35 * edge, 0.66)
-                }
-            }
-        }
-    }
-    return packField(f, 4.0)
-}
-
-// ---------------------------------------------------------------------------
-// 10 — plank
-// ---------------------------------------------------------------------------
-
-// One split running with the grain.
-//
-// A random walk cannot be used here the way `addCrack` uses one for concrete: a
-// split runs the full width of the board, so it crosses the tile edge, and a
-// walk that leaves at u=1 has no reason to arrive back at the same v at u=0.
-// Making the centreline and the width *wrapping functions of u* (integer
-// harmonics) is what lets the crack meet itself. `gate` closes the split at a
-// few points along its length so it reads as a split and not a milled slot.
-fn addSplit(f: &mut Field, y0: f64, amp: f64, wob: i64, phase: f64, wBase: f64, gate: i64, gatePhase: f64) {
-    let tau = 6.2831853
-    for xi in 0..TEX_SIZE {
-        let u = ((xi as f64) + 0.5) / (TEX_SIZE as f64)
-        let cy = y0 + amp * Math.sin(tau * (wob as f64) * u + phase)
-        let open = Math.maxF64(0.0, Math.sin(tau * (gate as f64) * u + gatePhase))
-        let w = wBase * open * open
-        if w <= 0.06 {
-            continue
-        }
-        let ic = Math.floor(cy) as i64
-        for dy in -3..4 {
-            let d = Math.abs((ic as f64) + (dy as f64) + 0.5 - cy)
-            let wgt = smoothstepF(w + 0.85, w - 0.15, d)
-            if wgt <= 0.0 {
-                continue
-            }
-            // Below the silvered face the wood is still dark: the inside of a
-            // split is the only place on a weathered board that never bleached.
-            stamp(f, xi, ic + dy, wgt * 0.88, 0.14, 0.13, 0.115, -0.85 * wgt, 0.92)
-        }
-    }
-}
-
-fn makePlank(): TexData {
-    var f = newField()
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            let warp = (fbm(u, v, 3, 2, 2, 12201) - 0.5) * 0.026
-            let vv = v + warp
-            let coarse = valueNoise(0.5, vv, 1, 11, 12202)
-            let line = frac(vv * 20.0)
-            let lineD = Math.abs(line - 0.5) * 2.0
-            // On a barn board the soft earlywood has weathered *away* and the
-            // latewood stands proud. That inversion (ridges where TEX_WOOD has
-            // only a darker line) is most of what separates the two materials.
-            let late = smoothstepF(0.34, 0.92, lineD) * (0.45 + coarse * 0.55)
-            // Checking: fine fissures that run with the grain, so a noise with
-            // a low period across u and a very high one down v.
-            let check = valueNoise(u, v, 9, 190, 12203)
-            let fissure = smoothstepF(0.66, 0.92, check)
-            let weather = fbm(u, v, 6, 26, 3, 12204)
-            let grain = grainOf(x, y, 12205, 0.085, 0.055)
-            // Dark, grey and beaten: the base tone starts well below TEX_WOOD's
-            // and the silvering pulls what is left towards neutral, never up.
-            var lum = 0.32 + (coarse - 0.5) * 0.13 + (weather - 0.5) * 0.11 + grain
-            lum = lum + late * 0.14 - fissure * 0.14
-            let silver = smoothstepF(0.46, 0.80, weather)
-            var rr = lum * 1.07
-            var gg = lum * 0.99
-            var bb = lum * 0.84
-            // Silvered board is grey with the faintest warmth left in it. Push
-            // it fully neutral and it reads as concrete; leave it brown and the
-            // board has not weathered at all.
-            let sl = lum + 0.13 * silver
-            rr = rr + (sl * 1.01 - rr) * silver * 0.85
-            gg = gg + (sl * 1.00 - gg) * silver * 0.85
-            bb = bb + (sl * 0.96 - bb) * silver * 0.85
-            f.r[i] = rr
-            f.g[i] = gg
-            f.b[i] = bb
-            f.h[i] = late * 0.85 + coarse * 0.25 - fissure * 0.55 + grain * 0.6
-            f.a[i] = 0.85 + fissure * 0.08 - silver * 0.04
-        }
-    }
-    for s in 0..7 {
-        let y0 = rand01(s, 0, 12301) * (TEX_SIZE as f64)
-        let amp = 1.4 + rand01(s, 1, 12301) * 3.2
-        let wob = 1 + ((latticeHash(s, 2, 12301) % 3) as i64)
-        let phase = rand01(s, 3, 12301) * 6.2831853
-        let wBase = 0.5 + rand01(s, 4, 12301) * 1.3
-        let gate = 1 + ((latticeHash(s, 5, 12301) % 3) as i64)
-        addSplit(f, y0, amp, wob, phase, wBase, gate, rand01(s, 6, 12301) * 6.2831853)
-    }
-    // Nails: a sunk head, and below it the stain where sixty years of rain has
-    // carried the rust down the board. The bleed is oriented, not radial:
-    // gravity picked the direction, and a symmetric halo looks like a decal.
-    for k in 0..9 {
-        let nx = rand01(k, 0, 12401) * (TEX_SIZE as f64)
-        let ny = rand01(k, 1, 12401) * (TEX_SIZE as f64)
-        let nix = Math.floor(nx) as i64
-        let niy = Math.floor(ny) as i64
-        for dy in -9..10 {
-            for dx in -7..8 {
-                let ddx = (nix as f64) + (dx as f64) + 0.5 - nx
-                let ddy = (niy as f64) + (dy as f64) + 0.5 - ny
-                let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                // Bleed runs downwards: stretched below the head, cut off above.
-                let below = Math.maxF64(0.0, ddy) / 9.0
-                let bleedD = Math.sqrt(ddx * ddx * 2.6 + Math.maxF64(0.0, -ddy) * Math.maxF64(0.0, -ddy) * 4.0)
-                let bleed = smoothstepF(6.5, 1.5, bleedD) * (0.30 + below * 0.55)
-                let jit = rand01(wrapIdx(nix + dx), wrapIdx(niy + dy), 12402)
-                let bw = Math.clampF64(bleed * (0.55 + jit * 0.75), 0.0, 0.8)
-                stamp(f, nix + dx, niy + dy, bw, 0.34, 0.20, 0.11, -0.05 * bw, 0.90)
-                let hw = smoothstepF(2.3, 1.1, d)
-                if hw > 0.0 {
-                    stamp(f, nix + dx, niy + dy, hw, 0.20, 0.13, 0.09, -0.75 * hw, 0.80)
-                }
-            }
-        }
-    }
-    return packField(f, 2.2)
-}
-
-// ---------------------------------------------------------------------------
-// 11 — tin
-// ---------------------------------------------------------------------------
-
-fn makeTin(): TexData {
-    var f = newField()
-    let tau = 6.2831853
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            // Eight corrugations across the tile: a 32 px pitch, and 8 divides
-            // 256, which is the only reason the profile meets itself.
-            let corr = 0.5 - 0.5 * Math.cos(tau * u * 8.0)
-            let valley = 1.0 - corr
-            // Two sheet laps per tile. Water tracks along a lap and the rust
-            // starts there, so the laps have to exist even though the geometry
-            // is flat, because otherwise the rust has nowhere to come from but
-            // noise.
-            let lv = frac(v * 2.0)
-            let lapD = Math.minF64(lv, 1.0 - lv)
-            let lap = smoothstepF(0.075, 0.005, lapD)
-            // Spangle: galvanising freezes into flat crystal facets with hard
-            // straight boundaries. Quantising a smooth noise into levels is the
-            // cheapest thing that produces a facet rather than a blob.
-            // A single lattice, not an fbm: the facets want to be large and
-            // flat with a hard boundary, and a second octave only rounds the
-            // quantisation steps back off.
-            let spangle = Math.floor(valueNoise(u, v, 9, 9, 13101) * 5.0) / 5.0
-            // The valley bias is tuned to *shift* the patch noise rather than
-            // override it. Rust on a roof starts where the water stops, so it
-            // has to prefer the low points, but a valley that rusts along its
-            // whole length is a painted stripe, and the patch noise is what
-            // breaks it back into blooms.
-            let rustField = fbm(u, v, 5, 5, 3, 13102) + valley * 0.22 + lap * 0.26
-            + (fbm(u, v, 20, 20, 2, 13103) - 0.5) * 0.24
-            let rust = smoothstepF(0.69, 0.87, rustField)
-            let pit = fbm(u, v, 40, 40, 3, 13104)
-            let grain = grainOf(x, y, 13105, 0.055, 0.035)
-            // Chalky galvanising: pale, faintly cool, and low contrast. The
-            // corrugation still shows in albedo, faintly: a flat-on photo of a
-            // tin roof is banded even before any light hits it, because the
-            // valleys hold the dirt.
-            let galv = 0.62 + (spangle - 0.5) * 0.20 + (corr - 0.5) * 0.09 - valley * 0.07 + grain
-            let rustLum = 0.40 + (pit - 0.5) * 0.26 + grain * 1.8
-            let lum = galv + (rustLum - galv) * rust
-            f.r[i] = lum * (0.98 + rust * 0.26)
-            f.g[i] = lum * (1.00 - rust * 0.10)
-            f.b[i] = lum * (1.03 - rust * 0.42)
-            // The corrugation dominates the height field by design: it is the
-            // only thing on this material a normal map can sell from ten metres.
-            f.h[i] = corr * 1.60 + lap * 0.22 + rust * (pit * 0.16 + grain * 1.2)
-            + (1.0 - rust) * spangle * 0.05
-            f.a[i] = 0.55 + rust * 0.35 - (1.0 - rust) * (spangle - 0.5) * 0.06
-        }
-    }
-    return packField(f, 3.0)
-}
-
-// ---------------------------------------------------------------------------
-// 12 — adobe
-// ---------------------------------------------------------------------------
-
-// Where the plaster has come off. Factored out because the straw pass needs the
-// same answer as the base pass: straw is in the render coat, so a fleck must
-// not be scattered onto exposed brick.
-fn adobeLoss(u: f64, v: f64): f64 {
-    let patch = fbm(u, v, 4, 4, 3, 14101)
-    let ragged = (fbm(u, v, 17, 17, 2, 14102) - 0.5) * 0.30
-    return smoothstepF(0.56, 0.70, patch + ragged)
-}
-
-fn makeAdobe(): TexData {
-    var f = newField()
-    for y in 0..TEX_SIZE {
-        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
-        for x in 0..TEX_SIZE {
-            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
-            let i = y * TEX_SIZE + x
-            // Brick beneath: 8 courses of 32 px, 4 bricks of 64 px per course,
-            // every other course offset by half a brick.
-            let courseF = v * 8.0
-            let course = Math.floor(courseF) as i64
-            let cv = frac(courseF)
-            var off = 0.0
-            if (course % 2) != 0 {
-                off = 0.5
-            }
-            let colF = u * 4.0 + off
-            let col = wrapTo(Math.floor(colF) as i64, 4)
-            let bu = frac(colF)
-            // Mortar is wider in the bed joints than the perpends, as laid.
-            let mortarV = smoothstepF(0.100, 0.055, Math.minF64(cv, 1.0 - cv))
-            let mortarU = smoothstepF(0.055, 0.026, Math.minF64(bu, 1.0 - bu))
-            let mortar = Math.maxF64(mortarV, mortarU)
-            let bTone = 0.34 + rand01(col, wrapTo(course, 8), 14201) * 0.22
-            let bGrain = grainOf(x, y, 14202, 0.10, 0.07) + fleckOf(x, y, 14203) * 0.5
-            var brickLum = bTone + (fbm(u, v, 30, 30, 2, 14204) - 0.5) * 0.12 + bGrain
-            var brickR = brickLum * 1.24
-            var brickG = brickLum * 0.90
-            var brickB = brickLum * 0.70
-            // Mud mortar between mud bricks: paler and much rougher, but the
-            // same earth. A grey joint would make this a stone wall.
-            let mortarLum = 0.48 + bGrain
-            brickR = brickR + (mortarLum * 1.18 - brickR) * mortar
-            brickG = brickG + (mortarLum * 1.00 - brickG) * mortar
-            brickB = brickB + (mortarLum * 0.76 - brickB) * mortar
-            let brickH = 0.30 - mortar * 0.55 + bGrain * 0.8
-
-            // Render coat: broad, soft, hand-floated undulation.
-            let swell = fbm(u, v, 3, 3, 3, 14301)
-            let pGrain = grainOf(x, y, 14302, 0.075, 0.05)
-            let plasterLum = 0.63 + (swell - 0.5) * 0.16 + pGrain
-            // Crazing: the shrinkage net a mud render dries into. Two lattices
-            // of `|noise - 0.5|` thresholded thin, giving closed wandering curves,
-            // which is what a shrinkage crack actually is, rather than the open
-            // scratches a random walk would draw.
-            // Threshold and lattice pitch trade off directly: the width of the
-            // line is roughly `2 * T * cell`, so a denser net needs a *smaller*
-            // threshold to stay hairline. At 16 and 27 cells these come out
-            // about a texel wide, which is the point: crazing you can see the
-            // individual cracks of is a dry riverbed, not a wall.
-            let cz1 = smoothstepF(0.016, 0.002, Math.abs(valueNoise(u, v, 16, 16, 14303) - 0.5))
-            let cz2 = smoothstepF(0.013, 0.002, Math.abs(valueNoise(u, v, 27, 27, 14304) - 0.5))
-            let craze = Math.maxF64(cz1, cz2 * 0.75)
-
-            let loss = adobeLoss(u, v)
-            // The plaster does not feather out where it fails, it breaks: a lip
-            // of render stands proud right at the boundary and casts the shadow
-            // that makes the patch read as a hole rather than a stain.
-            let lip = smoothstepF(0.02, 0.28, loss) * smoothstepF(0.62, 0.34, loss)
-            var lum = plasterLum - craze * 0.075
-            var rr = lum * 1.14
-            var gg = lum * 1.02
-            var bb = lum * 0.80
-            rr = rr + (brickR - rr) * loss
-            gg = gg + (brickG - gg) * loss
-            bb = bb + (brickB - bb) * loss
-            let dark = lip * 0.14
-            f.r[i] = rr * (1.0 - dark)
-            f.g[i] = gg * (1.0 - dark)
-            f.b[i] = bb * (1.0 - dark)
-            let plasterH = 0.95 + swell * 0.30 - craze * 0.20 + pGrain * 0.7
-            f.h[i] = plasterH + (brickH - plasterH) * loss + lip * 0.22
-            f.a[i] = 0.80 + craze * 0.06 + loss * 0.06
-        }
-    }
-    // Straw: chopped stalks mixed into the render to stop it cracking, which
-    // they only partly did.
-    for k in 0..170 {
-        let sx = rand01(k, 0, 14401) * (TEX_SIZE as f64)
-        let sy = rand01(k, 1, 14401) * (TEX_SIZE as f64)
-        let su = (sx + 0.5) / (TEX_SIZE as f64)
-        let sv = (sy + 0.5) / (TEX_SIZE as f64)
-        if adobeLoss(su, sv) > 0.35 {
-            continue
-        }
-        let ang = rand01(k, 2, 14401) * 6.2831853
-        let steps = 3 + ((latticeHash(k, 3, 14401) % 5) as i64)
-        let tone = 0.68 + rand01(k, 4, 14401) * 0.22
-        var tx = sx
-        var ty = sy
-        for s in 0..steps {
-            tx = tx + Math.cos(ang)
-            ty = ty + Math.sin(ang)
-            let tix = Math.floor(tx) as i64
-            let tiy = Math.floor(ty) as i64
-            for dy in -1..2 {
-                for dx in -1..2 {
-                    let ddx = (tix as f64) + (dx as f64) + 0.5 - tx
-                    let ddy = (tiy as f64) + (dy as f64) + 0.5 - ty
-                    let d = Math.sqrt(ddx * ddx + ddy * ddy)
-                    let w = Math.clampF64(0.95 - d, 0.0, 1.0)
-                    if w <= 0.0 {
-                        continue
-                    }
-                    stamp(f, tix + dx, tiy + dy, w * 0.75, tone * 1.10, tone * 1.03, tone * 0.72, 0.10 * w, 0.86)
-                }
-            }
-        }
-    }
-    return packField(f, 1.8)
-}
-
-// ---------------------------------------------------------------------------
-
-// Thirteen materials in the order the TEX_* constants name. Runs once at startup.
 pub fn makeTextures(): Vec<TexData> {
     var out: Vec<TexData> = Vec.new()
-    out.push(makeGravel())
-    out.push(makeConcrete())
-    out.push(makeWood())
+    out.push(makeCarpet())
+    out.push(makeTread())
+    out.push(makePanel())
     out.push(makeSteel())
-    out.push(makeCanvas())
-    out.push(makeRust())
     out.push(makePaint())
     out.push(makeGlass())
-    out.push(makeGrass())
-    out.push(makeSand())
-    out.push(makePlank())
-    out.push(makeTin())
-    out.push(makeAdobe())
     return out
 }

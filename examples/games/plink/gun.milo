@@ -1,15 +1,15 @@
-// The revolver in your hands, and what firing it does to the frame.
+// The blaster, and the bolt it throws.
 //
-// The view model is drawn after the world with the depth test off, in its own
-// narrow projection. That is the standard trick and it is worth saying why: a
-// gun held 30 cm from the eye is inside the near plane of any sane scene
-// projection, and rendering it in the scene's own frustum either clips it or
-// forces a near plane so close that the whole depth buffer loses precision.
+// This is a midway gun on a tether, not a firearm: a fat moulded body in
+// arcade green, a yellow barrel shroud with a lit ring round the muzzle, an
+// orange trigger and a bright lens on the top rib. What makes one recognisable
+// at a glance is the proportion — a stubby wide body, a barrel about three
+// times its own diameter, a raked grip — and boxes are enough if those are
+// right.
 //
-// Recoil is a spring on three quantities that all recover at different rates —
-// the muzzle rises fastest, the gun slides back next, and the camera kick
-// settles slowest — which is what makes one shot read as one event rather than
-// as a single stiff bounce.
+// The bolt is a real piece of geometry too: a thin emissive bar from the muzzle
+// to whatever the shot hit, held for a fifth of a second. It is depth-tested
+// like everything else, so it stops at the target rather than painting over it.
 
 from "std/math" import {
     Math
@@ -18,7 +18,7 @@ from "gl" import {
     GlContext, Gpu, Mesh
 }
 from "./mat4" import {
-    identity, lookAt, multiply, perspective, rotationX, rotationY, rotationZ, scaling, translation
+    identity, multiply, rotationX, rotationY, rotationZ, scaling, translation
 }
 from "./mesh" import {
     Builder, builder
@@ -27,235 +27,235 @@ from "./render" import {
     Gfx, Material, material, sceneAttrs
 }
 from "./textures" import {
-    TEX_PAINT, TEX_STEEL, TEX_WOOD
+    TEX_PAINT, TEX_STEEL
 }
 from "./vec3" import {
     Vec3, v3
 }
 
 pub struct Gun {
-    steelMesh: Mesh,
-    cylMesh: Mesh,
+    bodyMesh: Mesh,
+    trimMesh: Mesh,
     gripMesh: Mesh,
+    glowMesh: Mesh,
     flashMesh: Mesh,
-    steelMat: Material,
+    boltMesh: Mesh,
+    bodyMat: Material,
+    trimMat: Material,
     gripMat: Material,
+    glowMat: Material,
     flashMat: Material,
+    boltMat: Material,
 
     // Recoil state, all in the gun's own frame.
     kickBack: f64,
     kickRise: f64,
     // Seconds the muzzle flash stays lit. Two frames at 60 Hz is the real thing.
     flash: f64,
-    // Cylinder rotation, one sixth per shot.
-    cylinder: f64,
-    cylinderTarget: f64,
-
+    // The bolt in flight: where it ended, and how much of its life is left.
+    boltT: f64,
+    boltEnd: Vec3,
+    boltHit: bool,
     cooldown: f64,
 }
 
-// The gun, built once along -Z with the grip under the origin. It is a
-// single-action revolver, and what makes one recognisable at a glance is the
-// proportion rather than the detail: a thin barrel about eight times its own
-// diameter, a fat but short cylinder behind it, a narrow frame, and a grip that
-// curves back and down at about sixty degrees. Boxes are enough if those are
-// right, and no amount of geometry saves them if they are wrong.
+// The moulded body: built along -Z with the hand at the origin, so the barrel
+// axis IS the local -Z axis. That matters more than it sounds — the bolt leaves
+// along the aim line, and any angle between the barrel and that line reads
+// immediately as a gun firing sideways.
 //
-// Nothing here is textured finely. A 9x repeat of the steel map across a part
-// two centimetres wide is noise, and noise at this distance is what made the
-// old gun read as a lump rather than as metal.
-fn steelGeometry(b: &mut Builder) {
-    b.setUvScale(3.0)
+// Proportion is what makes a toy blaster recognisable: a deep, narrow receiver,
+// a barrel about a third of the length sticking out of a fat shroud, a big
+// round muzzle collar, and a grip raked back hard. Boxes are enough if those
+// are right and no amount of detail saves them if they are wrong.
+fn bodyGeometry(b: &mut Builder) {
+    b.setUvScale(2.2)
     b.setTint(1.0, 1.0, 1.0)
-    // barrel
-    b.setXform(multiply(translation(v3(0.0, 0.016, -0.048)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.0104, 0.170, 16, true)
+    // Receiver, deepest at the back and tapering forward.
+    b.boxSpan(v3(-0.046, -0.030, -0.10), v3(0.046, 0.058, 0.080))
+    b.boxSpan(v3(-0.038, -0.024, -0.20), v3(0.038, 0.046, -0.095))
+    // The shroud round the barrel: an eight-sided tube, so the highlight breaks
+    // into facets instead of running as one smear.
+    b.setXform(multiply(translation(v3(0.0, 0.012, -0.205)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.040, 0.075, 8, false)
     b.resetXform()
-    // a step at the crown, so the end reads as a muzzle and not as a cut pipe
-    b.setXform(multiply(translation(v3(0.0, 0.016, -0.219)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.0122, 0.010, 16, true)
-    b.resetXform()
-    // ejector rod housing, slung under the barrel and stopping short of it
-    b.setXform(multiply(translation(v3(0.0, 0.0025, -0.052)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.0064, 0.130, 10, true)
-    b.resetXform()
-    // front sight blade
-    b.boxSpan(v3(-0.0028, 0.0255, -0.207), v3(0.0028, 0.0385, -0.197))
-    // frame: a narrow box with the top strap running back to the hammer
-    b.boxSpan(v3(-0.0112, -0.008, -0.046), v3(0.0112, 0.0245, 0.032))
-    b.boxSpan(v3(-0.0112, 0.0245, -0.046), v3(-0.0040, 0.0300, 0.032))
-    b.boxSpan(v3(0.0040, 0.0245, -0.046), v3(0.0112, 0.0300, 0.032))
-    // the round shield the cylinder turns against
-    b.setXform(multiply(translation(v3(0.0, 0.016, 0.002)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.0198, 0.011, 16, true)
-    b.resetXform()
-    // loading gate, on the right of the frame only
-    b.setTint(0.85, 0.85, 0.88)
-    b.boxSpan(v3(0.0112, 0.004, -0.010), v3(0.0138, 0.024, 0.006))
-    // hammer: body and the spur the thumb pulls
-    b.boxSpan(v3(-0.0048, 0.0250, 0.026), v3(0.0048, 0.0430, 0.036))
-    b.setXform(multiply(translation(v3(0.0, 0.0425, 0.034)), rotationX(0.66)))
-    b.box(v3(0.0, 0.005, 0.0), 0.0068, 0.006, 0.0085)
-    b.resetXform()
-    // trigger, inside a guard bow in three pieces
-    b.setTint(0.92, 0.92, 0.94)
-    b.boxSpan(v3(-0.0030, -0.026, 0.004), v3(0.0030, -0.006, 0.012))
-    b.boxSpan(v3(-0.0055, -0.030, -0.008), v3(0.0055, -0.023, 0.000))
-    b.boxSpan(v3(-0.0055, -0.036, -0.004), v3(0.0055, -0.028, 0.022))
-    b.boxSpan(v3(-0.0055, -0.030, 0.018), v3(0.0055, -0.010, 0.026))
-    b.setTint(1.0, 1.0, 1.0)
+    // The hump over the receiver, which is what stops the profile being a brick.
+    b.boxSpan(v3(-0.026, 0.058, -0.14), v3(0.026, 0.082, 0.030))
+    // Rounded tail, in two steps rather than one slab: the back of the gun is
+    // most of what you actually see from behind it.
+    b.boxSpan(v3(-0.042, -0.020, 0.080), v3(0.042, 0.050, 0.104))
+    b.boxSpan(v3(-0.030, -0.008, 0.104), v3(0.030, 0.038, 0.122))
     b.setUvScale(1.0)
 }
 
-// The revolving cylinder is its own mesh so it can spin a sixth of a turn per
-// shot without the rest of the gun following it. The flutes are what make the
-// spin visible at all: a smooth drum turning about its own axis is a drum that
-// is not turning.
-fn cylinderGeometry(b: &mut Builder) {
-    b.setUvScale(3.0)
+// Everything that is yellow: the barrel, the muzzle collar, the trigger guard.
+fn trimGeometry(b: &mut Builder) {
+    b.setUvScale(2.5)
     b.setTint(1.0, 1.0, 1.0)
-    b.setXform(multiply(translation(v3(0.0, 0.016, -0.044)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, 0.0, 0.0), 0.0188, 0.044, 18, true)
+    // The barrel proper, out of the front of the shroud.
+    b.setXform(multiply(translation(v3(0.0, 0.012, -0.300)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.026, 0.110, 12, false)
     b.resetXform()
-    b.setTint(0.62, 0.62, 0.65)
-    for i in 0..6 {
-        let a = 2.0 * Math.pi() * (i as f64) / 6.0
-        let cx = Math.cos(a) * 0.0158
-        let cy = 0.016 + Math.sin(a) * 0.0158
-        b.setXform(multiply(translation(v3(cx, cy, -0.024)), rotationZ(a)))
-        b.box(v3(0.0, 0.0, 0.0), 0.0048, 0.0048, 0.016)
-        b.resetXform()
-    }
-    b.setTint(1.0, 1.0, 1.0)
+    // The collar at the muzzle.
+    b.setXform(multiply(translation(v3(0.0, 0.012, -0.310)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.040, 0.026, 14, true)
+    b.resetXform()
+    // Trigger guard, as three bars.
+    b.boxSpan(v3(-0.011, -0.078, -0.030), v3(0.011, -0.060, 0.030))
+    b.boxSpan(v3(-0.011, -0.078, -0.038), v3(0.011, -0.026, -0.020))
+    b.boxSpan(v3(-0.011, -0.076, 0.020), v3(0.011, -0.028, 0.038))
     b.setUvScale(1.0)
 }
 
-// The grip, as five tapering blocks along a curve. A revolver grip is not a
-// handle sticking out of the frame at an angle; it is a curve that starts under
-// the hammer and finishes pointing forward, and the curve is what a straight box
-// cannot fake.
+// The grip: a darker moulding raked back about fifty degrees, with a butt plate.
 fn gripGeometry(b: &mut Builder) {
-    b.setUvScale(1.2)
+    b.setUvScale(3.0)
     b.setTint(1.0, 1.0, 1.0)
-    // Eight overlapping blocks rather than five spaced ones: at five the grip is
-    // a staircase, and a staircase is the first thing the eye picks out of a
-    // shape it already knows.
-    for i in 0..8 {
-        let t = (i as f64) / 7.0
-        let ang = 0.34 + t * 0.26
-        let cz = 0.028 + t * 0.024
-        let cy = -0.012 - t * 0.044
-        b.setXform(multiply(translation(v3(0.0, cy, cz)), rotationX(ang)))
-        b.box(v3(0.0, 0.0, 0.0), 0.0140 - t * 0.0016, 0.0075, 0.0185 - t * 0.0032)
-        b.resetXform()
-    }
-    // the butt cap, square across the bottom of the curve
-    b.setXform(multiply(translation(v3(0.0, -0.058, 0.053)), rotationX(0.60)))
-    b.box(v3(0.0, -0.004, 0.0), 0.0122, 0.0035, 0.0150)
+    b.setXform(multiply(translation(v3(0.0, -0.028, 0.026)), rotationX(0.44)))
+    b.boxSpan(v3(-0.030, -0.175, -0.028), v3(0.030, 0.012, 0.036))
+    b.boxSpan(v3(-0.036, -0.196, -0.034), v3(0.036, -0.166, 0.042))
     b.resetXform()
+    b.setTint(1.30, 0.55, 0.10)
+    b.boxSpan(v3(-0.008, -0.070, -0.014), v3(0.008, -0.034, 0.006))
+    b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(1.0)
 }
 
-// A short cone of light at the muzzle plus a flat star. It is emissive only —
-// no light is added to the scene from here, the composite's white flash does
-// that job for the whole frame at once.
+// Everything on the gun that glows: the bore, a strip down the hump, and three
+// vents each side. All of it is emissive and tinted per piece, the same trick
+// the room's neon uses — and all of it is kept well under the values the tubes
+// carry, because a viewmodel is a metre from the lens and blooms accordingly.
+fn glowGeometry(b: &mut Builder) {
+    // The bore: a small disc set back inside the collar, so it reads as a hole
+    // with a light in it rather than as a ball stuck on the front.
+    b.setTint(0.30, 1.30, 0.60)
+    b.setXform(multiply(translation(v3(0.0, 0.012, -0.318)), rotationX(-1.5708)))
+    b.cylinder(v3(0.0, 0.0, 0.0), 0.019, 0.006, 12, true)
+    b.resetXform()
+    b.setTint(0.90, 0.45, 0.12)
+    b.boxSpan(v3(-0.011, 0.083, -0.120), v3(0.011, 0.086, 0.010))
+    b.setTint(0.20, 0.85, 1.10)
+    for k in 0..3 {
+        let z = -0.055 + 0.036 * (k as f64)
+        b.boxSpan(v3(-0.047, -0.004, z), v3(-0.045, 0.030, z + 0.020))
+        b.boxSpan(v3(0.045, -0.004, z), v3(0.047, 0.030, z + 0.020))
+    }
+    b.setTint(1.0, 1.0, 1.0)
+}
+
+// The flash at the muzzle: a short cone of light on the bore axis.
 fn flashGeometry(b: &mut Builder) {
     b.setTint(1.0, 1.0, 1.0)
-    let z = -0.278
+    let tip = v3(0.0, 0.012, -0.44)
     let segs = 10
+    let r = 0.055
     for i in 0..segs {
         let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
         let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
-        let r0 = if i % 2 == 0 {
-            0.055
-        } else {
-            0.026
-        }
-        let r1 = if (i + 1) % 2 == 0 {
-            0.055
-        } else {
-            0.026
-        }
-        let p0 = v3(Math.cos(a0) * r0, 0.012 + Math.sin(a0) * r0, z)
-        let p1 = v3(Math.cos(a1) * r1, 0.012 + Math.sin(a1) * r1, z)
-        let c = v3(0.0, 0.012, z + 0.02)
-        b.tri(c, p0, p1, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0)
-        b.tri(c, p1, p0, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0)
+        let p0 = v3(Math.cos(a0) * r, 0.012 + Math.sin(a0) * r, -0.330)
+        let p1 = v3(Math.cos(a1) * r, 0.012 + Math.sin(a1) * r, -0.330)
+        b.tri(tip, p0, p1, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0)
+        b.tri(tip, p1, p0, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0)
     }
-    b.setXform(multiply(translation(v3(0.0, 0.012, z)), rotationX(-1.5708)))
-    b.cylinder(v3(0.0, -0.03, 0.0), 0.014, 0.05, 8, false)
-    b.resetXform()
+    b.setTint(1.0, 1.0, 1.0)
+}
+
+// The bolt, as a unit bar along +Y from the origin. It is drawn with a matrix
+// that stretches it from the muzzle to the hit, so one mesh covers every shot.
+fn boltGeometry(b: &mut Builder) {
+    b.setTint(1.0, 1.0, 1.0)
+    b.cylinder(v3(0.0, 0.0, 0.0), 1.0, 1.0, 6, false)
 }
 
 pub fn newGun(gl: &mut GlContext): Gun {
-    var sb = builder()
-    steelGeometry(sb)
-    var cb = builder()
-    cylinderGeometry(cb)
+    var bb = builder()
+    bodyGeometry(bb)
+    var tb = builder()
+    trimGeometry(tb)
     var gb = builder()
     gripGeometry(gb)
+    var wb = builder()
+    glowGeometry(wb)
     var fb = builder()
     flashGeometry(fb)
+    var lb = builder()
+    boltGeometry(lb)
 
-    var steelMesh = Mesh.new(gl, sceneAttrs())
-    steelMesh.upload(sb.data.clone())
-    var cylMesh = Mesh.new(gl, sceneAttrs())
-    cylMesh.upload(cb.data.clone())
+    var bodyMesh = Mesh.new(gl, sceneAttrs())
+    bodyMesh.upload(bb.data.clone())
+    var trimMesh = Mesh.new(gl, sceneAttrs())
+    trimMesh.upload(tb.data.clone())
     var gripMesh = Mesh.new(gl, sceneAttrs())
     gripMesh.upload(gb.data.clone())
+    var glowMesh = Mesh.new(gl, sceneAttrs())
+    glowMesh.upload(wb.data.clone())
     var flashMesh = Mesh.new(gl, sceneAttrs())
     flashMesh.upload(fb.data.clone())
+    var boltMesh = Mesh.new(gl, sceneAttrs())
+    boltMesh.upload(lb.data.clone())
 
     var flashMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 1.0, 0.0)
-    flashMat.emissive = v3(9.0, 6.4, 2.6)
+    flashMat.emissive = v3(4.5, 7.0, 4.0)
+    var glowMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
+    glowMat.emissive = v3(1.0, 1.0, 1.0)
+    var boltMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
+    boltMat.emissive = v3(1.0, 1.0, 1.0)
 
     return Gun {
-        steelMesh: steelMesh,
-        cylMesh: cylMesh,
+        bodyMesh: bodyMesh,
+        trimMesh: trimMesh,
         gripMesh: gripMesh,
+        glowMesh: glowMesh,
         flashMesh: flashMesh,
-        // Case-hardened blue, not grey plastic: a real gun is a dark metal that
-        // is almost entirely reflection, so the albedo goes down and the metal
-        // and gloss go up. Most of what you see on it is the sky.
-        steelMat: material(TEX_STEEL, 0.33, 0.34, 0.37, 0.42, 0.75),
-        gripMat: material(TEX_WOOD, 0.058, 0.030, 0.018, 0.54, 0.0),
+        boltMesh: boltMesh,
+        // Injection-moulded plastic: a strong colour, a soft highlight and no
+        // metal at all. The old gun was 75% metal and read as a prop next to a
+        // room made of chrome; this one has to read as a toy.
+        bodyMat: material(TEX_PAINT, 0.11, 0.62, 0.20, 0.30, 0.0),
+        trimMat: material(TEX_PAINT, 0.92, 0.66, 0.06, 0.26, 0.0),
+        gripMat: material(TEX_STEEL, 0.055, 0.075, 0.11, 0.48, 0.10),
+        glowMat: glowMat,
         flashMat: flashMat,
+        boltMat: boltMat,
         kickBack: 0.0,
         kickRise: 0.0,
         flash: 0.0,
-        cylinder: 0.0,
-        cylinderTarget: 0.0,
+        boltT: 0.0,
+        boltEnd: v3(0.0, 0.0, 0.0),
+        boltHit: false,
         cooldown: 0.0,
     }
 }
 
 impl Gun {
-    // The only thing between you and the next shot is how fast the hammer comes
-    // back. Counting six and then standing still for a second is a rule that only
+    // The only thing between you and the next shot is how fast the gun cycles.
+    // Counting rounds and then standing still for a second is a rule that only
     // ever interrupts the thing this game is about.
     fn canFire(self: &Self): bool {
         return self.cooldown <= 0.0
     }
 
-    fn fire(self: &mut Self) {
-        self.cooldown = 0.16
-        self.kickBack = 0.030
-        self.kickRise = 0.075
+    fn fire(self: &mut Self, end: Vec3, hit: bool) {
+        self.cooldown = 0.15
+        self.kickBack = 0.028
+        self.kickRise = 0.070
         self.flash = 0.045
-        self.cylinderTarget = self.cylinderTarget + 1.0472
+        self.boltT = 0.20
+        self.boltEnd = end
+        self.boltHit = hit
     }
 
     fn update(self: &mut Self, dt: f64) {
         self.cooldown = Math.maxF64(0.0, self.cooldown - dt)
         self.flash = Math.maxF64(0.0, self.flash - dt)
-        // Three different rates: the muzzle drops back fastest, the slide next.
+        self.boltT = Math.maxF64(0.0, self.boltT - dt)
+        // Two rates: the muzzle drops back fastest, the body next.
         self.kickRise = self.kickRise - self.kickRise * Math.minF64(dt * 16.0, 1.0)
         self.kickBack = self.kickBack - self.kickBack * Math.minF64(dt * 10.0, 1.0)
-        self.cylinder = self.cylinder + (self.cylinderTarget - self.cylinder) * Math.minF64(dt * 14.0, 1.0)
     }
 
     // The gun's own frame: a fixed offset from the eye, rotated into the view
-    // basis, with the recoil and the reload tilt applied in gun space.
+    // basis, with the recoil applied in gun space.
     fn modelMatrix(self: &Self, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64): Vec<f32> {
         var basis = identity()
         basis[0] = right.x as f32
@@ -267,37 +267,44 @@ impl Gun {
         basis[8] = (-fwd.x) as f32
         basis[9] = (-fwd.y) as f32
         basis[10] = (-fwd.z) as f32
-        // Aiming brings the gun to the middle of the screen and closer to the eye.
-        // Held about a metre out. The distance is not arbitrary: the gun is
-        // 32 cm long and the view model frustum is 54 degrees across, so a metre
-        // is what makes it about a third of the screen wide — near enough that
-        // it reads, far enough that perspective does not bend it.
+        // Held out to the right and low, the way a gallery gun on a tether sits
+        // in the hand. `right` here is the caller's fwd x up, which is already
+        // the screen-right direction — world +x is the *left* of the screen, and
+        // reasoning from world axes instead of from this basis puts the gun in
+        // the wrong corner.
         let ox = 0.215 - 0.215 * aim
-        // Aimed, the barrel axis sits on the view axis so the front sight lands
-        // under the crosshair; from the hip it drops to the corner of the frame.
-        let oy = -0.170 + 0.150 * aim + Math.sin(bob * 2.0) * 0.011 * (1.0 - aim)
-        let oz = -0.94 + 0.32 * aim + self.kickBack * 3.0
-        // Angled across the view rather than pointed straight down it: a gun
-        // parallel to the camera shows you its back end and nothing else, and
-        // the back end of a revolver is a dark circle.
-        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + 0.04 - 0.04 * aim), multiply(rotationY(0.44 - 0.44 * aim), rotationZ(-0.07 + 0.07 * aim))))
-        // 1.35x. A viewmodel is always a little bigger than the real thing —
-        // held at arm's length in an 85 degree frustum, a life-size revolver is
-        // a detail in the corner rather than the gun in your hand.
-        return multiply(translation(eye), multiply(basis, multiply(local, scaling(1.35))))
+        let oy = -0.205 + 0.185 * aim + Math.sin(bob * 2.0) * 0.010 * (1.0 - aim)
+        let oz = -0.62 + 0.16 * aim + self.kickBack * 3.0
+        // Barely angled across the view. It is tempting to cock a viewmodel hard
+        // so you can see its side, and that is exactly what made the bolt look
+        // wrong: the barrel pointed twenty degrees off the line the shot
+        // actually travels. Eight degrees shows the flank and still lets the
+        // bolt leave down the bore.
+        let local = multiply(translation(v3(ox, oy, oz)), multiply(rotationX(self.kickRise + 0.035 - 0.035 * aim), multiply(rotationY(0.14 - 0.14 * aim), rotationZ(-0.05 + 0.05 * aim))))
+        // 1.0x. A viewmodel is usually a little bigger than the real thing, but
+        // this one is a fat moulding to begin with: at the revolver's 1.35 it
+        // took a quarter of the frame and covered the row it was aimed at.
+        return multiply(translation(eye), multiply(basis, multiply(local, scaling(1.0))))
     }
 
-    fn cylinderMatrix(self: &Self, model: &Vec<f32>): Vec<f32> {
-        return multiply(model, multiply(translation(v3(0.0, 0.016, -0.044)), multiply(rotationZ(self.cylinder), translation(v3(0.0, -0.016, 0.044)))))
+    // Where the bore ends, in world space: the bolt has to leave the muzzle and
+    // not the middle of the screen, or every shot looks like it came from your
+    // forehead.
+    fn muzzle(self: &Self, model: &Vec<f32>): Vec3 {
+        let l = v3(0.0, 0.012, -0.325)
+        let x = (model[0] as f64) * l.x + (model[4] as f64) * l.y + (model[8] as f64) * l.z + (model[12] as f64)
+        let y = (model[1] as f64) * l.x + (model[5] as f64) * l.y + (model[9] as f64) * l.z + (model[13] as f64)
+        let z = (model[2] as f64) * l.x + (model[6] as f64) * l.y + (model[10] as f64) * l.z + (model[14] as f64)
+        return v3(x, y, z)
     }
 
     // Drawn in the scene's own projection with the depth buffer live, not in a
     // private frustum with the depth test switched off. The old way had no depth
-    // at all inside the gun: the barrel painted over the frame, then the cylinder
+    // at all inside the gun: the barrel painted over the frame, then the shroud
     // painted over the barrel, and the far wall of every tube showed through its
-    // own near wall. That is what made it look like glass. The scene's near plane
-    // is 6 cm and the gun is held at about 60, so it needs no special frustum —
-    // it is simply the nearest thing in the world.
+    // own near wall. That is what made it look like glass. The scene's near
+    // plane is 6 cm and the gun is held at about 60, so it needs no special
+    // frustum — it is simply the nearest thing in the world.
     fn draw(self: &Self, gfx: &Gfx, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64, viewProj: &Vec<f32>) {
         let model = self.modelMatrix(eye, fwd, right, up, aim, bob)
         gfx.scene.bind()
@@ -307,19 +314,75 @@ impl Gun {
         gfx.setAoAmount(0.0)
         Gpu.depthTest(true)
         Gpu.depthWrite(true)
-        gfx.sceneDraw(self.steelMesh, model, self.steelMat)
-        gfx.sceneDraw(self.cylMesh, self.cylinderMatrix(model), self.steelMat)
+        gfx.sceneDraw(self.bodyMesh, model, self.bodyMat)
+        gfx.sceneDraw(self.trimMesh, model, self.trimMat)
         gfx.sceneDraw(self.gripMesh, model, self.gripMat)
+        gfx.sceneDraw(self.glowMesh, model, self.glowMat)
         if self.flash > 0.0 {
             gfx.sceneDraw(self.flashMesh, model, self.flashMat)
         }
         gfx.setAoAmount(1.0)
     }
 
+    // The bolt is drawn with the rest of the world rather than with the gun: it
+    // is out there in the room and it has to be occluded by whatever is in front
+    // of where it ended.
+    fn drawBolt(self: &Self, gfx: &Gfx, from: Vec3) {
+        if self.boltT <= 0.0 {
+            return
+        }
+        let d = self.boltEnd - from
+        let len = d.len()
+        if len < 0.05 {
+            return
+        }
+        let k = self.boltT / 0.20
+        // A hit bolt is white-green and a miss is thin and dim: the bolt itself
+        // tells you whether you connected, before the target has come apart.
+        var m = self.boltMat
+        let strength = if self.boltHit {
+            9.0
+        } else {
+            3.0
+        }
+        m.emissive = v3(0.55 * strength * k, 1.60 * strength * k, 0.70 * strength * k)
+        let radius = (if self.boltHit {
+            0.026
+        } else {
+            0.016
+        }
+        ) * (0.35 + 0.65 * k)
+        // The unit bar runs along +Y, so the model matrix is "point +Y at the
+        // hit, stretch to reach it, fatten to `radius`".
+        let y = d.scale(1.0 / len)
+        var refv = v3(0.0, 0.0, 1.0)
+        if Math.abs(y.z) > 0.9 {
+            refv = v3(1.0, 0.0, 0.0)
+        }
+        let xa = refv.cross(y).norm()
+        let za = xa.cross(y).norm()
+        var mat = identity()
+        mat[0] = (xa.x * radius) as f32
+        mat[1] = (xa.y * radius) as f32
+        mat[2] = (xa.z * radius) as f32
+        mat[4] = (y.x * len) as f32
+        mat[5] = (y.y * len) as f32
+        mat[6] = (y.z * len) as f32
+        mat[8] = (za.x * radius) as f32
+        mat[9] = (za.y * radius) as f32
+        mat[10] = (za.z * radius) as f32
+        mat[12] = from.x as f32
+        mat[13] = from.y as f32
+        mat[14] = from.z as f32
+        gfx.sceneDraw(self.boltMesh, mat, m)
+    }
+
     fn free(self: Self, gl: &mut GlContext) {
-        self.steelMesh.free(gl)
-        self.cylMesh.free(gl)
+        self.bodyMesh.free(gl)
+        self.trimMesh.free(gl)
         self.gripMesh.free(gl)
+        self.glowMesh.free(gl)
         self.flashMesh.free(gl)
+        self.boltMesh.free(gl)
     }
 }

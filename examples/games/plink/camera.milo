@@ -23,14 +23,13 @@ from "./vec3" import {
 
 pub let EYE_HEIGHT: f64 = 1.68
 
-// How far off centre you may look, in radians. The street is only seven metres
-// across, so the rail you face is a fifteen-metre row seen from eight and a half:
-// forty-five degrees of arc to either side, and the rigs outside that arc are
-// scenery rather than targets.
-pub let YAW_LIMIT: f64 = 0.78
+// How far off centre you may look, in radians. The front row spans thirteen
+// metres and stands eleven away, which is thirty degrees to either side; forty
+// is enough to swing past the end of it without turning to face a wall.
+pub let YAW_LIMIT: f64 = 0.70
 
-// Which way "straight ahead" is: +X, square on to the right-hand boardwalk.
-pub let FACING: f64 = 1.5708
+// Which way "straight ahead" is: +Z, square on to the stage.
+pub let FACING: f64 = 0.0
 
 pub let PITCH_UP: f64 = 0.30
 
@@ -50,10 +49,10 @@ pub struct Camera {
 
 pub fn newCamera(): Camera {
     return Camera {
-        // In the street, on the far side of it, and clear of your own boardwalk:
-        // the porch posts stand at x = 3.7 and standing behind one puts a pillar
-        // through the middle of the range.
-        pos: v3(-3.0, EYE_HEIGHT, 19.2),
+        // Behind the counter, on the centre line. Every deck is symmetric about
+        // it, so the row you are shooting at is a row at one honest distance
+        // rather than a row seen at a rake.
+        pos: v3(0.0, EYE_HEIGHT, 0.0),
         yaw: FACING,
         pitch: -0.02,
         bob: 0.0,
@@ -69,7 +68,8 @@ impl Camera {
         return v3(Math.sin(self.yaw + self.kickYaw) * cp, Math.sin(self.pitch + self.kickPitch), Math.cos(self.yaw + self.kickYaw) * cp)
     }
 
-    // Flat forward, for walking: looking at the sky should not slow you down.
+    // Flat forward: where the shadow map is centred, which should not move when
+    // you look at the vault.
     fn walkForward(self: &Self): Vec3 {
         return v3(Math.sin(self.yaw), 0.0, Math.cos(self.yaw))
     }

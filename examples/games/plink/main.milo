@@ -46,7 +46,7 @@ from "./gun" import {
     Gun, newGun
 }
 from "./targets" import {
-    KIND_BOTTLE, ST_UP, Targets, newTargets
+    KIND_100, KIND_1000, KIND_250, KIND_500, KIND_5000, ST_UP, Targets, newTargets, rigCentre, valueOf
 }
 from "./camera" import {
     Camera, YAW_LIMIT, newCamera
@@ -61,10 +61,10 @@ from "./render" import {
     Gfx, Material, material, newGfx, sceneAttrs
 }
 from "./sky" import {
-    buildSky
+    buildRoom
 }
 from "./signs" import {
-    POSTER_H, POSTER_W, SIGN_H, SIGN_W, posterPixels, signPixels
+    BANNER_H, BANNER_W, FACE_SIZE, LOGO_H, LOGO_W, MARQUEE_H, MARQUEE_W, MEGA_BONUS, bannerPixels, facePixels, logoPixels, marqueePixels
 }
 from "./textures" import {
     TEX_SIZE, makeTextures
@@ -73,7 +73,7 @@ from "./vec3" import {
     Vec3, v3
 }
 from "./world" import {
-    B_DIRT, BUCKETS, World, buildWorld, groundHeight
+    BUCKETS, World, buildWorld, dronePos, roomLights
 }
 
 fn argValue(name: &string, fallback: &string): string {
@@ -116,13 +116,10 @@ pub fn main(): i32 {
     let headless = shot.len > 0
     var winW: i64 = 1440
     var winH: i64 = 900
-    // The sun has to come in over your shoulder and under the porch roof, or the
-    // rail you are shooting at sits in its own shade all round. Azimuth is
-    // clockwise from -Z, so a negative one puts it behind the left of the street:
-    // it rakes the storefronts you face and lights every target on them. Lower
-    // than about thirty degrees and the porch roof takes the rail back.
-    let sunEl = argValue("--sun", "33").parseF64() ?? 33.0
-    let sunAz = argValue("--az", "-58").parseF64() ?? -58.0
+    // How bright the room itself is, before any of the neon. Turning this up
+    // does not make the tubes glow more — it makes everything else compete with
+    // them, which is the one thing that can kill this look.
+    let houseLight = argValue("--house", "1").parseF64() ?? 1.0
     let scalePct = argValue("--scale", "100").parseF64() ?? 100.0
     // --skip N drops one geometry bucket from the scene pass, which is how you
     // find out which bucket a surface belongs to.
@@ -193,7 +190,7 @@ pub fn main(): i32 {
     }
 
     var gl = GlContext.new()
-    let sky = buildSky(sunEl, sunAz, 21.0)
+    let sky = buildRoom(houseLight)
     var gfx = match newGfx(gl, rw, rh, sky, buildAtlas(), ATLAS) {
         Result.Ok(g) => g
         Result.Err(e) => {
@@ -221,13 +218,8 @@ pub fn main(): i32 {
         let _ = gfx.addTexture(s)
     }
     gfx.debug = argValue("--debug", "0").parseF64() ?? 0.0
-    gfx.cloudCover = argValue("--clouds", "0.42").parseF64() ?? 0.42
     // One-off textures: they are pictures, not surfaces, so they are clamped
     // rather than repeated and they share a single flat surface map.
-    let poster = Texture2D.rgba8(gl, POSTER_W, POSTER_H, posterPixels(), true)
-    poster.generateMipmaps()
-    poster.setAnisotropy(16.0)
-    let posterIdx = gfx.addTexture(poster)
     var flatPixels: Vec<u32> = Vec.filled(4, 0)
     for i in 0..4 {
         // A normal straight out of the surface, and a roughness of 0.5 — which
@@ -236,32 +228,40 @@ pub fn main(): i32 {
     }
     let flat = Texture2D.rgba8(gl, 2, 2, flatPixels, false)
     let flatIdx = gfx.addTexture(flat)
-    let signA = Texture2D.rgba8(gl, SIGN_W, SIGN_H, signPixels("SALOON"), true)
-    signA.generateMipmaps()
-    let signAIdx = gfx.addTexture(signA)
-    let signB = Texture2D.rgba8(gl, SIGN_W, SIGN_H, signPixels("DRY GOODS"), true)
-    signB.generateMipmaps()
-    let signBIdx = gfx.addTexture(signB)
+    let marquee = Texture2D.rgba8(gl, MARQUEE_W, MARQUEE_H, marqueePixels(), true)
+    marquee.generateMipmaps()
+    marquee.setAnisotropy(16.0)
+    let marqueeIdx = gfx.addTexture(marquee)
+    let banner = Texture2D.rgba8(gl, BANNER_W, BANNER_H, bannerPixels(), true)
+    banner.generateMipmaps()
+    let bannerIdx = gfx.addTexture(banner)
+    // The face atlas holds all four target faces in one 2x2 grid. It must not
+    // repeat: a disc whose uv strays a texel past its cell would print the
+    // neighbouring face round its rim.
+    let faces = Texture2D.rgba8(gl, FACE_SIZE, FACE_SIZE, facePixels(), true)
+    faces.generateMipmaps()
+    faces.setAnisotropy(16.0)
+    let faceIdx = gfx.addTexture(faces)
+    let logo = Texture2D.rgba8(gl, LOGO_W, LOGO_H, logoPixels(), true)
+    logo.generateMipmaps()
+    logo.setAnisotropy(16.0)
+    let logoIdx = gfx.addTexture(logo)
 
-    var world = buildWorld(gl, posterIdx, flatIdx, signAIdx, signBIdx)
-    var targets = newTargets(gl)
+    var world = buildWorld(gl, marqueeIdx, flatIdx, bannerIdx, logoIdx)
+    var targets = newTargets(gl, faceIdx, flatIdx)
+    let staticLights = roomLights()
     var gun = newGun(gl)
     var cam = newCamera()
     // Capture-only camera overrides, so a lighting or texture change can be
     // judged from the same frame every time instead of from wherever the mouse
     // happened to be.
-    cam.pitch = argValue("--pitch", "-0.02").parseF64() ?? -0.02
-    cam.yaw = argValue("--yaw", "1.5708").parseF64() ?? 1.5708
-    // The rigs run from z=11.6 to z=31 along the two rails. Standing at the mouth
-    // of the street put that rail edge-on: a row of targets running away from you
-    // at a glancing angle, the near one three metres off and the far one thirty.
-    // You stand across the street from the right-hand boardwalk instead, square on
-    // to it, so the whole rail is a row at one honest distance.
-    cam.pos.z = argValue("--z", "19.2").parseF64() ?? 19.2
-    cam.pos.x = argValue("--x", "-3.0").parseF64() ?? -3.0
-    // Only the rail you are square on to is in play. Everything else — the far
-    // fence, the wagon, the whole opposite boardwalk — stays down as scenery.
-    targets.setStance(cam.eye(), cam.yaw, YAW_LIMIT, 26.0)
+    cam.pitch = argValue("--pitch", "0.035").parseF64() ?? 0.035
+    cam.yaw = argValue("--yaw", "0.0").parseF64() ?? 0.0
+    cam.pos.z = argValue("--z", "0.0").parseF64() ?? 0.0
+    cam.pos.x = argValue("--x", "0.0").parseF64() ?? 0.0
+    // Four rows on four decks, all of them square on to you. Everything bolted
+    // to a wall is scenery and setStance is what marks it so.
+    targets.setStance(cam.eye(), cam.yaw, YAW_LIMIT, 30.0)
 
     var hud = newHud()
 
@@ -280,6 +280,16 @@ pub fn main(): i32 {
     var hits: i64 = 0
     var shotsFired: i64 = 0
     var lastScore: i64 = 0
+    // What the last hit was worth, for the number that flashes up on a hit.
+    var lastValue: i64 = 0
+    // Score popups, eight floats each: world x/y/z, value, colour, age. A flat
+    // list rather than a struct because it is written in one place, read in one
+    // place, and never outlives the frame loop.
+    var pops: Vec<f64> = Vec.new()
+    // Seconds until the drone drops the next gold target, and how long the
+    // marquee stays lit once it has.
+    var bonusIn = 9.0
+    var bonusLive = 0.0
     var hitFlash = 0.0
     var missFlash = 0.0
     var prevButtons: u32 = 0
@@ -355,8 +365,12 @@ pub fn main(): i32 {
                 let lmbEdge = lmb && (prevButtons & SDL_BUTTON_LMASK) == 0
                 prevButtons = buttons
 
+                // The trigger starts the round. A gallery gun has one control
+                // and asking for a keyboard key to begin is a rule that exists
+                // only because the code was easier to write that way; SPACE
+                // still works for anyone who has learned it.
                 let spaceDown = keys[SC_SPACE] != 0
-                if spaceDown && !prevSpace {
+                if (spaceDown && !prevSpace) || (lmbEdge && !running) {
                     if !running {
                         running = true
                         timeLeft = 60.0
@@ -364,6 +378,7 @@ pub fn main(): i32 {
                         combo = 0
                         hits = 0
                         shotsFired = 0
+                        bonusIn = 9.0
                     }
                 }
                 prevSpace = spaceDown
@@ -395,8 +410,23 @@ pub fn main(): i32 {
         } else {
             0.0
         }
+        // The drone drops the mega bonus onto whatever it happens to be over.
+        // That is the whole answer to "how do I get it": you watch the drone,
+        // and when it lets one go you shoot the gold one before it drops.
+        bonusLive = Math.maxF64(0.0, bonusLive - dt)
+        if running {
+            bonusIn = bonusIn - dt
+            if bonusIn <= 0.0 {
+                bonusIn = 13.0
+                let dp = dronePos(gfx.time)
+                if targets.dropBonus(dp.x, dp.z, 3.8) >= 0 {
+                    bonusLive = 3.8
+                }
+            }
+        }
         targets.update(dt, pressure, running)
         gun.update(dt)
+        stepPops(pops, dt)
         hitFlash = Math.maxF64(0.0, hitFlash - dt * 3.2)
         missFlash = Math.maxF64(0.0, missFlash - dt * 2.4)
 
@@ -406,14 +436,17 @@ pub fn main(): i32 {
             var k = 0
             while k < targets.rigs.len {
                 if targets.rigs[k].state == ST_UP {
+                    let c = rigCentre(targets.rigs[k])
+                    let value = valueOf(targets.rigs[k].kind) * Math.minI64(1 + combo / 3, 6)
+                    pushPop(pops, c, value, targets.rigs[k].kind)
                     targets.shatter(k, cam.eye())
+                    hitFlash = 1.0
                     break
                 }
                 k = k + 1
             }
         }
         if fireNow && gun.canFire() {
-            gun.fire()
             if running {
                 shotsFired = shotsFired + 1
             }
@@ -424,6 +457,14 @@ pub fn main(): i32 {
             }
             ))
             let hit = targets.trace(cam.eye(), cam.forward())
+            // The bolt has to end somewhere even on a miss, or there is nothing
+            // to draw: fifty metres down the aim line is past the back wall.
+            let end = if hit.ok {
+                hit.point
+            } else {
+                cam.eye() + cam.forward().scale(50.0)
+            }
+            gun.fire(end, hit.ok)
             if hit.ok {
                 targets.shatter(hit.index, cam.eye())
                 hitFlash = 1.0
@@ -434,12 +475,9 @@ pub fn main(): i32 {
                     // whole reward: a chain of quick hits is worth several times
                     // the same hits taken one at a time.
                     let mult = Math.minI64(1 + combo / 3, 6)
-                    let bonus = if hit.kind == KIND_BOTTLE {
-                        120
-                    } else {
-                        100
-                    }
-                    score = score + bonus * mult
+                    score = score + valueOf(hit.kind) * mult
+                    lastValue = valueOf(hit.kind) * mult
+                    pushPop(pops, hit.point, lastValue, hit.kind)
                 }
             } else {
                 missFlash = 1.0
@@ -462,6 +500,27 @@ pub fn main(): i32 {
             dh = winH as i32
         }
 
+        // The room's neon, plus the muzzle as a sixteenth light while it is lit.
+        // Rebuilt rather than patched: a hundred floats a frame is nothing, and
+        // a stale light left switched on is the kind of bug that only shows up
+        // as "the floor is green now".
+        gfx.lights.clear()
+        for v in staticLights {
+            gfx.lights.push(v)
+        }
+        if bonusLive > 0.0 {
+            let dp = dronePos(gfx.time)
+            let k = Math.minF64(bonusLive / 0.6, 1.0)
+            gfx.addLight(v3(dp.x, dp.y - 0.4, dp.z), 9.0 * k, 6.4 * k, 1.6 * k, 11.0)
+        }
+        if gun.flash > 0.0 {
+            let fwdM = cam.forward()
+            let rightM = fwdM.cross(v3(0.0, 1.0, 0.0)).norm()
+            let upM = rightM.cross(fwdM).norm()
+            let mm = gun.modelMatrix(cam.eye(), fwdM, rightM, upM, aiming, cam.bob)
+            gfx.addLight(gun.muzzle(mm), 6.0, 14.0, 7.0, 9.0)
+        }
+
         let aspect = (rw as f64) / (rh as f64)
         // Depth and normals first: the scene pass samples the AO they produce.
         gfx.prepassBegin(cam.viewM(), cam.projM(aspect))
@@ -472,10 +531,13 @@ pub fn main(): i32 {
             gfx.prepassDraw(world.meshes[i], model)
         }
         targets.drawRigsDepth(gfx)
+        gfx.prepassDraw(world.droneMesh, world.droneMatrix(gfx.time))
         gfx.aoResolve(cam.tanHalfX(), cam.tanHalfX() / aspect)
 
-        let focus = cam.pos + cam.walkForward().scale(15.0)
-        gfx.shadowBegin(v3(focus.x, 1.5, focus.z), 24.0, 90.0)
+        // Centred on the stage rather than on the aim point: the stage is where
+        // every shadow in this room lands, and a shadow map that slides about
+        // with the mouse shimmers on geometry that never moved.
+        gfx.shadowBegin(v3(0.0, 2.4, 17.0), 16.0, 60.0)
         for i in 0..BUCKETS {
             gfx.shadowDraw(world.meshes[i], model)
         }
@@ -491,16 +553,22 @@ pub fn main(): i32 {
             gfx.sceneDraw(world.meshes[i], model, world.mats[i])
         }
         targets.drawRigs(gfx, false)
+        gfx.sceneDraw(world.droneMesh, world.droneMatrix(gfx.time), world.droneMat)
+        for i in 0..6 {
+            gfx.sceneDraw(world.rotorMesh, world.rotorMatrix(gfx.time, i), world.rotorMat)
+        }
         targets.drawShards(gfx)
         let fwd = cam.forward()
         let rightV = fwd.cross(v3(0.0, 1.0, 0.0)).norm()
         let upV = rightV.cross(fwd).norm()
+        gun.drawBolt(gfx, gun.muzzle(gun.modelMatrix(cam.eye(), fwd, rightV, upV, aiming, cam.bob)))
         gun.draw(gfx, cam.eye(), fwd, rightV, upV, aiming, cam.bob, vp)
 
         gfx.present(dw as i64, dh as i64)
 
         hud.clear()
-        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, hitFlash, missFlash, aiming, gfx.time)
+        drawHud(hud, dw as f64, dh as f64, running, timeLeft, score, best, combo, hits, shotsFired, lastScore, bonusLive, hitFlash, missFlash, aiming, gfx.time)
+        drawPops(hud, pops, vp, dw as f64, dh as f64)
         gfx.drawHud(hud.verts, dw as i64, dh as i64)
 
         if headless && warmup > 0 {
@@ -542,11 +610,101 @@ pub fn main(): i32 {
     return 0
 }
 
-fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, hitFlash: f64, missFlash: f64, aiming: f64, time: f64) {
+// A filled disc, as a stack of horizontal bars. The HUD shader draws one thing
+// — a textured quad — so every round corner in here is a scanline fill. Twenty
+// eight rows is enough that a 40 px badge has no visible steps.
+fn disc(hud: &mut Hud, cx: f64, cy: f64, r: f64, red: f64, g: f64, b: f64, a: f64) {
+    let rows = 28
+    for i in 0..rows {
+        let t0 = -1.0 + 2.0 * (i as f64) / (rows as f64)
+        let t1 = -1.0 + 2.0 * ((i + 1) as f64) / (rows as f64)
+        let m = Math.maxF64(Math.abs(t0), Math.abs(t1))
+        let w = r * Math.sqrt(Math.maxF64(0.0, 1.0 - m * m))
+        if w <= 0.0 {
+            continue
+        }
+        hud.rect(cx - w, cy + t0 * r, 2.0 * w, (t1 - t0) * r + 0.6, red, g, b, a)
+    }
+}
+
+// A plaque: a dark face with a lit top edge and a dark shadow under it. Every
+// number on this bar sits on one, because white text over a lit floor is only
+// readable by accident.
+fn plate(hud: &mut Hud, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64) {
+    hud.rect(x, y, w, h, r * 0.16, g * 0.16, b * 0.20, 0.92)
+    hud.rect(x, y, w, 2.0, r, g, b, 0.85)
+    hud.rect(x, y + h - 2.0, w, 2.0, r * 0.35, g * 0.35, b * 0.45, 0.85)
+}
+
+// The cabinet bar along the bottom, and the two flashes over the crosshair.
+//
+// The layout is the one every gallery cabinet has: the count you are chasing on
+// the left behind a badge, the clock in the middle, and what the machine is
+// offering on the right. It is drawn last and it owns the bottom eighth of the
+// screen, which is also why the room's counter rail sits where it does.
+fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score: i64, best: i64, combo: i64, hits: i64, shots: i64, lastScore: i64, bonusLive: f64, hitFlash: f64, missFlash: f64, aiming: f64, time: f64) {
     let s = Math.maxF64(dh / 900.0, 0.6)
     let cx = dw * 0.5
     let cy = dh * 0.5
+    let mult = Math.minI64(1 + combo / 3, 6)
 
+    // ── the bar ───────────────────────────────────────────────────────────────
+    let barH = 104.0 * s
+    let barY = dh - barH
+    hud.rect(0.0, barY, dw, barH, 0.035, 0.040, 0.075, 0.96)
+    hud.rect(0.0, barY, dw, 3.0 * s, 0.55, 0.85, 1.0, 0.9)
+    hud.rect(0.0, barY + 3.0 * s, dw, 2.0 * s, 0.90, 0.20, 0.75, 0.75)
+
+    // Left: the multiplier badge and the score.
+    let bx = 62.0 * s
+    let by = barY + barH * 0.5
+    disc(hud, bx, by, 34.0 * s, 0.10, 0.55, 0.72, 0.95)
+    disc(hud, bx, by, 28.0 * s, 0.04, 0.16, 0.24, 0.95)
+    hud.textCentred($"X{mult}", bx, by - 16.0 * s, 3.6 * s, 0.55, 1.0, 1.0, 1.0)
+
+    plate(hud, 108.0 * s, barY + 20.0 * s, 250.0 * s, 64.0 * s, 0.25, 0.60, 0.95)
+    let _ = hud.text("SCORE", 120.0 * s, barY + 26.0 * s, 1.5 * s, 0.55, 0.80, 1.0, 0.85)
+    let _ = hud.text($"{score}", 120.0 * s, barY + 44.0 * s, 3.4 * s, 1.0, 0.95, 0.70, 1.0)
+
+    // Middle: the clock, which is the only number that is ever urgent.
+    let clockW = 190.0 * s
+    plate(hud, cx - clockW * 0.5, barY + 20.0 * s, clockW, 64.0 * s, 0.95, 0.35, 0.20)
+    let secs = timeLeft as i64
+    let tenths = ((timeLeft - (secs as f64)) * 10.0) as i64
+    // Under ten seconds it goes red and pulses, because at that point the clock
+    // is the thing you are playing against.
+    var cr = 1.0
+    var cg = 0.95
+    var cb = 0.72
+    if running && timeLeft < 10.0 {
+        let p = 0.55 + 0.45 * Math.sin(time * 12.0)
+        cg = 0.35 * p
+        cb = 0.20 * p
+    }
+    hud.textCentred($"{secs}.{tenths}", cx, barY + 40.0 * s, 4.4 * s, cr, cg, cb, 1.0)
+
+    // Right: the best of the session, and whether the drone has a gold one out.
+    let rx = dw - 62.0 * s
+    disc(hud, rx, by, 34.0 * s, 0.62, 0.12, 0.52, 0.95)
+    disc(hud, rx, by, 28.0 * s, 0.18, 0.03, 0.14, 0.95)
+    hud.textCentred($"{hits}", rx, by - 16.0 * s, 3.4 * s, 1.0, 0.75, 1.0, 1.0)
+
+    let pw = 250.0 * s
+    let px = dw - 108.0 * s - pw
+    if bonusLive > 0.0 {
+        // The gold target is out. This is the only thing on the bar that ever
+        // changes colour on its own, so it cannot be confused with anything else.
+        let p = 0.55 + 0.45 * Math.sin(time * 9.0)
+        plate(hud, px, barY + 20.0 * s, pw, 64.0 * s, 1.0, 0.78, 0.20)
+        let _ = hud.text("MEGA BONUS", px + 12.0 * s, barY + 26.0 * s, 1.5 * s, 1.0, 0.85, 0.35, 0.9)
+        let _ = hud.text($"{MEGA_BONUS}", px + 12.0 * s, barY + 44.0 * s, 3.4 * s, 1.0, 0.82 * p, 0.25 * p, 1.0)
+    } else {
+        plate(hud, px, barY + 20.0 * s, pw, 64.0 * s, 0.55, 0.30, 0.85)
+        let _ = hud.text("BEST", px + 12.0 * s, barY + 26.0 * s, 1.5 * s, 0.80, 0.70, 1.0, 0.85)
+        let _ = hud.text($"{best}", px + 12.0 * s, barY + 44.0 * s, 3.4 * s, 0.92, 0.88, 1.0, 1.0)
+    }
+
+    // ── over the crosshair ────────────────────────────────────────────────────
     if hitFlash > 0.0 {
         let d = 16.0 * s * (1.0 + (1.0 - hitFlash) * 1.6)
         let a = hitFlash * 0.95
@@ -554,81 +712,199 @@ fn drawHud(hud: &mut Hud, dw: f64, dh: f64, running: bool, timeLeft: f64, score:
         hud.rect(cx + d - 4.0 * s, cy - d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
         hud.rect(cx - d - 3.0 * s, cy + d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
         hud.rect(cx + d - 4.0 * s, cy + d, 7.0 * s, 2.0 * s, 1.0, 0.95, 0.7, a)
+        // What the hit was worth is drawn by drawPops, at the target rather than
+        // at the crosshair: the number belongs to the thing that just broke.
+
     }
     if missFlash > 0.0 {
         hud.rect(cx - 30.0 * s, cy + 26.0 * s, 60.0 * s, 1.5 * s, 0.9, 0.25, 0.15, missFlash * 0.5)
     }
+    if running && combo > 1 {
+        hud.textCentred($"{combo} IN A ROW", cx, 34.0 * s, 2.0 * s, 1.0, 0.78, 0.35, 0.85)
+    }
 
-    if running {
-        let _ = hud.text($"SCORE {score}", 26.0 * s, 24.0 * s, 2.6 * s, 1.0, 0.97, 0.88, 0.95)
-        let secs = timeLeft as i64
-        let tenths = ((timeLeft - (secs as f64)) * 10.0) as i64
-        let clock = $"{secs}.{tenths}"
-        hud.textCentred(clock, cx, 24.0 * s, 3.4 * s, 1.0, 0.95, 0.80, 0.95)
-        if combo > 1 {
-            let mult = Math.minI64(1 + combo / 3, 6)
-            hud.textCentred($"{combo} IN A ROW    X{mult}", cx, 70.0 * s, 2.2 * s, 1.0, 0.78, 0.35, 0.92)
-        }
-    } else {
-        // Sand under a midday sun is nearly white, and pale text on it is
-        // unreadable — the panel is what makes the only screen that states the
-        // rules actually legible.
-        let panelW = Math.minF64(dw * 0.9, 660.0 * s)
-        var contentH = 404.0
+    if !running {
+        let panelW = Math.minF64(dw * 0.9, 700.0 * s)
+        var contentH = 372.0
         if lastScore > 0 {
             contentH = contentH + 74.0
         }
-        if best > 0 {
-            contentH = contentH + 32.0
-        }
         let panelH = contentH * s
-        // Sat a little above centre: the rail of targets crosses the middle of
-        // the screen now, and the point of keeping the rigs up on this screen is
-        // that you can see them.
-        let top = dh * 0.42 - panelH * 0.5
-        hud.rect(cx - panelW * 0.5, top, panelW, panelH, 0.04, 0.03, 0.02, 0.62)
+        let top = dh * 0.40 - panelH * 0.5
+        hud.rect(cx - panelW * 0.5, top, panelW, panelH, 0.02, 0.03, 0.07, 0.80)
+        hud.rect(cx - panelW * 0.5, top, panelW, 2.5 * s, 0.40, 0.90, 1.0, 0.9)
+        hud.rect(cx - panelW * 0.5, top + panelH - 2.5 * s, panelW, 2.5 * s, 0.90, 0.25, 0.80, 0.9)
 
-        var y = top + 28.0 * s
-        hud.textCentred("PLINK", cx, y, 8.0 * s, 1.0, 0.93, 0.78, 0.95)
+        var y = top + 26.0 * s
+        hud.textCentred("PLINK", cx, y, 8.0 * s, 0.55, 1.0, 1.0, 0.98)
         y = y + 96.0 * s
         if lastScore > 0 {
-            hud.textCentred($"SCORE {lastScore}", cx, y, 3.4 * s, 1.0, 0.97, 0.88, 0.95)
+            hud.textCentred($"SCORE {lastScore}", cx, y, 3.4 * s, 1.0, 0.95, 0.70, 0.95)
             let pct = if shots > 0 {
                 (hits * 100) / shots
             } else {
                 0
             }
-            hud.textCentred($"{hits} HITS   {pct}% ACCURATE", cx, y + 38.0 * s, 2.0 * s, 0.92, 0.88, 0.80, 0.85)
+            hud.textCentred($"{hits} HITS   {pct}% ACCURATE", cx, y + 38.0 * s, 2.0 * s, 0.85, 0.90, 1.0, 0.85)
             y = y + 74.0 * s
         }
-        hud.textCentred("SHOOT THE BOTTLES AND PLATES BEFORE THEY DROP", cx, y, 2.0 * s, 0.98, 0.94, 0.86, 0.9)
-        y = y + 34.0 * s
-        hud.textCentred("60 SECONDS.  HITS IN A ROW MULTIPLY THE SCORE UP TO X6", cx, y, 1.7 * s, 0.90, 0.86, 0.78, 0.8)
-        y = y + 50.0 * s
-        // Two controls. You do not walk and you do not reload, so there is
-        // nothing else to put here.
-        hud.textCentred("MOVE THE MOUSE TO AIM", cx, y, 2.2 * s, 0.95, 0.93, 0.88, 0.9)
+        hud.textCentred("SHOOT THE LIT TARGETS BEFORE THEY DROP", cx, y, 2.0 * s, 0.95, 0.97, 1.0, 0.92)
         y = y + 32.0 * s
-        hud.textCentred("CLICK TO SHOOT", cx, y, 2.2 * s, 0.95, 0.93, 0.88, 0.9)
-        y = y + 44.0 * s
-        hud.textCentred("THE RIGS ARE ALREADY UP.  NOTHING IS COUNTED YET", cx, y, 1.6 * s, 0.75, 0.85, 0.70, 0.75)
-        y = y + 26.0 * s
-        hud.textCentred("RIGHT CLICK STEADIES      F FULLSCREEN      ESC QUITS", cx, y, 1.4 * s, 0.72, 0.70, 0.66, 0.6)
-        if best > 0 {
-            y = y + 32.0 * s
-            hud.textCentred($"BEST {best}", cx, y, 2.0 * s, 1.0, 0.80, 0.40, 0.85)
-        }
-        // A pulse, because a still line of text on a screen with bottles
+        hud.textCentred("100 RED   250 BLUE   500 MAGENTA   1000 ORANGE   5000 HOT PINK", cx, y, 1.5 * s, 0.80, 0.86, 1.0, 0.82)
+        y = y + 30.0 * s
+        // The one rule nobody works out on their own.
+        hud.textCentred($"THE DRONE DROPS A GOLD TARGET WORTH {MEGA_BONUS}", cx, y, 1.7 * s, 1.0, 0.82, 0.30, 0.92)
+        y = y + 30.0 * s
+        hud.textCentred("60 SECONDS.  HITS IN A ROW MULTIPLY THE SCORE UP TO X6", cx, y, 1.5 * s, 0.78, 0.82, 0.95, 0.78)
+        y = y + 46.0 * s
+        hud.textCentred("MOVE THE MOUSE TO AIM", cx, y, 2.2 * s, 0.95, 0.97, 1.0, 0.9)
+        y = y + 32.0 * s
+        hud.textCentred("RIGHT CLICK STEADIES      F FULLSCREEN      ESC QUITS", cx, y, 1.4 * s, 0.70, 0.74, 0.86, 0.6)
+        // A pulse, because a still line of text on a screen with targets
         // snapping up behind it is the thing an eye skips.
         let pulse = 0.62 + 0.38 * Math.sin(time * 3.4)
-        hud.textCentred("PRESS SPACE TO START", cx, top + panelH - 42.0 * s, 2.8 * s, 1.0, 0.97, 0.88, pulse)
+        hud.textCentred("PULL THE TRIGGER TO START", cx, top + panelH - 44.0 * s, 2.8 * s, 1.0, 0.95, 0.72, pulse)
     }
 
     // The crosshair opens up while the gun is recovering, so how ready you are
     // is something you can see rather than something you have to count. Drawn
     // after the attract panel, which sits over the middle of the screen.
     crosshair(hud, cx, cy, s, 1.0 - aiming * 0.6)
+}
 
+pub let POP_LIFE: f64 = 0.85
+
+// A number drawn to survive this background. `textCentred` hangs one black copy
+// down and to the right, which at popup sizes reads as a second number in a
+// second colour rather than as a shadow — so the popup draws its own:
+//
+//   - a dark ring in eight directions, which is an outline and not a shadow
+//   - a soft halo in the number's own colour, standing in for the glow the
+//     scene pass would give it if it were geometry
+//   - the fill, stamped four times a fraction apart to fatten the strokes
+//
+// Three passes over a five-character string is fifteen quads. The HUD is one
+// buffer and one draw call; this costs nothing worth measuring.
+fn boldText(hud: &mut Hud, msg: &string, cx: f64, y: f64, size: f64, r: f64, g: f64, b: f64, a: f64) {
+    let w = hud.textWidth(msg, size)
+    let x = cx - w * 0.5
+    let o = size * 0.9
+    let dirs: Vec<f64> = [1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.7, 0.7, -0.7, 0.7, 0.7, -0.7, -0.7, -0.7,]
+    var i = 0
+    while i < 8 {
+        let _ = hud.text(msg, x + dirs[i * 2] * o, y + dirs[i * 2 + 1] * o, size, 0.0, 0.0, 0.0, a * 0.85)
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        let _ = hud.text(msg, x + dirs[i * 2] * o * 2.4, y + dirs[i * 2 + 1] * o * 2.4, size, r, g, b, a * 0.20)
+        i = i + 1
+    }
+    let _ = hud.text(msg, x - o * 0.35, y, size, r, g, b, a)
+    let _ = hud.text(msg, x + o * 0.35, y, size, r, g, b, a)
+    let _ = hud.text(msg, x, y - o * 0.35, size, r, g, b, a)
+    let _ = hud.text(msg, x, y + o * 0.35, size, r, g, b, a)
+}
+
+// The colour a value flashes up in: the same code the face is printed in, so
+// the number that leaves the target is recognisably the number that was on it.
+fn popColour(kind: i64): Vec3 {
+    if kind == KIND_100 {
+        return v3(1.0, 0.42, 0.34)
+    }
+    if kind == KIND_250 {
+        return v3(0.45, 0.72, 1.0)
+    }
+    if kind == KIND_500 {
+        return v3(1.0, 0.40, 0.95)
+    }
+    if kind == KIND_1000 {
+        return v3(1.0, 0.72, 0.22)
+    }
+    if kind == KIND_5000 {
+        return v3(1.0, 0.35, 0.90)
+    }
+    return v3(1.0, 0.88, 0.35)
+}
+
+fn pushPop(pops: &mut Vec<f64>, at: Vec3, value: i64, kind: i64) {
+    let c = popColour(kind)
+    pops.push(at.x)
+    pops.push(at.y)
+    pops.push(at.z)
+    pops.push(value as f64)
+    pops.push(c.x)
+    pops.push(c.y)
+    pops.push(c.z)
+    pops.push(0.0)
+}
+
+fn stepPops(pops: &mut Vec<f64>, dt: f64) {
+    var i = 0
+    while i * 8 < pops.len {
+        pops[i * 8 + 7] = pops[i * 8 + 7] + dt
+        if pops[i * 8 + 7] > POP_LIFE {
+            // Swap-remove the whole record. Order does not matter and this keeps
+            // the step linear however many are in the air.
+            let last = pops.len / 8 - 1
+            if i != last {
+                for k in 0..8 {
+                    pops[i * 8 + k] = pops[last * 8 + k]
+                }
+            }
+            for _k in 0..8 {
+                let _ = pops.pop()
+            }
+            continue
+        }
+        i = i + 1
+    }
+}
+
+// What a hit is worth, printed where the target was and rising off it.
+//
+// Scoring you cannot see is scoring you cannot play towards — this is the whole
+// feedback loop for the ladder, so it is deliberately loud: it pops in at one
+// and a half size, snaps down to one, climbs about a target's width, and goes
+// out over the last third of its life.
+fn drawPops(hud: &mut Hud, pops: &Vec<f64>, vp: &Vec<f32>, dw: f64, dh: f64) {
+    let s = Math.maxF64(dh / 900.0, 0.6)
+    var i = 0
+    while i * 8 < pops.len {
+        let o = i * 8
+        let x = pops[o]
+        let y = pops[o + 1]
+        let z = pops[o + 2]
+        // Clip space, by hand: the HUD has no matrices of its own and this is
+        // one row-by-row multiply per popup.
+        let cxp = (vp[0] as f64) * x + (vp[4] as f64) * y + (vp[8] as f64) * z + (vp[12] as f64)
+        let cyp = (vp[1] as f64) * x + (vp[5] as f64) * y + (vp[9] as f64) * z + (vp[13] as f64)
+        let cwp = (vp[3] as f64) * x + (vp[7] as f64) * y + (vp[11] as f64) * z + (vp[15] as f64)
+        i = i + 1
+        // Behind the eye: there is no sensible place to draw it, and dividing by
+        // a negative w puts it on the opposite side of the screen.
+        if cwp <= 0.001 {
+            continue
+        }
+        let t = pops[o + 7] / POP_LIFE
+        let sx = (cxp / cwp * 0.5 + 0.5) * dw
+        let sy = (1.0 - (cyp / cwp * 0.5 + 0.5)) * dh - t * 78.0 * s
+        // Overshoot on the way in, then settle: a number that simply appears at
+        // its final size does not read as a hit, it reads as a label.
+        let pop = if t < 0.14 {
+            1.55 - 0.55 * (t / 0.14)
+        } else {
+            1.0
+        }
+        let a = if t > 0.62 {
+            1.0 - (t - 0.62) / 0.38
+        } else {
+            1.0
+        }
+        let size = 3.4 * s * pop
+        let v = pops[o + 3] as i64
+        boldText(hud, $"{v}", sx, sy, size, pops[o + 4], pops[o + 5], pops[o + 6], a)
+    }
 }
 
 fn crosshair(hud: &mut Hud, cx: f64, cy: f64, s: f64, spread: f64) {

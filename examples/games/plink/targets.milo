@@ -1,14 +1,15 @@
-// The targets and what happens to them.
+// The targets: what they look like, where they stand, when they come up, and
+// what happens when one is hit.
 //
-// A rig is a bottle or a tin plate bolted to a steel flap that turns on a pin.
-// At rest it lies flat, hidden behind whatever it is standing on; when it is
-// called it snaps up in about a fifth of a second, holds a beat, and drops back.
-// Hit it anywhere and it shatters — this is a reflex game, not an accuracy one,
-// so there is no scoring ring and the whole face counts.
+// A rig is a chrome post on a deck with a printed disc hinged at the top of it.
+// The disc lies flat until the rig is called, then a spring snaps it up to face
+// the firing line; it holds a couple of seconds and drops. Hit it anywhere and
+// it comes apart — there is no bullseye, only how fast you are.
 //
-// The hinge is a spring, not an animation curve. A commanded angle, a stiffness
-// and a damping give the overshoot and the settle for free, and the same two
-// numbers make a rig that is knocked over behave like the one that stood up.
+// The four kinds differ in exactly two things: which cell of the face atlas they
+// print, and what they are worth. Everything else — the post, the hinge, the
+// spring, the break — is shared, which is why adding a fifth is a row in a table
+// rather than a new mesh.
 
 from "std/math" import {
     Math
@@ -23,23 +24,109 @@ from "./mesh" import {
     Builder, builder
 }
 from "./render" import {
-    Gfx, Material, material, sceneAttrs
+    Gfx, Material, material, materialTex, sceneAttrs
 }
 from "./rng" import {
     Rand, rand
 }
 from "./textures" import {
-    TEX_GLASS, TEX_PAINT, TEX_RUST, TEX_STEEL
+    TEX_PAINT, TEX_STEEL
 }
 from "./vec3" import {
     Vec3, v3
 }
+from "./signs" import {
+    FACE_COLS, MEGA_BONUS
+}
 from "./world" import {
-    RAIL_TOP
+    DECK_Y
 }
 
-// How far above the pin the middle of the target sits.
-let ARM: f64 = 0.30
+// How far above the hinge pin the middle of the disc sits, per kind.
+fn armOf(kind: i64): f64 {
+    return radiusOf(kind) + 0.06
+}
+
+// The printed radius of each face. It shrinks as the value climbs, and the rows
+// are ordered the same way: what you are paid for is reach.
+fn radiusOf(kind: i64): f64 {
+    if kind == KIND_100 {
+        return 0.52
+    }
+    if kind == KIND_250 {
+        return 0.44
+    }
+    if kind == KIND_500 {
+        return 0.40
+    }
+    if kind == KIND_1000 {
+        return 0.36
+    }
+    if kind == KIND_5000 {
+        return 0.34
+    }
+    return 0.50
+}
+
+pub fn valueOf(kind: i64): i64 {
+    if kind == KIND_100 {
+        return 100
+    }
+    if kind == KIND_250 {
+        return 250
+    }
+    if kind == KIND_500 {
+        return 500
+    }
+    if kind == KIND_1000 {
+        return 1000
+    }
+    if kind == KIND_5000 {
+        return 5000
+    }
+    return MEGA_BONUS
+}
+
+// How hard the face glows on its own. The two at the back of the ladder are lit
+// from inside; the cheap ones are printed plastic that the room lights.
+fn glowOf(kind: i64): f64 {
+    if kind == KIND_1000 {
+        return 1.45
+    }
+    if kind == KIND_5000 {
+        return 1.90
+    }
+    if kind == KIND_BONUS {
+        return 1.30
+    }
+    return 0.42
+}
+
+// The colour a break throws, which is the colour the face is ringed in.
+fn sparkOf(kind: i64): Vec3 {
+    if kind == KIND_100 {
+        return v3(1.60, 0.30, 0.20)
+    }
+    if kind == KIND_250 {
+        return v3(0.25, 0.60, 1.70)
+    }
+    if kind == KIND_500 {
+        return v3(1.55, 0.20, 1.35)
+    }
+    if kind == KIND_1000 {
+        return v3(1.90, 0.90, 0.15)
+    }
+    if kind == KIND_5000 {
+        return v3(1.95, 0.20, 1.60)
+    }
+    return v3(2.20, 1.60, 0.30)
+}
+
+// The pin sits just clear of the deck it is bolted to. It is deliberately almost
+// nothing: a rig that is down should lie flat in the deck like an inlaid disc,
+// not stand on a stalk with a plate balanced on it. A tall post made every
+// resting target read as a café table.
+pub let POST_H: f64 = 0.07
 
 pub let ST_DOWN: i64 = 0
 
@@ -49,11 +136,24 @@ pub let ST_UP: i64 = 2
 
 pub let ST_FALLING: i64 = 3
 
-pub let KIND_BOTTLE: i64 = 0
+pub let KIND_100: i64 = 0
 
-pub let KIND_PLATE: i64 = 1
+pub let KIND_250: i64 = 1
+
+pub let KIND_500: i64 = 2
+
+pub let KIND_1000: i64 = 3
+
+pub let KIND_5000: i64 = 4
+
+// The gold one. It is never placed: the drone drops it onto whichever rig it is
+// over, and that rig goes back to being what it was when the bonus is done.
+pub let KIND_BONUS: i64 = 5
+
+pub let KINDS: i64 = 6
 
 pub struct Rig {
+    // The hinge pin, in world space.
     pos: Vec3,
     yaw: f64,
     kind: i64,
@@ -69,13 +169,17 @@ pub struct Rig {
     // Seconds until this rig may be called again.
     cooldown: f64,
     hitRadius: f64,
+    // What this rig prints when it is not carrying the bonus. The drone
+    // overwrites `kind` for the few seconds a gold target is up, and this is
+    // what it goes back to.
+    baseKind: i64,
 }
 
 pub struct Shard {
     pos: Vec3,
     vel: Vec3,
     // A unit axis and a rate, integrated into `spin`. A quaternion would be
-    // correct and nobody can see the difference on something that lives 2.4 s.
+    // correct and nobody can see the difference on something that lives 2 s.
     axis: Vec3,
     rate: f64,
     spin: f64,
@@ -88,154 +192,156 @@ pub struct Shard {
     bl: f64,
     life: f64,
     maxLife: f64,
+    // The deck this piece will land on. There is no single floor in this room.
+    floorY: f64,
     onGround: bool,
 }
 
 pub struct Targets {
     rigs: Vec<Rig>,
-    // Which rigs the player can actually see from where they stand. A rig behind
-    // you or out past the end of the arc you may turn through is scenery: raising
-    // it spends a spawn slot on a target nobody can shoot.
+    // Which rigs the player can actually see from where they stand. A rig
+    // outside the arc you may turn through is scenery: raising it spends a spawn
+    // slot on a target nobody can shoot.
     eligible: Vec<bool>,
     shards: Vec<Shard>,
-    bottleMesh: Mesh,
-    plateMesh: Mesh,
-    flapMesh: Mesh,
+    // One disc mesh per kind — same geometry, different cell of the face atlas.
+    faceMeshes: Vec<Mesh>,
+    rimMeshes: Vec<Mesh>,
     baseMesh: Mesh,
     shardMesh: Mesh,
-    bottleMat: Material,
-    plateMat: Material,
+    // One material per kind, because the ladder is colour *and* brightness: a
+    // 1000 is lit from inside and a 100 is not.
+    faceMats: Vec<Material>,
+    // The same faces with almost none of the glow, for a rig lying flat waiting
+    // to be called. It is the whole reason a lit target is findable on a stage
+    // covered in fifty discs.
+    faceDimMats: Vec<Material>,
+    rimMat: Material,
+    baseMat: Material,
     shardMat: Material,
     // The white-hot pop at the point of impact, and how much of it is left.
     burstMat: Material,
     burstMesh: Mesh,
     burstT: f64,
     burstPos: Vec3,
-    steelMat: Material,
-    rustMat: Material,
-    shardVerts: Vec<f32>,
+    burstColor: Vec3,
     rng: Rand,
     // Wave state.
     sinceSpawn: f64,
-    wantUp: i64,
 }
 
 // ── geometry ──────────────────────────────────────────────────────────────────
 
-// A whiskey bottle: a body, a shoulder and a neck, standing on the flap.
-fn bottleGeometry(b: &mut Builder) {
-    b.setUvScale(2.0)
+// One printed disc, hinged at the origin and standing on +Y, facing -Z. The uv
+// runs into this kind's cell of the 2x2 face atlas, inset a little so no mip
+// level can blend one face into its neighbour.
+fn faceGeometry(b: &mut Builder, kind: i64) {
+    let r = radiusOf(kind)
+    let arm = armOf(kind)
+    // A 3x3 atlas: the cell is a third on each axis, and the disc is inset a
+    // little inside it so no mip level can blend one face into its neighbour.
+    let cell = 1.0 / (FACE_COLS as f64)
+    let u0 = ((kind % FACE_COLS) as f64) * cell
+    let v0 = ((kind / FACE_COLS) as f64) * cell
+    let half = cell * 0.5 * 0.96
+    let segs = 30
     b.setTint(1.0, 1.0, 1.0)
-    let y0 = 0.02
-    b.cylinder(v3(0.0, y0, 0.0), 0.062, 0.215, 16, true)
-    // shoulder, as two short tapering rings
-    b.cylinder(v3(0.0, y0 + 0.215, 0.0), 0.052, 0.042, 16, false)
-    b.cylinder(v3(0.0, y0 + 0.257, 0.0), 0.036, 0.038, 16, false)
-    b.cylinder(v3(0.0, y0 + 0.295, 0.0), 0.022, 0.095, 12, true)
-    b.setUvScale(1.0)
-}
-
-// A tin plate on edge, the other classic thing to shoot off a fence.
-fn plateGeometry(b: &mut Builder) {
-    b.setUvScale(3.0)
-    b.setTint(1.0, 1.0, 1.0)
-    let radius = 0.20
-    let segs = 24
-    let cy = radius + 0.03
     for i in 0..segs {
         let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
         let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
-        let p0 = v3(Math.cos(a0) * radius, cy + Math.sin(a0) * radius, 0.0)
-        let p1 = v3(Math.cos(a1) * radius, cy + Math.sin(a1) * radius, 0.0)
-        let c = v3(0.0, cy, 0.0)
-        let front = 0.009
-        let m0 = v3(Math.cos(a0) * radius * 0.55, cy + Math.sin(a0) * radius * 0.55, 0.0)
-        let m1 = v3(Math.cos(a1) * radius * 0.55, cy + Math.sin(a1) * radius * 0.55, 0.0)
-        // A red ring on white. Nothing scores differently for hitting the middle
-        // — the ring is there so a 30 m target is a thing your eye finds, which
-        // is the only kind of aiming this game asks for.
-        b.setTint(1.0, 0.98, 0.94)
-        b.tri(c - v3(0.0, 0.0, front), m1 - v3(0.0, 0.0, front), m0 - v3(0.0, 0.0, front), 0.5, 0.5, 1.0, 0.5, 0.5, 1.0)
-        b.setTint(1.35, 0.30, 0.16)
-        b.tri(m0 - v3(0.0, 0.0, front), m1 - v3(0.0, 0.0, front), p1 - v3(0.0, 0.0, front), 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
-        b.tri(m0 - v3(0.0, 0.0, front), p1 - v3(0.0, 0.0, front), p0 - v3(0.0, 0.0, front), 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
-        b.setTint(0.86, 0.84, 0.80)
-        b.tri(c + v3(0.0, 0.0, front), p0 + v3(0.0, 0.0, front), p1 + v3(0.0, 0.0, front), 0.5, 0.5, 1.0, 0.5, 0.5, 1.0)
-        b.setTint(1.0, 1.0, 1.0)
-        // rim
-        b.quad(p0 - v3(0.0, 0.0, front), p1 - v3(0.0, 0.0, front), p1 + v3(0.0, 0.0, front), p0 + v3(0.0, 0.0, front), 0.2, 0.05)
+        let p0 = v3(Math.cos(a0) * r, arm + Math.sin(a0) * r, 0.0)
+        let p1 = v3(Math.cos(a1) * r, arm + Math.sin(a1) * r, 0.0)
+        let c = v3(0.0, arm, 0.0)
+        // Both texture axes run against the disc's own. v runs down the image
+        // while y runs up it, and u runs with +x while the view basis puts +x on
+        // the *left* of the screen. Getting either wrong prints every number
+        // backwards, which is a thing you notice only once the numbers exist.
+        let uc = u0 + cell * 0.5
+        let vc = v0 + cell * 0.5
+        // Wound so the normal faces -Z. The other winding is invisible under
+        // back-face culling: the disc simply does not appear.
+        b.tri(c, p1, p0, uc, vc, uc - Math.cos(a1) * half, vc - Math.sin(a1) * half, uc - Math.cos(a0) * half, vc - Math.sin(a0) * half)
     }
-    b.setUvScale(1.0)
 }
 
-// The steel flap the target rides on, and the pin it turns about.
-fn flapGeometry(b: &mut Builder) {
-    b.setUvScale(4.0)
-    b.setTint(0.55, 0.56, 0.58)
-    b.boxSpan(v3(-0.12, -0.014, -0.10), v3(0.12, 0.014, 0.10))
-    b.boxSpan(v3(-0.014, 0.0, -0.024), v3(0.014, ARM, 0.024))
+// The chrome the face is set into: a slightly larger disc behind it, its rim
+// showing all round, and a plate closing the back.
+fn rimGeometry(b: &mut Builder, kind: i64) {
+    let r = radiusOf(kind) * 1.11
+    let arm = armOf(kind)
+    let segs = 30
+    b.setUvScale(2.0)
+    b.setTint(0.90, 0.93, 1.05)
+    for i in 0..segs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+        let f0 = v3(Math.cos(a0) * r, arm + Math.sin(a0) * r, 0.006)
+        let f1 = v3(Math.cos(a1) * r, arm + Math.sin(a1) * r, 0.006)
+        let b0 = v3(Math.cos(a0) * r, arm + Math.sin(a0) * r, 0.075)
+        let b1 = v3(Math.cos(a1) * r, arm + Math.sin(a1) * r, 0.075)
+        let cf = v3(0.0, arm, 0.006)
+        let cb = v3(0.0, arm, 0.075)
+        b.tri(cf, f1, f0, 0.5, 0.5, 1.0, 0.5, 0.5, 1.0)
+        b.tri(cb, b0, b1, 0.5, 0.5, 1.0, 0.5, 0.5, 1.0)
+        b.quad(f0, b0, b1, f1, 0.15, 0.08)
+    }
     b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(1.0)
+    // The hinge knuckle, which is the one part that stays put while the disc
+    // swings and the only thing that says the disc is hinged rather than stuck.
+    b.setTint(0.75, 0.78, 0.90)
+    b.setXform(multiply(translation(v3(-0.09, 0.0, 0.0)), rotationY(0.0)))
+    b.resetXform()
+    b.boxSpan(v3(-0.09, -0.03, -0.035), v3(0.09, 0.03, 0.035))
+    b.setTint(1.0, 1.0, 1.0)
 }
 
-// The bracket bolted to the rail or barrel, which does not move.
+// The post, in the base's own frame: the pin is at the origin and the deck is
+// POST_H below it.
 fn baseGeometry(b: &mut Builder) {
-    b.setUvScale(4.0)
-    b.setTint(0.68, 0.55, 0.42)
-    b.boxSpan(v3(-0.15, -0.09, -0.12), v3(0.15, -0.01, 0.12))
-    b.cylinder(v3(-0.16, -0.01, 0.0), 0.016, 0.06, 8, true)
-    b.cylinder(v3(0.16, -0.01, 0.0), 0.016, 0.06, 8, true)
+    b.setUvScale(2.5)
+    b.setTint(0.88, 0.91, 1.02)
+    b.cylinder(v3(0.0, -POST_H, 0.0), 0.055, POST_H, 12, true)
+    b.setTint(0.55, 0.58, 0.68)
+    b.cylinder(v3(0.0, -POST_H, 0.0), 0.16, 0.07, 14, true)
     b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(1.0)
 }
 
 // ── the rigs ──────────────────────────────────────────────────────────────────
 
-// Where the targets live: along the two boardwalk rails, on the barrels, on the
-// trough, on the graveyard fence, and one on the wagon. Placed by hand rather
-// than scattered, because a reflex game is only fair if the same rig is always
-// in the same place.
+// Where the targets live. Four rows, one on each deck, all of them square on to
+// the firing line and all of them at one honest distance for their row. Placed
+// by hand rather than scattered, because a reflex game is only fair if the rig
+// you learn to swing to is where you learned it.
 fn placeRigs(): Vec<Rig> {
     var out: Vec<Rig> = Vec.new()
-    let rail = RAIL_TOP + 0.08
 
-    // The range proper: a row along the right-hand rail, in front of the store
-    // you stand opposite. Evenly spaced and always in the same place, because a
-    // reflex game is only fair if the target you learn to swing to is where you
-    // learned it. Eleven of them, alternating bottle and plate, is enough that
-    // six can be up at once and there is still somewhere new for the next one.
-    let count = 11
-    for i in 0..count {
-        let z = 13.1 + 1.24 * (i as f64)
-        out.push(makeRig(5.62, rail, z, -1.0, i % 2))
-    }
-    // Two on the barrels and one on the trough, out in front of the rail: they
-    // break the row up and they are the closest targets in the game.
-    out.push(makeRig(4.20, 1.10, 15.4, -1.0, 1))
-    out.push(makeRig(4.20, 1.10, 20.6, -1.0, 0))
-    out.push(makeRig(4.44, 0.70, 23.0, -1.0, 1))
-
-    // Scenery: the opposite boardwalk and the far end of the town. These are
-    // never raised — `setStance` marks them out of play — but a rig standing
-    // down on an empty rail is part of the town.
-    let others: Vec<f64> = [-5.62, rail, 11.6, 1.0, 0.0, -5.62, rail, 14.4, 1.0, 1.0, -5.62, rail, 17.2, 1.0, 0.0, -5.62, rail, 20.0, 1.0, 1.0, -5.62, rail, 23.5, 1.0, 0.0, -5.62, rail, 27.0, 1.0, 1.0, -5.62, rail, 31.0, 1.0, 0.0, -4.20, 1.10, 12.4, 1.0, 1.0, -4.20, 1.10, 15.6, 1.0, 0.0, -5.10, 0.94, 13.4, 1.0, 0.0, -1.90, 0.80, 37.0, 0.0, 1.0, 1.40, 0.14, 34.0, 0.0, 0.0, -2.60, 0.14, 41.0, 0.0, 1.0,]
-    var i = 0
-    while i * 5 < others.len {
-        out.push(makeRig(others[i * 5], others[i * 5 + 1], others[i * 5 + 2], others[i * 5 + 3], others[i * 5 + 4] as i64))
-        i = i + 1
-    }
+    // Every disc in this room is a live rig. Nothing is bolted up as scenery:
+    // a thing that looks exactly like a target and cannot be shot is a lie the
+    // player finds out about by wasting a shot on it.
+    // The pitch is barely more than a diameter on the front row: they nearly
+    // touch, which is what makes the stage read as covered in targets rather
+    // than as a shelf with some targets on it.
+    row(out, 9, 1.30, 6.60, DECK_Y[0] + POST_H, KIND_100)
+    row(out, 11, 1.30, 9.60, DECK_Y[1] + POST_H, KIND_250)
+    row(out, 11, 1.35, 12.80, DECK_Y[2] + POST_H, KIND_500)
+    row(out, 11, 1.40, 16.00, DECK_Y[3] + POST_H, KIND_1000)
+    row(out, 11, 1.45, 19.40, DECK_Y[4] + POST_H, KIND_5000)
     return out
 }
 
-// One rig, down, at a place on a rail. `face` is which way the target turns to
-// look at the street: yaw takes local -Z there.
-fn makeRig(x: f64, y: f64, z: f64, face: f64, kind: i64): Rig {
-    var yaw = 0.0
-    if face > 0.5 {
-        yaw = -1.5708
-    } else if face < -0.5 {
-        yaw = 1.5708
+// One evenly spaced row, centred on the middle of the room.
+fn row(out: &mut Vec<Rig>, count: i64, pitch: f64, z: f64, y: f64, kind: i64) {
+    let x0 = -pitch * ((count - 1) as f64) * 0.5
+    for i in 0..count {
+        out.push(makeRig(x0 + pitch * (i as f64), y, z, 0.0, kind))
     }
+}
+
+// One rig, down, at a place on a deck. `yaw` takes the disc's -Z face to where
+// it should look.
+fn makeRig(x: f64, y: f64, z: f64, yaw: f64, kind: i64): Rig {
     return Rig {
         pos: v3(x, y, z),
         yaw: yaw,
@@ -247,61 +353,69 @@ fn makeRig(x: f64, y: f64, z: f64, face: f64, kind: i64): Rig {
         hold: 0.0,
         broken: false,
         cooldown: 0.0,
-        // A little wider than the mesh. The targets stand eight or nine metres
-        // off, and a shot that visibly clipped the glass reading as a miss is
-        // what made this feel unfair rather than hard.
-        hitRadius: if kind == KIND_BOTTLE {
-            0.22
-        } else {
-            0.26
-        }
-        ,
+        // A little wider than the disc. These stand eleven to twenty-three
+        // metres off, and a shot that visibly clipped the rim reading as a miss
+        // is what makes a game feel unfair rather than hard.
+        hitRadius: radiusOf(kind) + 0.06,
+        baseKind: kind,
     }
 }
 
-pub fn newTargets(gl: &mut GlContext): Targets {
-    var bb = builder()
-    bottleGeometry(bb)
-    var pb = builder()
-    plateGeometry(pb)
-    var fb = builder()
-    flapGeometry(fb)
+pub fn newTargets(gl: &mut GlContext, faceTex: i64, flatTex: i64): Targets {
+    var faceMeshes: Vec<Mesh> = Vec.new()
+    var rimMeshes: Vec<Mesh> = Vec.new()
+    for k in 0..KINDS {
+        var fb = builder()
+        faceGeometry(fb, k)
+        var fm = Mesh.new(gl, sceneAttrs())
+        fm.upload(fb.data.clone())
+        faceMeshes.push(fm)
+
+        var rb = builder()
+        rimGeometry(rb, k)
+        var rm = Mesh.new(gl, sceneAttrs())
+        rm.upload(rb.data.clone())
+        rimMeshes.push(rm)
+    }
+
     var sb = builder()
     baseGeometry(sb)
-
-    var bottleMesh = Mesh.new(gl, sceneAttrs())
-    bottleMesh.upload(bb.data.clone())
-    var plateMesh = Mesh.new(gl, sceneAttrs())
-    plateMesh.upload(pb.data.clone())
-    var flapMesh = Mesh.new(gl, sceneAttrs())
-    flapMesh.upload(fb.data.clone())
     var baseMesh = Mesh.new(gl, sceneAttrs())
     baseMesh.upload(sb.data.clone())
 
-    // Emissive, and not subtly. These sit under a porch roof in its own shade,
-    // and a target you have to hunt for in a dark recess is a target you shoot
-    // late. The values are above the bloom threshold on purpose: the glow that
-    // spills off them is how you catch one out of the corner of your eye.
+    // The pop at the point of impact. Emissive far above the bloom threshold on
+    // purpose: what you actually see is the flare around it rather than the ball.
     var burstBuilder = builder()
     burstBuilder.sphere(v3(0.0, 0.0, 0.0), 1.0, 8, 12)
     var burstMesh = Mesh.new(gl, sceneAttrs())
     burstMesh.upload(burstBuilder.data.clone())
     var burstMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 1.0, 0.0)
-    burstMat.emissive = v3(14.0, 9.0, 4.2)
+    burstMat.emissive = v3(14.0, 12.0, 8.0)
 
-    var bottleMat = material(TEX_GLASS, 0.13, 0.42, 0.12, 0.07, 0.0)
-    bottleMat.normalStrength = 0.4
-    bottleMat.emissive = v3(0.10, 0.62, 0.24)
-    var plateMat = material(TEX_PAINT, 0.90, 0.88, 0.84, 0.38, 0.0)
-    plateMat.emissive = v3(0.60, 0.52, 0.44)
-    // Shards keep the colour of what they came off in their vertex tint; the
-    // material gives them all a little heat, so a break throws light for the
-    // second it is in the air.
-    var shardMat = material(TEX_GLASS, 0.55, 0.55, 0.55, 0.10, 0.0)
-    shardMat.normalStrength = 0.3
-    shardMat.emissive = v3(0.30, 0.24, 0.15)
-    let steelMat = material(TEX_STEEL, 0.48, 0.50, 0.53, 0.36, 0.85)
-    let rustMat = material(TEX_RUST, 0.40, 0.27, 0.18, 0.85, 0.30)
+    // The face is a picture that lights itself: emissiveMap masks the glow by
+    // the print, so the rings and the number carry the light and the white
+    // ground stays a surface the room lights.
+    var faceMats: Vec<Material> = Vec.new()
+    var faceDimMats: Vec<Material> = Vec.new()
+    for k in 0..KINDS {
+        var m = materialTex(faceTex, flatTex, 1.0, 1.0, 1.0, 0.30, 0.0)
+        let g = glowOf(k)
+        m.emissive = v3(g, g, g)
+        m.emissiveMap = 1.0
+        faceMats.push(m)
+        var d = materialTex(faceTex, flatTex, 1.0, 1.0, 1.0, 0.30, 0.0)
+        d.emissive = v3(0.09, 0.09, 0.09)
+        d.emissiveMap = 1.0
+        faceDimMats.push(d)
+    }
+
+    let rimMat = material(TEX_STEEL, 0.70, 0.74, 0.84, 0.18, 1.0)
+    let baseMat = material(TEX_STEEL, 0.62, 0.66, 0.78, 0.22, 0.95)
+    // Pieces keep the colour of the ring they came off in their vertex tint; the
+    // material makes all of it emissive, so a break throws light for the second
+    // it is in the air.
+    var shardMat = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
+    shardMat.emissive = v3(1.0, 1.0, 1.0)
 
     let rigs = placeRigs()
     var eligible: Vec<bool> = Vec.filled(rigs.len, true)
@@ -309,29 +423,27 @@ pub fn newTargets(gl: &mut GlContext): Targets {
         rigs: rigs,
         eligible: eligible,
         shards: Vec.new(),
-        bottleMesh: bottleMesh,
-        plateMesh: plateMesh,
-        flapMesh: flapMesh,
+        faceMeshes: faceMeshes,
+        rimMeshes: rimMeshes,
         baseMesh: baseMesh,
         shardMesh: Mesh.new(gl, sceneAttrs()),
-        bottleMat: bottleMat,
-        plateMat: plateMat,
+        faceMats: faceMats,
+        faceDimMats: faceDimMats,
+        rimMat: rimMat,
+        baseMat: baseMat,
         shardMat: shardMat,
         burstMat: burstMat,
         burstMesh: burstMesh,
         burstT: 0.0,
         burstPos: v3(0.0, 0.0, 0.0),
-        steelMat: steelMat,
-        rustMat: rustMat,
-        shardVerts: Vec.new(),
+        burstColor: v3(1.0, 1.0, 1.0),
         rng: rand(0xB0771E),
         sinceSpawn: 0.0,
-        wantUp: 2,
     }
 }
 
 // The model matrix of a rig's moving part. Local space has the pin on the X
-// axis at the origin and the target on +Y when the flap is up.
+// axis at the origin and the disc on +Y when the flap is up.
 fn flapMatrix(r: &Rig): Vec<f32> {
     return multiply(translation(r.pos), multiply(rotationY(r.yaw), rotationX(1.5708 - r.angle)))
 }
@@ -340,13 +452,10 @@ fn baseMatrix(r: &Rig): Vec<f32> {
     return multiply(translation(r.pos), rotationY(r.yaw))
 }
 
-// Where the middle of the target is right now, in world space.
+// Where the middle of the disc is right now, in world space.
 pub fn rigCentre(r: &Rig): Vec3 {
     let m = flapMatrix(r)
-    var local = v3(0.0, ARM + 0.155, 0.0)
-    if r.kind == KIND_PLATE {
-        local = v3(0.0, ARM + 0.23, 0.0)
-    }
+    let local = v3(0.0, armOf(r.kind), 0.0)
     let x = (m[0] as f64) * local.x + (m[4] as f64) * local.y + (m[8] as f64) * local.z + (m[12] as f64)
     let y = (m[1] as f64) * local.x + (m[5] as f64) * local.y + (m[9] as f64) * local.z + (m[13] as f64)
     let z = (m[2] as f64) * local.x + (m[6] as f64) * local.y + (m[10] as f64) * local.z + (m[14] as f64)
@@ -371,9 +480,10 @@ impl Targets {
         return n
     }
 
-    // Work out which rigs are shootable from where the player stands. Called once
-    // at startup, because the player does not move: a rig is in play if it is
-    // inside the arc the camera may turn through and near enough to aim at.
+    // Work out which rigs are shootable from where the player stands. Called
+    // once at startup, because the player does not move: a rig is in play if it
+    // is inside the arc the camera may turn through, near enough to aim at, and
+    // not bolted to a wall.
     fn setStance(self: &mut Self, eye: &Vec3, centreYaw: f64, halfAngle: f64, maxDist: f64) {
         for i in 0..self.rigs.len {
             let c = rigCentre(self.rigs[i])
@@ -446,38 +556,40 @@ impl Targets {
             if self.rigs[i].state == ST_FALLING && self.rigs[i].angle < 0.05 {
                 self.rigs[i].state = ST_DOWN
                 self.rigs[i].broken = false
+                // The gold face belongs to the drone, not to the rig.
+                self.rigs[i].kind = self.rigs[i].baseKind
+                self.rigs[i].hitRadius = radiusOf(self.rigs[i].baseKind) + 0.06
                 if self.rigs[i].cooldown < 0.5 {
                     self.rigs[i].cooldown = 0.5
                 }
             }
         }
 
-        // The street is never empty. With no round running the rigs still come
-        // up, two at a time and for a long hold, so someone who has just
+        // The gallery is never idle. With no round running the rigs still come
+        // up, a few at a time and for a long hold, so someone who has just
         // launched the game can see what a target is and shoot a few before the
         // clock ever starts.
         self.sinceSpawn = self.sinceSpawn + dt
         let want = if running {
-            5 + (pressure * 3.4) as i64
+            20 + (pressure * 8.0) as i64
         } else {
-            4
+            18
         }
         let gap = if running {
-            0.44 - 0.22 * pressure
+            0.20 - 0.11 * pressure
         } else {
-            0.85
+            0.34
         }
         if self.liveCount() < want && self.sinceSpawn > gap {
             self.sinceSpawn = 0.0
-            // Pick among the rigs that are down and off cooldown. Rejection
-            // sampling over a list of seventeen is cheaper than building the
-            // candidate list every time.
+            // Rejection sampling over the rig list is cheaper than rebuilding
+            // the candidate list every time.
             var tries = 0
-            while tries < 24 {
+            while tries < 40 {
                 let k = self.rng.int(self.rigs.len)
                 if self.eligible[k] && self.rigs[k].state == ST_DOWN && self.rigs[k].cooldown <= 0.0 {
                     let hold = if running {
-                        (2.60 - 0.95 * pressure) * self.rng.range(0.85, 1.2)
+                        (2.40 - 0.95 * pressure) * self.rng.range(0.85, 1.2)
                     } else {
                         6.0
                     }
@@ -490,6 +602,35 @@ impl Targets {
         }
 
         self.stepShards(dt)
+    }
+
+    // Put the gold target on whichever rig is nearest to (x, z) and free to
+    // take it. Returns where it landed, or -1 — the drone flies over the aisle
+    // as well as over the stage, and dropping a bonus onto nothing is better
+    // than teleporting one to the far end of the room.
+    fn dropBonus(self: &mut Self, x: f64, z: f64, hold: f64): i64 {
+        var best = -1
+        var bestD = 5.0
+        for i in 0..self.rigs.len {
+            if !self.eligible[i] || self.rigs[i].state != ST_DOWN || self.rigs[i].cooldown > 0.0 {
+                continue
+            }
+            let dx = self.rigs[i].pos.x - x
+            let dz = self.rigs[i].pos.z - z
+            let d = Math.sqrt(dx * dx + dz * dz)
+            if d < bestD {
+                bestD = d
+                best = i
+            }
+        }
+        if best < 0 {
+            return -1
+        }
+        self.rigs[best].kind = KIND_BONUS
+        self.rigs[best].hitRadius = radiusOf(KIND_BONUS) + 0.06
+        self.raise(best, hold)
+        self.rigs[best].cooldown = 1.0
+        return best
     }
 
     // A hitscan ray against every standing target. Returns the nearest.
@@ -517,9 +658,9 @@ impl Targets {
             if t <= 0.0 || t >= best {
                 continue
             }
-            // Distance from the ray to the centre. A sphere is the right shape
-            // for a bottle and close enough for a plate, and it means a shot
-            // that clips the edge still counts — which is the point of the game.
+            // Distance from the ray to the centre. A sphere is close enough for
+            // a disc seen face on, and it means a shot that clips the rim still
+            // counts — which is the point of the game.
             let perp = toC - dir.scale(t)
             if perp.len() <= self.rigs[i].hitRadius {
                 best = t
@@ -531,55 +672,43 @@ impl Targets {
         return hit
     }
 
-    // Break the target on rig `index` into shards flying away from `from`.
+    // Break the disc on rig `index` into pieces flying away from `from`.
     fn shatter(self: &mut Self, index: i64, from: Vec3) {
         let c = rigCentre(self.rigs[index])
         let kind = self.rigs[index].kind
+        let deck = self.rigs[index].pos.y - POST_H
         self.rigs[index].broken = true
         self.drop(index)
         self.rigs[index].angVel = self.rigs[index].angVel - 7.0
         self.rigs[index].cooldown = 1.1
 
         let away = (c - from).norm()
+        let tone = sparkOf(kind)
         // The pop at the impact point, which is what sells the hit in the frame
-        // where it happens: the shards have not moved yet in that frame.
+        // where it happens: the pieces have not moved yet in that frame.
         self.burstT = 0.11
         self.burstPos = c
+        self.burstColor = tone
 
-        let pieces = if kind == KIND_BOTTLE {
-            72
-        } else {
-            60
-        }
-        let spread = if kind == KIND_BOTTLE {
-            0.085
-        } else {
-            0.150
-        }
+        let pieces = 64
+        let spread = radiusOf(kind) * 0.55
         for _k in 0..pieces {
-            // A shard starts on a small random offset from the centre and flies
+            // A piece starts on a small random offset from the centre and flies
             // outward from there, plus a share of the bullet's own momentum.
             let dx = self.rng.range(-1.0, 1.0)
             let dy = self.rng.range(-1.0, 1.0)
             let dz = self.rng.range(-1.0, 1.0)
             let off = v3(dx, dy, dz).norm().scale(spread * self.rng.range(0.2, 1.0))
-            // Harder and wider than it was: a third of the pieces are thrown
-            // fast enough to clear the boardwalk, and the rest fountain up and
-            // fall on it. The spread is what makes it read as a burst rather
-            // than as a puff.
-            let radial = off.norm().scale(self.rng.range(1.8, 6.2))
+            let radial = off.norm().scale(self.rng.range(2.0, 6.4))
             let vel = radial + away.scale(self.rng.range(2.2, 6.0)) + v3(0.0, self.rng.range(0.9, 3.8), 0.0)
-            let s = self.rng.range(0.008, 0.042)
-            var r = 0.80
-            var g = 0.80
-            var bl = 0.78
-            if kind == KIND_BOTTLE {
-                r = self.rng.range(0.10, 0.22)
-                g = self.rng.range(0.34, 0.52)
-                bl = self.rng.range(0.10, 0.20)
+            let s = self.rng.range(0.010, 0.046)
+            // Two thirds take the ring's colour and the rest are white-hot, which
+            // is what makes a break read as a spark shower rather than as
+            // confetti in one shade.
+            var col = tone.scale(self.rng.range(0.7, 1.5))
+            if self.rng.range(0.0, 1.0) < 0.34 {
+                col = v3(2.2, 2.0, 1.6)
             }
-            // Some of it is dust rather than glass: small, pale, short-lived.
-            let dust = self.rng.range(0.0, 1.0) < 0.22
             self.shards.push(Shard {
                 pos: c + off,
                 vel: vel,
@@ -589,16 +718,12 @@ impl Targets {
                 a: v3(-s, -s * 0.7, 0.0),
                 b: v3(s * self.rng.range(0.6, 1.3), -s * 0.5, 0.0),
                 c: v3(self.rng.range(-0.5, 0.5) * s, s * self.rng.range(0.8, 1.6), 0.0),
-                r: r,
-                g: g,
-                bl: bl,
+                r: col.x,
+                g: col.y,
+                bl: col.z,
                 life: 0.0,
-                maxLife: if dust {
-                    self.rng.range(0.35, 0.7)
-                } else {
-                    self.rng.range(1.8, 3.2)
-                }
-                ,
+                maxLife: self.rng.range(0.9, 1.9),
+                floorY: deck,
                 onGround: false,
             }
             )
@@ -612,7 +737,7 @@ impl Targets {
             self.shards[i].life = self.shards[i].life + dt
             if self.shards[i].life > self.shards[i].maxLife {
                 // Swap-remove: order does not matter and this keeps the step
-                // linear no matter how many plates are in the air.
+                // linear no matter how many discs are in the air.
                 let last = self.shards.len - 1
                 if i != last {
                     self.shards[i] = self.shards[last].clone()
@@ -624,8 +749,9 @@ impl Targets {
                 self.shards[i].vel = self.shards[i].vel + v3(0.0, -12.5 * dt, 0.0)
                 self.shards[i].pos = self.shards[i].pos + self.shards[i].vel.scale(dt)
                 self.shards[i].spin = self.shards[i].spin + self.shards[i].rate * dt
-                if self.shards[i].pos.y < 0.012 {
-                    self.shards[i].pos.y = 0.012
+                let floor = self.shards[i].floorY + 0.012
+                if self.shards[i].pos.y < floor {
+                    self.shards[i].pos.y = floor
                     if self.shards[i].vel.y < -1.4 {
                         // One bounce, then it lies where it fell.
                         self.shards[i].vel.y = -self.shards[i].vel.y * 0.32
@@ -634,8 +760,6 @@ impl Targets {
                         self.shards[i].rate = self.shards[i].rate * 0.5
                     } else {
                         self.shards[i].onGround = true
-                        // Lay it flat on the dirt rather than leaving it frozen
-                        // at whatever angle it landed at.
                         self.shards[i].axis = v3(1.0, 0.0, 0.0)
                         self.shards[i].spin = 1.5708
                     }
@@ -649,63 +773,54 @@ impl Targets {
 
     fn drawRigs(self: &Self, gfx: &Gfx, shadowPass: bool) {
         for i in 0..self.rigs.len {
-            let bm = baseMatrix(self.rigs[i])
             let fm = flapMatrix(self.rigs[i])
+            let bm = baseMatrix(self.rigs[i])
             if shadowPass {
                 gfx.shadowDraw(self.baseMesh, bm)
-                gfx.shadowDraw(self.flapMesh, fm)
             } else {
-                gfx.sceneDraw(self.baseMesh, bm, self.rustMat)
-                gfx.sceneDraw(self.flapMesh, fm, self.steelMat)
+                gfx.sceneDraw(self.baseMesh, bm, self.baseMat)
             }
             if self.rigs[i].broken {
                 continue
             }
-            if self.rigs[i].kind == KIND_BOTTLE {
-                if shadowPass {
-                    gfx.shadowDraw(self.bottleMesh, fm)
-                } else {
-                    gfx.sceneDraw(self.bottleMesh, fm, self.bottleMat)
-                }
+            let k = self.rigs[i].kind
+            if shadowPass {
+                gfx.shadowDraw(self.rimMeshes[k], fm)
             } else {
-                if shadowPass {
-                    gfx.shadowDraw(self.plateMesh, fm)
+                gfx.sceneDraw(self.rimMeshes[k], fm, self.rimMat)
+                let live = self.rigs[i].state == ST_UP || self.rigs[i].state == ST_RISING
+                if live {
+                    gfx.sceneDraw(self.faceMeshes[k], fm, self.faceMats[k])
                 } else {
-                    gfx.sceneDraw(self.plateMesh, fm, self.plateMat)
+                    gfx.sceneDraw(self.faceMeshes[k], fm, self.faceDimMats[k])
                 }
             }
         }
     }
 
-    // The rigs in the depth prepass. Shards are left out: they are in the air
-    // for half a second and nothing occludes anything through them.
+    // The rigs in the depth prepass. Pieces are left out: they are in the air
+    // for a second and nothing occludes anything through them.
     fn drawRigsDepth(self: &Self, gfx: &Gfx) {
         for i in 0..self.rigs.len {
             gfx.prepassDraw(self.baseMesh, baseMatrix(self.rigs[i]))
-            gfx.prepassDraw(self.flapMesh, flapMatrix(self.rigs[i]))
             if self.rigs[i].broken {
                 continue
             }
-            if self.rigs[i].kind == KIND_BOTTLE {
-                gfx.prepassDraw(self.bottleMesh, flapMatrix(self.rigs[i]))
-            } else {
-                gfx.prepassDraw(self.plateMesh, flapMatrix(self.rigs[i]))
-            }
+            gfx.prepassDraw(self.rimMeshes[self.rigs[i].kind], flapMatrix(self.rigs[i]))
         }
     }
 
-    // Shards are rebuilt on the CPU every frame into one buffer: a few hundred
+    // Pieces are rebuilt on the CPU every frame into one buffer: a few hundred
     // triangles is nothing to upload, and it avoids a draw call and a matrix per
-    // fragment of glass.
+    // fragment.
     fn drawShards(self: &mut Self, gfx: &Gfx) {
         if self.burstT > 0.0 {
-            // A sphere that grows and dims over a sixth of a second. It is
-            // emissive far above the bloom threshold, so what you actually see
-            // is the flare around it rather than the ball itself.
+            // A sphere that grows and dims over a tenth of a second, far above
+            // the bloom threshold, so what you see is the flare not the ball.
             let k = self.burstT / 0.11
-            let r = 0.045 + 0.17 * (1.0 - k)
+            let r = 0.05 + 0.20 * (1.0 - k)
             var m = self.burstMat
-            m.emissive = v3(14.0 * k, 9.0 * k, 4.2 * k)
+            m.emissive = v3(10.0 * k + self.burstColor.x * 4.0 * k, 9.0 * k + self.burstColor.y * 4.0 * k, 7.0 * k + self.burstColor.z * 4.0 * k)
             gfx.sceneDraw(self.burstMesh, multiply(translation(self.burstPos), scaling(r)), m)
         }
         if self.shards.len == 0 {
@@ -718,12 +833,12 @@ impl Targets {
             let ax = self.shards[i].axis
             let fade = 1.0 - Math.maxF64(0.0, (self.shards[i].life - self.shards[i].maxLife + 0.5) / 0.5)
             let k = Math.clampF64(fade, 0.0, 1.0)
-            b.setTint(self.shards[i].r, self.shards[i].g, self.shards[i].bl)
+            b.setTint(self.shards[i].r * k, self.shards[i].g * k, self.shards[i].bl * k)
             b.setAo(k)
             let pa = self.shards[i].pos + rotAbout(self.shards[i].a, ax, s, cth).scale(k)
             let pb = self.shards[i].pos + rotAbout(self.shards[i].b, ax, s, cth).scale(k)
             let pc = self.shards[i].pos + rotAbout(self.shards[i].c, ax, s, cth).scale(k)
-            // Both windings: a shard is a flake with no inside, and one that
+            // Both windings: a piece is a flake with no inside, and one that
             // vanishes when it tumbles past edge-on reads as a flicker.
             b.tri(pa, pb, pc, 0.0, 0.0, 1.0, 0.0, 0.5, 1.0)
             b.tri(pa, pc, pb, 0.0, 0.0, 0.5, 1.0, 1.0, 0.0)
@@ -736,11 +851,19 @@ impl Targets {
     }
 
     fn free(self: Self, gl: &mut GlContext) {
-        self.bottleMesh.free(gl)
-        self.plateMesh.free(gl)
-        self.flapMesh.free(gl)
         self.baseMesh.free(gl)
         self.shardMesh.free(gl)
+        var faces = self.faceMeshes
+        while faces.len > 0 {
+            let m = faces.pop()!
+            m.free(gl)
+        }
+        var rims = self.rimMeshes
+        while rims.len > 0 {
+            let m = rims.pop()!
+            m.free(gl)
+        }
+        self.burstMesh.free(gl)
     }
 }
 

@@ -1,0 +1,162 @@
+// The chase camera.
+//
+// It follows the car rather than being bolted to it. A camera rigidly attached
+// behind the car turns the instant the car turns, which means the road appears
+// to swing and the car appears to stand still: exactly backwards, since the car
+// is the thing the player is steering. Letting the camera lag means the car
+// visibly rotates inside the frame, and that rotation is the feedback that tells
+// you the front end has bitten.
+//
+// Three things are speed-dependent and all three exist to make 180 mph feel
+// different from 60:
+//
+//   - the field of view opens up, which is the whole "speed" effect and does far
+//     more than any amount of motion blur
+//   - the camera drops back and sits lower, so the road fills more of the frame
+//   - the lag increases, so fast corners throw the car further off centre
+//
+// The camera also follows the car's *velocity* blended with its heading, not the
+// heading alone. In a drift those differ by twenty degrees, and following the
+// heading alone points the camera where the car is aimed rather than where it is
+// going, which hides the slide from the person performing it.
+
+from "std/math" import {
+    Math
+}
+from "./car" import {
+    Car
+}
+from "./mat4" import {
+    lookAt, multiply, perspective
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+// Metres behind the car at a standstill, and how much further at top speed.
+let DIST_BASE: f64 = 7.1
+
+let DIST_SPEED: f64 = 2.6
+
+let HEIGHT_BASE: f64 = 2.55
+
+// Horizontal field of view in radians, parked and flat out. Horizontal rather
+// than vertical because what a player notices is how much of the road is in
+// view side to side, and a vertical fov looks right on one aspect ratio only.
+let FOV_BASE: f64 = 1.42
+
+let FOV_SPEED: f64 = 0.30
+
+// The speed the two ends of every range above are measured against.
+let REF_SPEED: f64 = 82.0
+
+pub struct Chase {
+    // Smoothed, in world space. These are the state: everything else is derived
+    // from the car each frame.
+    eye: Vec3,
+    target: Vec3,
+    fov: f64,
+    // Decays every frame; scraping a barrier or running on dirt tops it up.
+    shake: f64,
+    shakeT: f64,
+    // Kept so the first frame can snap instead of sweeping in from the origin.
+    started: bool,
+}
+
+pub fn newChase(): Chase {
+    return Chase {
+        eye: v3(0.0, 3.0, -9.0),
+        target: v3(0.0, 1.0, 0.0),
+        fov: FOV_BASE,
+        shake: 0.0,
+        shakeT: 0.0,
+        started: false,
+    }
+}
+
+impl Chase {
+    fn kick(self: &mut Self, amount: f64) {
+        self.shake = Math.minF64(1.0, self.shake + amount)
+    }
+
+    fn follow(self: &mut Self, car: &Car, dt: f64) {
+        let sp = Math.abs(car.forwardSpeed())
+        let k = Math.clampF64(sp / REF_SPEED, 0.0, 1.0)
+
+        // Where the camera would like to be. The blend toward the velocity
+        // direction is capped: in a big slide the velocity and the heading can
+        // differ by ninety degrees, and following that fully swings the camera
+        // round the side of the car and puts the barrier in shot.
+        let heading = car.forward()
+        var behind = heading
+        if car.vel.len2() > 9.0 {
+            let vdir = car.vel.norm()
+            behind = heading.lerp(vdir, 0.35).norm()
+        }
+
+        let dist = DIST_BASE + DIST_SPEED * k
+        let height = HEIGHT_BASE - 0.45 * k
+        let wantEye = car.pos - behind.scale(dist) + v3(0.0, height, 0.0)
+        // Look ahead of the car, further ahead the faster it is going, so a
+        // corner arrives on screen before it arrives under the wheels.
+        let wantTarget = car.pos + heading.scale(6.0 + 9.0 * k) + v3(0.0, 1.15, 0.0)
+
+        if !self.started {
+            self.eye = wantEye
+            self.target = wantTarget
+            self.started = true
+        }
+
+        // Exponential smoothing, framerate independent. The eye lags more than
+        // the target does: a camera whose aim lags is a camera that appears to
+        // be looking at nothing in particular.
+        let eyeRate = 1.0 - Math.exp(-(6.2 - 1.8 * k) * dt)
+        let aimRate = 1.0 - Math.exp(-9.0 * dt)
+        self.eye = self.eye + (wantEye - self.eye).scale(eyeRate)
+        self.target = self.target + (wantTarget - self.target).scale(aimRate)
+
+        // The camera never goes under the road. Smoothing alone can dip it below
+        // zero over a crest, and a frame rendered from inside the tarmac is a
+        // black frame nobody can diagnose.
+        if self.eye.y < 0.6 {
+            self.eye.y = 0.6
+        }
+
+        self.fov = self.fov + (FOV_BASE + FOV_SPEED * k * k - self.fov) * (1.0 - Math.exp(-4.0 * dt))
+        self.shake = Math.maxF64(0.0, self.shake - dt * 2.4)
+        self.shakeT = self.shakeT + dt
+    }
+
+    // The shake is applied to the eye only, and only ever sideways and up. A
+    // shake that also moves the target makes the car itself jitter, and the car
+    // is the one thing on screen that must stay readable.
+    fn shakenEye(self: &Self): Vec3 {
+        if self.shake <= 0.0 {
+            return self.eye
+        }
+        let a = self.shake * self.shake * 0.22
+        return self.eye + v3(Math.sin(self.shakeT * 47.0) * a, Math.sin(self.shakeT * 61.0) * a * 0.7, Math.cos(self.shakeT * 53.0) * a)
+    }
+
+    fn viewM(self: &Self): Vec<f32> {
+        return lookAt(self.shakenEye(), self.target, v3(0.0, 1.0, 0.0))
+    }
+
+    fn projM(self: &Self, aspect: f64): Vec<f32> {
+        let fovY = 2.0 * Math.atan(Math.tan(self.fov * 0.5) / aspect)
+        // The far plane has to hold the whole skyline. The near plane is as far
+        // out as it can be without clipping the car's own bodywork, because
+        // depth precision is what the ambient-occlusion pass is reading.
+        return perspective(fovY, aspect, 0.12, 9000.0)
+    }
+
+    fn viewProj(self: &Self, aspect: f64): Vec<f32> {
+        return multiply(self.projM(aspect), self.viewM())
+    }
+
+    // The tangent of the half field of view on each axis. The AO pass rebuilds a
+    // view position from a pixel and a distance out of exactly these two.
+    fn tanHalfX(self: &Self): f64 {
+        return Math.tan(self.fov * 0.5)
+    }
+}

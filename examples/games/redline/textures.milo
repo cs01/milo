@@ -1,0 +1,671 @@
+// Every surface the car drives past, synthesised at startup.
+//
+// Six materials, each a 256x256 albedo plus a 256x256 "surf" map that packs a
+// tangent-space normal in RGB and a roughness multiplier in A. Both come out of
+// one height field per material, so the bumps in the normal map are the same
+// bumps the colour shows, a stone chip that looks raised is raised.
+//
+// The set, in the order render.milo indexes it: asphalt for the road itself,
+// concrete for barriers and tunnel liner and building bases, tread plate for
+// grates and service catwalks, steel for gantries and railing, paint for
+// bodywork and signage, glass for windows and lightbox faces.
+//
+// Two constraints shape everything here:
+//
+//   - **Seamless.** The road tiles for tens of metres per repeat and the player
+//     stares straight down it. Every noise lattice wraps modulo its own period
+//     and every scattered feature (aggregate chip, form tie, crack) is stamped
+//     through `wrapIdx`, so column 255 meets column 0 with no discontinuity. A
+//     seam on the road is a stripe that slides toward the camera at 70 m/s and
+//     it is the first thing anyone sees.
+//   - **Deterministic.** No `std/random`. Colour comes from an integer hash of
+//     the lattice coordinate, so the track looks identical every launch and a
+//     screenshot from last week still matches.
+//
+// The albedo is deliberately near-neutral: the shader multiplies it by a
+// per-material colour and a per-vertex tint, so what lives in the texture is
+// *detail*, not identity. Baking the magenta into the paint here and again in
+// the material would double the saturation, and the tint is how one neon
+// material paints signs in six different colours.
+//
+// Integer overflow traps in Milo rather than wrapping, so the hash keeps every
+// intermediate masked to 32 bits before it multiplies: a 32-bit value times a
+// 32-bit constant is the widest product that still fits a u64.
+
+from "std/math" import {
+    Math
+}
+
+pub let TEX_SIZE: i64 = 256
+
+// The index order is the contract with render.milo, it indexes the returned Vec
+// with these names, never with a literal.
+pub let TEX_ASPHALT: i64 = 0
+
+pub let TEX_CONCRETE: i64 = 1
+
+pub let TEX_TREAD: i64 = 2
+
+pub let TEX_STEEL: i64 = 3
+
+pub let TEX_PAINT: i64 = 4
+
+pub let TEX_GLASS: i64 = 5
+
+pub struct TexData {
+    // 0xAABBGGRR, straight sRGB, alpha 255. What Texture2D.rgba8 wants.
+    albedo: Vec<u32>,
+    // Same packing: RGB is the tangent-space normal remapped to [0,1], A is the
+    // roughness multiplier the shader folds in as `uRough * (0.55 + 0.9 * a)`.
+    surf: Vec<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Hashing and noise
+// ---------------------------------------------------------------------------
+
+// A 32-bit avalanche mix. Each step masks back to 32 bits before the next
+// multiply, because the product of two unmasked u64s would trap.
+fn latticeHash(ix: i64, iy: i64, seed: i64): u64 {
+    var h: u64 = ((ix as u64) * 374761393 + (iy as u64) * 668265263 + (seed as u64) * 2654435761) & 0xffffffff
+    h = (h ^ (h >> 15)) & 0xffffffff
+    h = (h * 2246822519) & 0xffffffff
+    h = (h ^ (h >> 13)) & 0xffffffff
+    h = (h * 3266489917) & 0xffffffff
+    h = (h ^ (h >> 16)) & 0xffffffff
+    return h
+}
+
+// Uniform in [0,1). `ix`/`iy` must already be non-negative, every caller wraps.
+fn rand01(ix: i64, iy: i64, seed: i64): f64 {
+    return (latticeHash(ix, iy, seed) as f64) / 4294967296.0
+}
+
+fn wrapTo(i: i64, p: i64): i64 {
+    let m = i % p
+    if m < 0 {
+        return m + p
+    }
+    return m
+}
+
+fn wrapIdx(i: i64): i64 {
+    return wrapTo(i, TEX_SIZE)
+}
+
+fn frac(x: f64): f64 {
+    return x - Math.floor(x)
+}
+
+// Shortest signed difference between two uv coordinates on a wrapping tile.
+fn wrapDelta(a: f64, b: f64): f64 {
+    var d = a - b
+    if d > 0.5 {
+        d = d - 1.0
+    }
+    if d < -0.5 {
+        d = d + 1.0
+    }
+    return d
+}
+
+fn smoothT(t: f64): f64 {
+    return t * t * (3.0 - 2.0 * t)
+}
+
+// Radius multiplier that turns a disc into a chipped outline. One harmonic is
+// not enough, a single lobe term makes every stone the same rounded triangle,
+// which the eye picks out of a gravel bed instantly.
+fn lobeRadius(ang: f64, phase: f64): f64 {
+    return 0.87 + 0.13 * (Math.sin(ang * 3.0 + phase) * 0.55 + Math.sin(ang * 5.0 + phase * 2.3) * 0.30 + Math.sin(ang * 8.0 + phase * 0.7) * 0.15)
+}
+
+// `edge1 < edge0` is the normal case here, not a degenerate one: every scattered
+// feature fades *out* with distance, so it asks for smoothstep(outer, inner, d).
+// The general form handles that; only equal edges need a special case.
+fn smoothstepF(edge0: f64, edge1: f64, x: f64): f64 {
+    if edge1 == edge0 {
+        if x < edge0 {
+            return 0.0
+        }
+        return 1.0
+    }
+    let t = Math.clampF64((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return smoothT(t)
+}
+
+// Zero-mean luminance jitter at the scale a single texel covers, and at the
+// scale two of them do.
+//
+// The road texture is *magnified* right under the nose of the car, so anything
+// built only out of smooth noise turns into a wash exactly where the eye spends
+// most of its time. A bilinear `valueNoise` cannot supply this: its finest
+// usable octave is a whole lattice cell wide, and the interpolation flattens
+// whatever is below that. Hashing the texel coordinate directly is the only
+// source of genuine per-texel contrast.
+//
+// The 2 px term is quantised by integer division rather than a second lattice,
+// which keeps it exactly periodic: 256 splits into 128 whole blocks, so the
+// block at x=255 and the one at x=0 are neighbours, not the same block.
+fn grainOf(x: i64, y: i64, seed: i64, amp1: f64, amp2: f64): f64 {
+    let g1 = rand01(x, y, seed)
+    let g2 = rand01(x / 2, y / 2, seed + 17)
+    return (g1 - 0.5) * amp1 + (g2 - 0.5) * amp2
+}
+
+// Sparse hard-edged specks: the fleck of quartz catching a headlight and the
+// bit of charcoal next to it. Deliberately a step and not a ramp: a graded
+// speck blurs into the grain around it and stops reading as a separate object,
+// which is the whole reason it is here. Nearly zero mean, so it adds variance
+// without shifting the tone of the material.
+fn fleckOf(x: i64, y: i64, seed: i64): f64 {
+    let s = rand01(x, y, seed)
+    if s > 0.966 {
+        return 0.10 + rand01(x, y, seed + 91) * 0.13
+    }
+    if s < 0.028 {
+        return -(0.08 + rand01(x, y, seed + 92) * 0.10)
+    }
+    return 0.0
+}
+
+// Bilinear value noise on a lattice that wraps at `px` cells across u and `py`
+// down v. Separate periods are what make anisotropic detail possible, brushed
+// steel is the same noise with a low u period and a high v one.
+fn valueNoise(u: f64, v: f64, px: i64, py: i64, seed: i64): f64 {
+    let fx = u * (px as f64)
+    let fy = v * (py as f64)
+    let ix = Math.floor(fx) as i64
+    let iy = Math.floor(fy) as i64
+    let tx = smoothT(fx - (ix as f64))
+    let ty = smoothT(fy - (iy as f64))
+    let x0 = wrapTo(ix, px)
+    let x1 = wrapTo(ix + 1, px)
+    let y0 = wrapTo(iy, py)
+    let y1 = wrapTo(iy + 1, py)
+    let a = rand01(x0, y0, seed)
+    let b = rand01(x1, y0, seed)
+    let c = rand01(x0, y1, seed)
+    let d = rand01(x1, y1, seed)
+    let top = a + (b - a) * tx
+    let bot = c + (d - c) * tx
+    return top + (bot - top) * ty
+}
+
+// Octaves at doubling frequency, normalised to roughly [0,1]. Each octave wraps
+// on its own period, so the sum wraps too.
+fn fbm(u: f64, v: f64, px: i64, py: i64, oct: i64, seed: i64): f64 {
+    var sum = 0.0
+    var norm = 0.0
+    var amp = 1.0
+    var qx = px
+    var qy = py
+    for o in 0..oct {
+        sum = sum + valueNoise(u, v, qx, qy, seed + o * 7919) * amp
+        norm = norm + amp
+        amp = amp * 0.5
+        qx = qx * 2
+        qy = qy * 2
+    }
+    return sum / norm
+}
+
+// ---------------------------------------------------------------------------
+// The scratch field every material is painted into
+// ---------------------------------------------------------------------------
+
+// Height plus linear albedo plus roughness, one entry per texel. Keeping height
+// as its own channel is the whole point: the normal map is a derivative of it
+// taken after all the stamping is done, so a stone dropped on top of the dirt
+// gets a correct normal without anyone recomputing anything.
+struct Field {
+    h: Vec<f64>,
+    r: Vec<f64>,
+    g: Vec<f64>,
+    b: Vec<f64>,
+    a: Vec<f64>,
+}
+
+fn newField(): Field {
+    let n = TEX_SIZE * TEX_SIZE
+    return Field {
+        h: Vec.filled(n, 0.0),
+        r: Vec.filled(n, 0.5),
+        g: Vec.filled(n, 0.5),
+        b: Vec.filled(n, 0.5),
+        a: Vec.filled(n, 0.5),
+    }
+}
+
+fn byteOf(x: f64): u32 {
+    return (Math.clampF64(x, 0.0, 1.0) * 255.0 + 0.5) as u32
+}
+
+fn packRgba(r: f64, g: f64, b: f64, a: f64): u32 {
+    return byteOf(r) | (byteOf(g) << 8) | (byteOf(b) << 16) | (byteOf(a) << 24)
+}
+
+// Central differences on the wrapped height field. `gradScale` is per material:
+// a trowelled slab and a burlap sack carry the same height range but nothing
+// like the same slope, and the difference between them is entirely here.
+fn packField(f: &Field, gradScale: f64): TexData {
+    let n = TEX_SIZE * TEX_SIZE
+    var albedo: Vec<u32> = Vec.filled(n, 0)
+    var surf: Vec<u32> = Vec.filled(n, 0)
+    for y in 0..TEX_SIZE {
+        let ym = wrapIdx(y - 1) * TEX_SIZE
+        let yp = wrapIdx(y + 1) * TEX_SIZE
+        let row = y * TEX_SIZE
+        for x in 0..TEX_SIZE {
+            let i = row + x
+            albedo[i] = packRgba(f.r[i], f.g[i], f.b[i], 1.0)
+            let xm = wrapIdx(x - 1)
+            let xp = wrapIdx(x + 1)
+            let dhdx = (f.h[row + xp] - f.h[row + xm]) * 0.5 * gradScale
+            let dhdy = (f.h[yp + x] - f.h[ym + x]) * 0.5 * gradScale
+            let nx = -dhdx
+            let ny = -dhdy
+            let inv = 1.0 / Math.sqrt(nx * nx + ny * ny + 1.0)
+            surf[i] = packRgba(nx * inv * 0.5 + 0.5, ny * inv * 0.5 + 0.5, inv * 0.5 + 0.5, f.a[i])
+        }
+    }
+    return TexData {
+        albedo: albedo, surf: surf
+    }
+}
+
+// Blend a colour, a height offset and a roughness into one texel with weight
+// `w`. Every scattered feature goes through this, so wrapping happens in one
+// place instead of at eight call sites.
+fn stamp(f: &mut Field, px: i64, py: i64, w: f64, r: f64, g: f64, b: f64, dh: f64, rough: f64) {
+    if w <= 0.0 {
+        return
+    }
+    let t = Math.clampF64(w, 0.0, 1.0)
+    let i = wrapIdx(py) * TEX_SIZE + wrapIdx(px)
+    f.r[i] = f.r[i] + (r - f.r[i]) * t
+    f.g[i] = f.g[i] + (g - f.g[i]) * t
+    f.b[i] = f.b[i] + (b - f.b[i]) * t
+    f.a[i] = f.a[i] + (rough - f.a[i]) * t
+    f.h[i] = f.h[i] + dh * t
+}
+
+// ---------------------------------------------------------------------------
+// 0, asphalt
+// ---------------------------------------------------------------------------
+
+// The road. It is under the camera for the entire race and it is read at a
+// grazing angle at 70 m/s, which sets every choice below.
+//
+// Three passes, in this order for a reason:
+//
+//   1. Binder. Dark, faintly blue-grey, near black in linear terms. It is night
+//      and the only light is neon and headlights; a mid-grey road washes out the
+//      reflections and the whole look goes with it.
+//   2. Aggregate. Chips of stone lighter and rougher than the binder holding
+//      them. Scattered noise alone reads as static under motion, discrete
+//      objects do not.
+//   3. Wet. Runs last so a puddle covers the aggregate rather than the other way
+//      round, which is what water does.
+fn makeAsphalt(): TexData {
+    var f = newField()
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            let binder = fbm(u, v, 24, 24, 3, 7101)
+            let grain = grainOf(x, y, 7102, 0.030, 0.018)
+            let fleck = fleckOf(x, y, 7103) * 0.10
+            let lum = 0.064 + (binder - 0.5) * 0.016 + grain + fleck
+            // Bitumen is not neutral grey, it carries a trace of blue that the
+            // warm sodium fills in the scene lean against.
+            f.r[i] = lum * 0.97
+            f.g[i] = lum
+            f.b[i] = lum * 1.07
+            f.h[i] = binder * 0.18 + grain * 0.8
+            f.a[i] = 0.80 + (binder - 0.5) * 0.06
+        }
+    }
+    // Aggregate. Positions come off the same integer lattice as everything else
+    // and land in the tile through `stamp`, so a chip that runs off the right
+    // edge continues onto the left.
+    for c in 0..460 {
+        let cxf = rand01(c, 0, 7201) * (TEX_SIZE as f64)
+        let cyf = rand01(c, 1, 7201) * (TEX_SIZE as f64)
+        let rad = 1.0 + rand01(c, 2, 7201) * 2.0
+        // Per chip, not per texel: a bed of stones that all share one grey reads
+        // as a pattern, and the eye finds a pattern in a road instantly.
+        let tone = 0.090 + rand01(c, 3, 7201) * 0.070
+        let ir = Math.floor(rad) as i64 + 2
+        let cix = Math.floor(cxf) as i64
+        let ciy = Math.floor(cyf) as i64
+        for dy in -ir..(ir + 1) {
+            for dx in -ir..(ir + 1) {
+                let ddx = (cix as f64) + (dx as f64) + 0.5 - cxf
+                let ddy = (ciy as f64) + (dy as f64) + 0.5 - cyf
+                let d = Math.sqrt(ddx * ddx + ddy * ddy)
+                let ang = Math.atan2(ddy, ddx)
+                let rr = rad * lobeRadius(ang, (c as f64) * 1.31)
+                let w = smoothstepF(rr, rr - 0.9, d)
+                if w <= 0.0 {
+                    continue
+                }
+                let n = rand01(wrapIdx(cix + dx), wrapIdx(ciy + dy), 7202)
+                let l = tone + (n - 0.5) * 0.022
+                // Rougher than the binder around it: the stone is exposed and
+                // scoured, the bitumen between the stones is polished by tyres.
+                stamp(f, cix + dx, ciy + dy, w, l * 0.98, l, l * 1.04, 0.34 * w, 0.92)
+            }
+        }
+    }
+    // Standing water. This is what puts the neon on the road: a low roughness
+    // makes the specular lobe tight enough that a sign fifty metres away streaks
+    // toward the camera instead of smearing into a glow. The period is 3 across
+    // the tile, so a patch is metres wide in world space; per-texel wetness
+    // would just sparkle.
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            let damp = fbm(u, v, 3, 3, 2, 7301)
+            let pool = smoothstepF(0.50, 0.68, damp)
+            if pool <= 0.0 {
+                continue
+            }
+            f.a[i] = f.a[i] + (0.12 - f.a[i]) * pool
+            // Water darkens what it covers slightly and no more. Most of the
+            // change belongs in roughness; pushing albedo here turns the patches
+            // into visible blobs in daylight-free scenes.
+            let k = 1.0 - pool * 0.12
+            f.r[i] = f.r[i] * k
+            f.g[i] = f.g[i] * k
+            f.b[i] = f.b[i] * k
+            // Water fills, it does not mound. Flattening the height under a pool
+            // keeps the aggregate from poking through the reflection.
+            f.h[i] = f.h[i] * (1.0 - pool * 0.55)
+        }
+    }
+    // Deliberately weak. The road is nearly flat and it is viewed almost edge
+    // on, where a strong normal map stops reading as texture and starts reading
+    // as shimmering noise crawling up the screen.
+    return packField(f, 0.45)
+}
+
+// ---------------------------------------------------------------------------
+// 1, concrete
+// ---------------------------------------------------------------------------
+
+// Barrier walls, tunnel liner, the bases of the buildings. Almost all of it is
+// seen close and vertical, so the staining runs down v: gravity is the one cue
+// that tells the eye a wall is a wall and not a floor turned on its side.
+fn makeConcrete(): TexData {
+    var f = newField()
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            // A high u period against a low v period stretches every feature
+            // into a vertical run, which is what water leaving a wall does.
+            let streak = fbm(u, v, 16, 3, 3, 7401)
+            let pour = fbm(u, v, 4, 4, 2, 7402)
+            let fine = fbm(u, v, 40, 40, 2, 7403)
+            let grain = grainOf(x, y, 7404, 0.045, 0.026)
+            let lum = 0.190 + (streak - 0.5) * 0.050 + (pour - 0.5) * 0.045 + (fine - 0.5) * 0.020 + grain
+            // Cement carries a little warmth. Neutral concrete under neon goes
+            // blue and the whole scene loses its one non-saturated surface.
+            f.r[i] = lum * 1.02
+            f.g[i] = lum
+            f.b[i] = lum * 0.95
+            f.h[i] = fine * 0.30 + grain * 0.9 + pour * 0.12
+            // Damp streaks are marginally smoother than dry pour, but concrete
+            // never gets glossy: the spread stays narrow on purpose.
+            f.a[i] = 0.84 + (fine - 0.5) * 0.07 - (streak - 0.5) * 0.06
+        }
+    }
+    // Form ties: the plugged holes left by the bolts that held the shuttering.
+    // A grid would be more honest and much worse, the repeat becomes obvious the
+    // moment two barrier segments sit end to end.
+    for t in 0..18 {
+        let cxf = rand01(t, 0, 7501) * (TEX_SIZE as f64)
+        let cyf = rand01(t, 1, 7501) * (TEX_SIZE as f64)
+        let rad = 2.0 + rand01(t, 2, 7501) * 1.6
+        let ir = Math.floor(rad) as i64 + 3
+        let cix = Math.floor(cxf) as i64
+        let ciy = Math.floor(cyf) as i64
+        for dy in -ir..(ir + 1) {
+            for dx in -ir..(ir + 1) {
+                let ddx = (cix as f64) + (dx as f64) + 0.5 - cxf
+                let ddy = (ciy as f64) + (dy as f64) + 0.5 - cyf
+                let d = Math.sqrt(ddx * ddx + ddy * ddy)
+                let ang = Math.atan2(ddy, ddx)
+                let rr = rad * lobeRadius(ang, (t as f64) * 2.1)
+                let w = smoothstepF(rr, rr - 1.4, d)
+                if w <= 0.0 {
+                    continue
+                }
+                let n = rand01(wrapIdx(cix + dx), wrapIdx(ciy + dy), 7502)
+                let l = 0.150 + n * 0.035
+                stamp(f, cix + dx, ciy + dy, w * 0.85, l * 1.02, l, l * 0.96, -0.40 * w, 0.90)
+            }
+        }
+    }
+    // Hairline cracks. A random walk rather than a straight line: concrete
+    // cracks follow the aggregate and a ruled line reads as a scratch on the
+    // lens. The walk is allowed to leave the tile, `stamp` folds it back, which
+    // is what makes a crack cross the seam instead of stopping at it.
+    for c in 0..4 {
+        var wx = rand01(c, 0, 7601) * (TEX_SIZE as f64)
+        var wy = rand01(c, 1, 7601) * (TEX_SIZE as f64)
+        var ang = rand01(c, 2, 7601) * 6.283185307179586
+        for s in 0..110 {
+            ang = ang + (rand01(c, s + 3, 7602) - 0.5) * 0.55
+            wx = wx + Math.cos(ang)
+            wy = wy + Math.sin(ang)
+            let ix = Math.floor(wx) as i64
+            let iy = Math.floor(wy) as i64
+            let l = 0.115 + rand01(s, c, 7603) * 0.030
+            stamp(f, ix, iy, 0.70, l * 1.02, l, l * 0.96, -0.55, 0.94)
+            // A one-texel core with a faint shoulder. A bare single texel
+            // aliases into a dotted line as soon as the wall is off-axis.
+            stamp(f, ix + 1, iy, 0.22, l * 1.02, l, l * 0.96, -0.16, 0.90)
+            stamp(f, ix, iy + 1, 0.22, l * 1.02, l, l * 0.96, -0.16, 0.90)
+        }
+    }
+    return packField(f, 1.2)
+}
+
+// ---------------------------------------------------------------------------
+// 2, tread plate
+// ---------------------------------------------------------------------------
+
+// Diamond plate: the service catwalks over the road, the loading ramps, the
+// grating on the pit-lane floor. Lozenges on a 32 px cell, alternating direction
+// row by row, each comfortably inside its own cell, at 40 degrees the
+// half-diagonal is under 12 px, so nothing crosses a cell boundary and the wrap
+// is free.
+fn makeTread(): TexData {
+    var f = newField()
+    let cell = 32
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            let brush = fbm(u, v, 8, 120, 2, 2301)
+            let speck = rand01(x, y, 2302)
+            var lum = 0.44 + (brush - 0.5) * 0.07 + (speck - 0.5) * 0.035
+            var h = brush * 0.15
+            var rough = 0.42
+
+            let cx = x / cell
+            let cy = y / cell
+            let lx = ((x % cell) as f64) - ((cell as f64) * 0.5) + 0.5
+            let ly = ((y % cell) as f64) - ((cell as f64) * 0.5) + 0.5
+            let ang = if (cx + cy) % 2 == 0 {
+                0.70
+            } else {
+                -0.70
+            }
+            let ca = Math.cos(ang)
+            let sa = Math.sin(ang)
+            let rx = lx * ca + ly * sa
+            let ry = -lx * sa + ly * ca
+            // A rounded slab: flat on top, chamfered on all four sides, which is
+            // what makes the highlight run along the lozenge rather than sit on it.
+            let ex = smoothstepF(11.0, 8.0, Math.abs(rx))
+            let ey = smoothstepF(4.4, 2.4, Math.abs(ry))
+            let raise = ex * ey
+            if raise > 0.0 {
+                lum = lum + raise * 0.14
+                h = h + raise * 1.0
+                rough = rough - raise * 0.12
+            }
+            f.r[i] = lum * 0.99
+            f.g[i] = lum
+            f.b[i] = lum * 1.03
+            f.h[i] = h
+            f.a[i] = rough
+        }
+    }
+    return packField(f, 1.6)
+}
+
+// ---------------------------------------------------------------------------
+// 3, steel
+// ---------------------------------------------------------------------------
+
+// Gantries, guard rail, the frames the signs hang off. Brushed and chipped
+// rather than clean: the track furniture has been hit.
+fn makeSteel(): TexData {
+    var f = newField()
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            // Anisotropy for free: a low u period and a high v period stretches
+            // every feature into a streak along u, which is what a wire brush
+            // leaves and what a symmetric noise can never fake.
+            let brush = fbm(u, v, 6, 180, 2, 5101)
+            let fineBrush = valueNoise(u, v, 14, 512, 5102)
+            let broad = fbm(u, v, 3, 3, 2, 5103)
+            let lum = 0.56 + (brush - 0.5) * 0.055 + (fineBrush - 0.5) * 0.035 + (broad - 0.5) * 0.05
+            f.r[i] = lum * 0.99
+            f.g[i] = lum
+            f.b[i] = lum * 1.02
+            f.h[i] = brush * 0.25 + fineBrush * 0.30
+            f.a[i] = 0.25 + (brush - 0.5) * 0.06
+        }
+    }
+    // Chips where the paint has come off: an irregular blob, darker and much
+    // rougher, sunk by the thickness of the coat.
+    for c in 0..14 {
+        let cxf = rand01(c, 0, 5201) * (TEX_SIZE as f64)
+        let cyf = rand01(c, 1, 5201) * (TEX_SIZE as f64)
+        let rad = 2.5 + rand01(c, 2, 5201) * 5.5
+        let ir = Math.floor(rad) as i64 + 3
+        let cix = Math.floor(cxf) as i64
+        let ciy = Math.floor(cyf) as i64
+        for dy in -ir..(ir + 1) {
+            for dx in -ir..(ir + 1) {
+                let ddx = (cix as f64) + (dx as f64) + 0.5 - cxf
+                let ddy = (ciy as f64) + (dy as f64) + 0.5 - cyf
+                let d = Math.sqrt(ddx * ddx + ddy * ddy)
+                let ang = Math.atan2(ddy, ddx)
+                let rr = rad * lobeRadius(ang, (c as f64) * 1.7)
+                let w = smoothstepF(rr, rr - 1.2, d)
+                if w <= 0.0 {
+                    continue
+                }
+                let n = rand01(wrapIdx(cix + dx), wrapIdx(ciy + dy), 5202)
+                // Bare steel under a chip is cool and dark, not brown, rust is
+                // a different material and it has its own texture.
+                let l = 0.33 + n * 0.12
+                stamp(f, cix + dx, ciy + dy, w, l * 0.97, l * 0.99, l * 1.02, -0.35 * w, 0.86)
+            }
+        }
+    }
+    return packField(f, 1.1)
+}
+
+// ---------------------------------------------------------------------------
+// 4, paint
+// ---------------------------------------------------------------------------
+
+// Car bodywork and the flat faces of the roadside signage. The per-material
+// colour does the identity, this only supplies the way a sprayed coat breaks up
+// a moving highlight.
+fn makePaint(): TexData {
+    var f = newField()
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            // Orange peel: the shallow dimpling a spray gun leaves. It is almost
+            // invisible in albedo and the entire reason the highlight breaks up.
+            let peel = fbm(u, v, 36, 36, 2, 9101)
+            let broad = valueNoise(u, v, 5, 5, 9102)
+            let speck = rand01(x, y, 9103)
+            let lum = 0.60 + (peel - 0.5) * 0.045 + (broad - 0.5) * 0.030 + (speck - 0.5) * 0.030
+            f.r[i] = lum
+            f.g[i] = lum * 0.998
+            f.b[i] = lum * 0.99
+            f.h[i] = peel * 0.6 + broad * 0.2
+            f.a[i] = 0.45 + (peel - 0.5) * 0.08
+        }
+    }
+    return packField(f, 0.8)
+}
+
+// ---------------------------------------------------------------------------
+// 5, glass
+// ---------------------------------------------------------------------------
+
+// Windscreens, shopfronts, the faces of the lit boxes along the route.
+fn makeGlass(): TexData {
+    var f = newField()
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let i = y * TEX_SIZE + x
+            let smudge = fbm(u, v, 3, 3, 2, 9201)
+            let lum = 0.56 + (smudge - 0.5) * 0.035
+            f.r[i] = lum
+            f.g[i] = lum * 1.002
+            f.b[i] = lum * 1.006
+            f.h[i] = smudge * 0.25
+            // Where a fingerprint sits the surface is measurably less glossy;
+            // everywhere else tempered glass is as smooth as this engine goes.
+            f.a[i] = 0.03 + smudge * 0.05
+        }
+    }
+    // Dust: single texels, occasionally a pair, scattered thinly.
+    for d in 0..90 {
+        let px = (rand01(d, 0, 9301) * (TEX_SIZE as f64)) as i64
+        let py = (rand01(d, 1, 9301) * (TEX_SIZE as f64)) as i64
+        let dark = rand01(d, 2, 9301)
+        let l = 0.40 + dark * 0.30
+        stamp(f, px, py, 0.7, l, l, l, 0.15, 0.55)
+        stamp(f, px + 1, py, 0.25, l, l, l, 0.06, 0.30)
+        stamp(f, px, py + 1, 0.25, l, l, l, 0.06, 0.30)
+    }
+    return packField(f, 0.35)
+}
+
+// ---------------------------------------------------------------------------
+
+pub fn makeTextures(): Vec<TexData> {
+    var out: Vec<TexData> = Vec.new()
+    out.push(makeAsphalt())
+    out.push(makeConcrete())
+    out.push(makeTread())
+    out.push(makeSteel())
+    out.push(makePaint())
+    out.push(makeGlass())
+    return out
+}

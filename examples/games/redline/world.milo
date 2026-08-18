@@ -1,0 +1,744 @@
+// Everything that is not a car: the road surface, what edges it, what lights it,
+// and the city it runs through.
+//
+// It is all built once, on the CPU, into nine meshes split by material. Nine
+// draw calls put the entire circuit on screen, and the split is by material
+// rather than by object because that is the only thing the GPU cares about: a
+// barrier and a building are the same draw if they are both concrete.
+//
+// **The neon is one bucket.** Its material has a near-black albedo and a white
+// emissive, and the shader multiplies emissive by the vertex tint, so a single
+// draw paints every tube, every window, every pole head and every gantry strip
+// in whatever colour and at whatever brightness the geometry asked for. Adding a
+// new glowing thing anywhere in this file costs nothing.
+//
+// **The lights are a pool, not a list.** There are about a hundred places in the
+// circuit that should cast real light and the shader takes sixteen. So every
+// candidate goes into `lightPool` at build time and the frame loop picks the
+// nearest few to the camera. Picking at build time instead would mean the tube
+// you are driving under is dark because a tube on the far side of the lap got
+// there first.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Mesh
+}
+from "./mesh" import {
+    Builder, builder
+}
+from "./render" import {
+    Material, material, sceneAttrs
+}
+from "./rng" import {
+    Rand, rand
+}
+from "./textures" import {
+    TEX_ASPHALT, TEX_CONCRETE, TEX_GLASS, TEX_PAINT, TEX_STEEL
+}
+from "./track" import {
+    HALF_WIDTH, Track, WALL
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub let B_ROAD: i64 = 0
+
+pub let B_MARK: i64 = 1
+
+pub let B_CURB: i64 = 2
+
+pub let B_WALL: i64 = 3
+
+pub let B_STEEL: i64 = 4
+
+pub let B_NEON: i64 = 5
+
+pub let B_CITY: i64 = 6
+
+pub let B_GLASS: i64 = 7
+
+pub let B_GROUND: i64 = 8
+
+pub let BUCKETS: i64 = 9
+
+// Height of the barrier wall, and where its neon cap sits.
+let WALL_H: f64 = 1.45
+
+// Seven floats per light: position, colour, range. Same packing the renderer
+// wants, so the frame loop can copy a slice of this straight across.
+let LIGHT_FLOATS: i64 = 7
+
+pub struct World {
+    meshes: Vec<Mesh>,
+    mats: Vec<Material>,
+    // Every light the circuit could cast, in build order. Far more than the
+    // shader can take; see `nearestLights`.
+    lightPool: Vec<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// The road
+// ---------------------------------------------------------------------------
+
+// The racing surface. Built with explicit uv rather than through `quad` because
+// the v coordinate has to be the distance along the lap: `quad` restarts uv at
+// zero for every primitive, which on a road means the asphalt pattern resets
+// every 2.5 m and the whole track reads as a ladder.
+fn addRoad(b: &mut Builder, track: &Track) {
+    let up = v3(0.0, 1.0, 0.0)
+    let n = track.n
+    let step = track.length / (n as f64)
+    // One texture repeat every six metres. Larger and the aggregate smears at
+    // the grazing angle the camera actually sees the road at.
+    b.setUvScale(1.0 / 6.0)
+    b.setTint(1.0, 1.0, 1.0)
+    b.setAo(1.0)
+    let w = HALF_WIDTH
+    for i in 0..n {
+        let s0 = (i as f64) * step
+        let s1 = ((i + 1) as f64) * step
+        let a = track.pointAt(s0, -w)
+        let c = track.pointAt(s0, w)
+        let d = track.pointAt(s1, w)
+        let e = track.pointAt(s1, -w)
+        b.push(a, up, 0.0, s0)
+        b.push(c, up, 2.0 * w, s0)
+        b.push(d, up, 2.0 * w, s1)
+        b.push(a, up, 0.0, s0)
+        b.push(d, up, 2.0 * w, s1)
+        b.push(e, up, 0.0, s1)
+    }
+}
+
+// Two triangles with an explicit shading normal, and a winding that can be
+// reversed.
+//
+// `flip` is not a detail. Every surface on this circuit is built twice, once per
+// side, from the same corner order, and mirroring a polygon reverses its
+// winding: the order that faces the road on the left barrier faces away from it
+// on the right. Back faces are culled in both the depth and the scene pass, so
+// the symptom is not a dark wall, it is no wall at all on one side of the track.
+fn pushQuadN(b: &mut Builder, p0: &Vec3, p1: &Vec3, p2: &Vec3, p3: &Vec3, nrm: &Vec3, u0: f64, v0: f64, u1: f64, v1: f64, flip: bool) {
+    if flip {
+        b.push(p0, nrm, u0, v0)
+        b.push(p3, nrm, u0, v1)
+        b.push(p2, nrm, u1, v1)
+        b.push(p0, nrm, u0, v0)
+        b.push(p2, nrm, u1, v1)
+        b.push(p1, nrm, u1, v0)
+        return
+    }
+    b.push(p0, nrm, u0, v0)
+    b.push(p1, nrm, u1, v0)
+    b.push(p2, nrm, u1, v1)
+    b.push(p0, nrm, u0, v0)
+    b.push(p2, nrm, u1, v1)
+    b.push(p3, nrm, u0, v1)
+}
+
+// A painted stripe running along the road at a fixed offset, optionally dashed.
+// Everything painted on this circuit goes through here.
+fn addStripe(b: &mut Builder, track: &Track, off: f64, halfWidth: f64, dashOn: f64, dashOff: f64, r: f64, g: f64, bl: f64) {
+    let up = v3(0.0, 1.0, 0.0)
+    let n = track.n
+    let step = track.length / (n as f64)
+    b.setUvScale(0.5)
+    b.setTint(r, g, bl)
+    b.setAo(1.0)
+    // Paint sits a centimetre and a half proud of the asphalt. Coplanar with it
+    // and the depth buffer picks a winner per pixel, which is the shimmering
+    // mess usually called z-fighting.
+    let y = 0.015
+    for i in 0..n {
+        let s0 = (i as f64) * step
+        if dashOff > 0.0 {
+            let phase = s0 % (dashOn + dashOff)
+            if phase > dashOn {
+                continue
+            }
+        }
+        let s1 = s0 + step
+        let a = track.pointAt(s0, off - halfWidth)
+        let c = track.pointAt(s0, off + halfWidth)
+        let d = track.pointAt(s1, off + halfWidth)
+        let e = track.pointAt(s1, off - halfWidth)
+        b.push(v3(a.x, y, a.z), up, 0.0, 0.0)
+        b.push(v3(c.x, y, c.z), up, 1.0, 0.0)
+        b.push(v3(d.x, y, d.z), up, 1.0, 1.0)
+        b.push(v3(a.x, y, a.z), up, 0.0, 0.0)
+        b.push(v3(d.x, y, d.z), up, 1.0, 1.0)
+        b.push(v3(e.x, y, e.z), up, 0.0, 1.0)
+    }
+}
+
+fn addMarkings(b: &mut Builder, track: &Track) {
+    // Solid edge lines, then two dashed lane dividers splitting the road in
+    // three. Three lanes is what makes a ten-car pack legible: cars queue up in
+    // lanes rather than smearing across twenty-two metres of tarmac.
+    addStripe(b, track, -(HALF_WIDTH - 0.55), 0.14, 0.0, 0.0, 0.95, 0.95, 0.98)
+    addStripe(b, track, HALF_WIDTH - 0.55, 0.14, 0.0, 0.0, 0.95, 0.95, 0.98)
+    addStripe(b, track, -HALF_WIDTH / 3.0, 0.12, 4.0, 5.0, 0.90, 0.90, 0.95)
+    addStripe(b, track, HALF_WIDTH / 3.0, 0.12, 4.0, 5.0, 0.90, 0.90, 0.95)
+}
+
+// Rumble strips down both edges, alternating red and white every three metres.
+// They are the one piece of the circuit that tells you where the limit is
+// without a HUD element, and the alternation has to be in world distance rather
+// than per sample or the block length changes with the corner radius.
+fn addCurbs(b: &mut Builder, track: &Track) {
+    let up = v3(0.0, 1.0, 0.0)
+    let n = track.n
+    let step = track.length / (n as f64)
+    b.setUvScale(0.6)
+    b.setAo(0.85)
+    let h = 0.11
+    let width = 1.15
+    var side = -1.0
+    while side < 2.0 {
+        for i in 0..n {
+            let s0 = (i as f64) * step
+            let s1 = s0 + step
+            let band = ((s0 / 3.0) as i64) % 2
+            if band == 0 {
+                b.setTint(0.95, 0.14, 0.12)
+            } else {
+                b.setTint(0.94, 0.94, 0.96)
+            }
+            let inner = HALF_WIDTH * side
+            let outer = (HALF_WIDTH + width) * side
+            let a = track.pointAt(s0, inner)
+            let c = track.pointAt(s0, outer)
+            let d = track.pointAt(s1, outer)
+            let e = track.pointAt(s1, inner)
+            // Top face. Its corners run across the road, so it is the right-hand
+            // curb whose winding comes out inverted.
+            pushQuadN(b, v3(a.x, h, a.z), v3(c.x, h, c.z), v3(d.x, h, d.z), v3(e.x, h, e.z), up, 0.0, 0.0, 1.0, 1.0, side < 0.0)
+            // Inner face, so the strip has visible thickness from the road. Its
+            // corners run along the road, so it is the other side that flips.
+            let nrm = track.normalAt(s0).scale(-side)
+            pushQuadN(b, v3(a.x, 0.0, a.z), v3(e.x, 0.0, e.z), v3(e.x, h, e.z), v3(a.x, h, a.z), nrm, 0.0, 0.0, 1.0, 1.0, side > 0.0)
+        }
+        side = side + 2.0
+    }
+}
+
+// The barrier: a concrete wall with a neon cap running the whole lap.
+//
+// The cap is the single most important piece of geometry in the game for the
+// look. It is a continuous line of light that follows every corner, so the shape
+// of the road ahead is legible at night from half a lap away, and it is what
+// the wet asphalt reflects.
+fn addBarriers(wall: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
+    let n = track.n
+    let step = track.length / (n as f64)
+    let thick = 0.55
+    var side = -1.0
+    while side < 2.0 {
+        for i in 0..n {
+            let s0 = (i as f64) * step
+            let s1 = s0 + step
+            let inner = WALL * side
+            let outer = (WALL + thick) * side
+            let a = track.pointAt(s0, inner)
+            let c = track.pointAt(s1, inner)
+            let d = track.pointAt(s1, outer)
+            let e = track.pointAt(s0, outer)
+            // The face that gets hit and the face that is seen. It has to look
+            // back at the road, which is the normal opposite the side it is on.
+            let nrm = track.normalAt(s0).scale(-side)
+            let up = v3(0.0, 1.0, 0.0)
+
+            wall.setUvScale(0.35)
+            wall.setTint(0.62, 0.62, 0.70)
+            wall.setAo(0.9)
+            pushQuadN(wall, v3(a.x, 0.0, a.z), v3(c.x, 0.0, c.z), v3(c.x, WALL_H, c.z), v3(a.x, WALL_H, a.z), nrm, s0, 0.0, s1, WALL_H, side > 0.0)
+            pushQuadN(wall, v3(a.x, WALL_H, a.z), v3(c.x, WALL_H, c.z), v3(d.x, WALL_H, d.z), v3(e.x, WALL_H, e.z), up, s0, 0.0, s1, thick, side > 0.0)
+
+            // The neon. Colour drifts along the lap between cyan and magenta,
+            // out of phase on the two sides, so the two barriers are never the
+            // same colour at the same place and a glance tells you which side of
+            // the road you are looking at.
+            let phase = s0 * 0.0032 + (if side > 0.0 {
+                Math.pi()
+            } else {
+                0.0
+            }
+            )
+            let mix = 0.5 + 0.5 * Math.sin(phase)
+            // Cyan at one end, magenta at the other. What keeps a tube coloured
+            // rather than white is the RATIO between the channels, not the
+            // overall level: raise the dim channels to make it brighter and ACES
+            // rolls all three toward white together, which is how a neon scene
+            // ends up looking like a fluorescent one.
+            let r = 0.10 + 2.50 * mix
+            let g = 1.60 - 1.50 * mix
+            let bl = 2.40 - 1.10 * mix
+            neon.setTint(r, g, bl)
+            neon.setUvScale(1.0)
+            neon.setAo(1.0)
+            let nx = nrm.scale(0.06)
+            // Two lit bands on the inner face, not one tube along the top edge.
+            // A thin cap reads as a white wire at any distance and vanishes at
+            // the vanishing point; a broad panel is what makes the barrier a
+            // wall of light and gives the wet road something to reflect.
+            emitBand(neon, a, c, nx, nrm, 0.42, 0.96, side > 0.0)
+            emitBand(neon, a, c, nx, nrm, WALL_H + 0.02, WALL_H + 0.14, side > 0.0)
+
+            // A light every twelve metres or so along each barrier. Dense
+            // enough that the road under the cap is lit continuously once the
+            // frame loop picks the nearest ones.
+            if i % 5 == 0 {
+                let p = track.pointAt(s0, inner * 0.94)
+                pushLight(pool, v3(p.x, WALL_H + 0.35, p.z), r * 1.3, g * 1.3, bl * 1.3, 24.0)
+            }
+        }
+        side = side + 2.0
+    }
+}
+
+// One lit band on the inner face of the barrier, between two heights.
+fn emitBand(neon: &mut Builder, a: &Vec3, c: &Vec3, nx: &Vec3, nrm: &Vec3, y0: f64, y1: f64, flip: bool) {
+    pushQuadN(neon, v3(a.x + nx.x, y0, a.z + nx.z), v3(c.x + nx.x, y0, c.z + nx.z), v3(c.x + nx.x, y1, c.z + nx.z), v3(a.x + nx.x, y1, a.z + nx.z), nrm, 0.0, 0.0, 1.0, 1.0, flip)
+}
+
+fn pushLight(pool: &mut Vec<f64>, p: Vec3, r: f64, g: f64, b: f64, range: f64) {
+    pool.push(p.x)
+    pool.push(p.y)
+    pool.push(p.z)
+    pool.push(r)
+    pool.push(g)
+    pool.push(b)
+    pool.push(range)
+}
+
+// Lamp posts down both sides, and an arch over the road every so often. Both
+// exist to break the barrier's continuous line into a rhythm: a corridor of two
+// unbroken glowing rails has no sense of speed because nothing passes you.
+fn addFurniture(steel: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
+    // Lamp posts, alternating sides every 38 m.
+    var s = 0.0
+    var flip = false
+    while s < track.length {
+        let side = if flip {
+            1.0
+        } else {
+            -1.0
+        }
+        let base = track.pointAt(s, (WALL + 1.1) * side)
+        steel.setUvScale(1.2)
+        steel.setTint(0.34, 0.35, 0.42)
+        steel.setAo(0.8)
+        steel.resetXform()
+        steel.cylinder(v3(base.x, 0.0, base.z), 0.16, 7.2, 8, false)
+        // The head leans out over the road, which is what a street lamp does and
+        // what puts its light where the cars are.
+        let nrm = track.normalAt(s).scale(side)
+        let head = v3(base.x - nrm.x * 2.2, 7.2, base.z - nrm.z * 2.2)
+        steel.boxSpan(v3(Math.minF64(base.x, head.x) - 0.09, 7.0, Math.minF64(base.z, head.z) - 0.09), v3(Math.maxF64(base.x, head.x) + 0.09, 7.2, Math.maxF64(base.z, head.z) + 0.09))
+        neon.setTint(1.90, 1.00, 2.20)
+        neon.setUvScale(1.0)
+        neon.setAo(1.0)
+        neon.box(v3(head.x, 6.86, head.z), 0.42, 0.09, 0.42)
+        pushLight(pool, v3(head.x, 6.6, head.z), 3.4, 1.9, 4.0, 26.0)
+        s = s + 38.0
+        flip = !flip
+    }
+
+    // Arches. Wide enough to clear the barriers, tall enough to drive under
+    // without the camera clipping them.
+    var g = 130.0
+    while g < track.length {
+        let nrm = track.normalAt(g)
+        let l = track.pointAt(g, WALL + 1.6)
+        let r = track.pointAt(g, -(WALL + 1.6))
+        let top = 10.4
+        steel.setUvScale(0.8)
+        steel.setTint(0.26, 0.27, 0.34)
+        steel.setAo(0.85)
+        steel.resetXform()
+        steel.cylinder(v3(l.x, 0.0, l.z), 0.30, top, 8, false)
+        steel.cylinder(v3(r.x, 0.0, r.z), 0.30, top, 8, false)
+        // The cross beam, as a box spanning the two pillars. It is axis-aligned
+        // in the builder's frame, which is only correct because it is built from
+        // the two endpoints rather than from a centre and an extent.
+        steel.boxSpan(v3(Math.minF64(l.x, r.x) - 0.34, top, Math.minF64(l.z, r.z) - 0.34), v3(Math.maxF64(l.x, r.x) + 0.34, top + 1.5, Math.maxF64(l.z, r.z) + 0.34))
+        // Two tubes under the beam, hot, so the arch reads as a gate of light.
+        neon.setTint(2.40, 0.30, 1.60)
+        neon.boxSpan(v3(Math.minF64(l.x, r.x) - 0.30, top - 0.26, Math.minF64(l.z, r.z) - 0.30), v3(Math.maxF64(l.x, r.x) + 0.30, top - 0.10, Math.maxF64(l.z, r.z) + 0.30))
+        neon.setTint(0.35, 1.80, 2.40)
+        neon.boxSpan(v3(Math.minF64(l.x, r.x) - 0.24, top + 1.52, Math.minF64(l.z, r.z) - 0.24), v3(Math.maxF64(l.x, r.x) + 0.24, top + 1.66, Math.maxF64(l.z, r.z) + 0.24))
+        let mid = track.pointAt(g, 0.0)
+        pushLight(pool, v3(mid.x, top - 0.8, mid.z), 6.0, 1.4, 4.5, 34.0)
+        let _ = nrm
+        g = g + 205.0
+    }
+}
+
+// The start line: a chequered band across the road and a gantry over it.
+fn addStartLine(mark: &mut Builder, steel: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
+    let up = v3(0.0, 1.0, 0.0)
+    mark.setUvScale(0.5)
+    mark.setAo(1.0)
+    // Two rows of squares, offset, which is what makes a chequer read as a
+    // chequer rather than as a dashed line.
+    let squares = 22
+    var row = 0
+    while row < 2 {
+        let s0 = 2.0 + (row as f64) * 1.1
+        let s1 = s0 + 1.1
+        for k in 0..squares {
+            if (k + row) % 2 == 1 {
+                continue
+            }
+            let o0 = -HALF_WIDTH + (2.0 * HALF_WIDTH) * (k as f64) / (squares as f64)
+            let o1 = -HALF_WIDTH + (2.0 * HALF_WIDTH) * ((k + 1) as f64) / (squares as f64)
+            mark.setTint(0.96, 0.96, 0.98)
+            let a = track.pointAt(s0, o0)
+            let c = track.pointAt(s0, o1)
+            let d = track.pointAt(s1, o1)
+            let e = track.pointAt(s1, o0)
+            let y = 0.018
+            mark.push(v3(a.x, y, a.z), up, 0.0, 0.0)
+            mark.push(v3(c.x, y, c.z), up, 1.0, 0.0)
+            mark.push(v3(d.x, y, d.z), up, 1.0, 1.0)
+            mark.push(v3(a.x, y, a.z), up, 0.0, 0.0)
+            mark.push(v3(d.x, y, d.z), up, 1.0, 1.0)
+            mark.push(v3(e.x, y, e.z), up, 0.0, 1.0)
+        }
+        row = row + 1
+    }
+
+    // The gantry, taller and heavier than the plain arches so the start of the
+    // lap is somewhere you recognise at speed.
+    let l = track.pointAt(3.0, WALL + 2.2)
+    let r = track.pointAt(3.0, -(WALL + 2.2))
+    let top = 11.6
+    steel.setUvScale(0.7)
+    steel.setTint(0.22, 0.23, 0.29)
+    steel.setAo(0.85)
+    steel.resetXform()
+    steel.cylinder(v3(l.x, 0.0, l.z), 0.42, top, 10, false)
+    steel.cylinder(v3(r.x, 0.0, r.z), 0.42, top, 10, false)
+    let lo = v3(Math.minF64(l.x, r.x) - 0.5, top, Math.minF64(l.z, r.z) - 0.5)
+    let hi = v3(Math.maxF64(l.x, r.x) + 0.5, top + 2.2, Math.maxF64(l.z, r.z) + 0.5)
+    steel.boxSpan(lo, hi)
+    neon.setTint(2.50, 1.90, 0.35)
+    neon.boxSpan(v3(lo.x + 0.1, top - 0.22, lo.z + 0.1), v3(hi.x - 0.1, top - 0.04, hi.z - 0.1))
+    let mid = track.pointAt(3.0, 0.0)
+    pushLight(pool, v3(mid.x, top - 1.0, mid.z), 7.0, 5.0, 1.6, 38.0)
+}
+
+// ---------------------------------------------------------------------------
+// The city
+// ---------------------------------------------------------------------------
+
+// Buildings lining the circuit, with lit windows.
+//
+// They are placed off the track normal rather than on a grid, so the circuit
+// reads as a street closed for a race rather than as a ribbon dropped on a city.
+// Every candidate is then checked back against the whole track: the loop passes
+// near itself in two places, and a tower placed forty metres off one straight
+// can land squarely on another.
+fn addCity(city: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
+    var rg = rand(0x5eed1234)
+    var s = 0.0
+    while s < track.length {
+        var side = -1.0
+        while side < 2.0 {
+            if rg.f() < 0.22 {
+                side = side + 2.0
+                continue
+            }
+            let halfX = rg.range(7.0, 17.0)
+            let halfZ = rg.range(7.0, 17.0)
+            let height = rg.range(16.0, 120.0)
+            let off = (WALL + 4.0 + rg.range(2.0, 46.0) + Math.maxF64(halfX, halfZ)) * side
+            let c = track.pointAt(s + rg.jitter(9.0), off)
+
+            // Reject anything that lands on any part of the lap, not just this
+            // part. `locate` with a cold hint scans the whole table, which is
+            // exactly what is wanted here and costs nothing at build time.
+            let probe = track.locate(c.x, c.z, 0)
+            if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 3.0 {
+                side = side + 2.0
+                continue
+            }
+
+            city.setUvScale(0.22)
+            city.setTint(rg.range(0.30, 0.60), rg.range(0.30, 0.58), rg.range(0.38, 0.70))
+            city.setAo(0.75)
+            city.resetXform()
+            city.box(v3(c.x, height * 0.5, c.z), halfX, height * 0.5, halfZ)
+
+            addWindows(neon, c, halfX, halfZ, height, rg)
+
+            // A roof light on the taller ones, which is what gives the skyline
+            // its depth once they are too far away to show windows.
+            if height > 60.0 {
+                neon.setTint(1.8, 0.22, 0.22)
+                neon.setAo(1.0)
+                neon.box(v3(c.x, height + 0.6, c.z), 0.5, 0.5, 0.5)
+                pushLight(pool, v3(c.x, height + 1.2, c.z), 2.2, 0.3, 0.3, 30.0)
+            }
+            side = side + 2.0
+        }
+        s = s + 34.0
+    }
+}
+
+// A grid of lit windows on all four faces. Windows are emissive quads rather
+// than a texture because there is no window texture in this game: a lit window
+// has to actually glow, or the buildings go black the moment the bloom pass
+// stops finding anything bright in them.
+fn addWindows(neon: &mut Builder, c: &Vec3, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
+    let floors = Math.maxI64(3, (height / 4.2) as i64)
+    let e = 0.06
+    var face = 0
+    while face < 4 {
+        let alongX = face < 2
+        let dir = if face % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+        let span = if alongX {
+            halfX
+        } else {
+            halfZ
+        }
+        let depth = if alongX {
+            halfZ
+        } else {
+            halfX
+        }
+        let cols = Math.maxI64(2, (span / 2.6) as i64)
+        for fl in 0..floors {
+            let y = 3.0 + (fl as f64) * 4.2
+            if y > height - 2.0 {
+                continue
+            }
+            for col in 0..cols {
+                // A third of the building is asleep. A tower with every window
+                // lit reads as a light box, not as a building.
+                if rg.f() < 0.34 {
+                    continue
+                }
+                let t0 = -span + 2.0 * span * ((col as f64) + 0.28) / (cols as f64)
+                let t1 = -span + 2.0 * span * ((col as f64) + 0.72) / (cols as f64)
+                let warm = rg.f()
+                var r = 0.95
+                var g = 0.78
+                var b = 0.52
+                if warm > 0.72 {
+                    r = 0.30
+                    g = 0.92
+                    b = 1.20
+                } else if warm > 0.52 {
+                    r = 1.10
+                    g = 0.42
+                    b = 0.92
+                }
+                // A window is a lit room seen through glass, not a lamp. At the
+                // brightness a neon tube wants, a tower of them is a slab of
+                // white and the bloom pass eats the whole skyline.
+                let k = rg.range(0.35, 1.0)
+                neon.setTint(r * k, g * k, b * k)
+                neon.setUvScale(1.0)
+                neon.setAo(1.0)
+                let y0 = y
+                let y1 = y + 1.9
+                if alongX {
+                    let z = c.z + dir * (depth + e)
+                    let nrm = v3(0.0, 0.0, dir)
+                    neon.push(v3(c.x + t0, y0, z), nrm, 0.0, 0.0)
+                    neon.push(v3(c.x + t1, y0, z), nrm, 1.0, 0.0)
+                    neon.push(v3(c.x + t1, y1, z), nrm, 1.0, 1.0)
+                    neon.push(v3(c.x + t0, y0, z), nrm, 0.0, 0.0)
+                    neon.push(v3(c.x + t1, y1, z), nrm, 1.0, 1.0)
+                    neon.push(v3(c.x + t0, y1, z), nrm, 0.0, 1.0)
+                } else {
+                    let x = c.x + dir * (depth + e)
+                    let nrm = v3(dir, 0.0, 0.0)
+                    neon.push(v3(x, y0, c.z + t0), nrm, 0.0, 0.0)
+                    neon.push(v3(x, y0, c.z + t1), nrm, 1.0, 0.0)
+                    neon.push(v3(x, y1, c.z + t1), nrm, 1.0, 1.0)
+                    neon.push(v3(x, y0, c.z + t0), nrm, 0.0, 0.0)
+                    neon.push(v3(x, y1, c.z + t1), nrm, 1.0, 1.0)
+                    neon.push(v3(x, y1, c.z + t0), nrm, 0.0, 1.0)
+                }
+            }
+        }
+        face = face + 1
+    }
+}
+
+// The ground the whole circuit sits on. One quad, big enough that its edge is
+// never in frame, dark enough that it never competes with the road.
+fn addGround(b: &mut Builder, track: &Track) {
+    // Centred on the circuit rather than on the origin: the loop is not centred
+    // on the origin and a ground plane that is leaves a visible edge on one side.
+    var cx = 0.0
+    var cz = 0.0
+    for i in 0..track.n {
+        cx = cx + track.xs[i]
+        cz = cz + track.zs[i]
+    }
+    cx = cx / (track.n as f64)
+    cz = cz / (track.n as f64)
+    let r = 4200.0
+    let up = v3(0.0, 1.0, 0.0)
+    b.setUvScale(1.0 / 14.0)
+    b.setTint(0.12, 0.11, 0.17)
+    b.setAo(0.7)
+    let y = -0.05
+    b.push(v3(cx - r, y, cz - r), up, 0.0, 0.0)
+    b.push(v3(cx + r, y, cz - r), up, 2.0 * r, 0.0)
+    b.push(v3(cx + r, y, cz + r), up, 2.0 * r, 2.0 * r)
+    b.push(v3(cx - r, y, cz - r), up, 0.0, 0.0)
+    b.push(v3(cx + r, y, cz + r), up, 2.0 * r, 2.0 * r)
+    b.push(v3(cx - r, y, cz + r), up, 0.0, 2.0 * r)
+}
+
+// ---------------------------------------------------------------------------
+
+pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
+    var builders: Vec<Builder> = Vec.new()
+    for _i in 0..BUCKETS {
+        builders.push(builder())
+    }
+    var pool: Vec<f64> = Vec.new()
+
+    addRoad(builders[B_ROAD], track)
+    addMarkings(builders[B_MARK], track)
+    addCurbs(builders[B_CURB], track)
+    addBarriers(builders[B_WALL], builders[B_NEON], track, pool)
+    addFurniture(builders[B_STEEL], builders[B_NEON], track, pool)
+    addStartLine(builders[B_MARK], builders[B_STEEL], builders[B_NEON], track, pool)
+    addCity(builders[B_CITY], builders[B_NEON], track, pool)
+    addGround(builders[B_GROUND], track)
+
+    var meshes: Vec<Mesh> = Vec.new()
+    for i in 0..BUCKETS {
+        var m = Mesh.new(gl, sceneAttrs())
+        m.upload(builders[i].data.clone())
+        meshes.push(m)
+    }
+
+    var mats: Vec<Material> = Vec.new()
+
+    // Road. Dark, rough, and barely metallic: the wet look comes from the
+    // roughness variation baked into the surface map, not from metalness.
+    var road = material(TEX_ASPHALT, 0.62, 0.63, 0.70, 0.55, 0.02)
+    road.normalStrength = 0.7
+    // A second copy of the aggregate at a quarter the size. The road runs from
+    // under the bumper to four hundred metres away and one texture scale cannot
+    // be right for both.
+    road.detail = 4.0
+    mats.push(road)
+
+    var mark = material(TEX_ASPHALT, 0.90, 0.90, 0.94, 0.62, 0.0)
+    mark.normalStrength = 0.4
+    mats.push(mark)
+
+    var curb = material(TEX_CONCRETE, 0.90, 0.90, 0.94, 0.70, 0.0)
+    curb.normalStrength = 0.9
+    // Self-lit, faintly. A red rumble strip lit only by moonlight is black, and
+    // the edge of the road is the one thing a driver has to be able to see at
+    // every point on the lap. The shader multiplies emissive by the vertex tint,
+    // so the red blocks glow red and the white ones white out of one material.
+    curb.emissive = v3(0.55, 0.55, 0.55)
+    mats.push(curb)
+
+    var wall = material(TEX_CONCRETE, 0.55, 0.56, 0.64, 0.80, 0.0)
+    wall.normalStrength = 1.1
+    mats.push(wall)
+
+    var steel = material(TEX_STEEL, 0.42, 0.44, 0.52, 0.38, 0.85)
+    steel.normalStrength = 1.2
+    mats.push(steel)
+
+    // The one emissive bucket. Black albedo so it contributes nothing to the
+    // lit term, white emissive so the vertex tint is the whole colour.
+    var neon = material(TEX_PAINT, 0.02, 0.02, 0.02, 0.40, 0.0)
+    neon.emissive = v3(1.0, 1.0, 1.0)
+    mats.push(neon)
+
+    var cityM = material(TEX_CONCRETE, 0.40, 0.41, 0.50, 0.85, 0.05)
+    cityM.normalStrength = 0.9
+    mats.push(cityM)
+
+    var glassM = material(TEX_GLASS, 0.05, 0.06, 0.09, 0.10, 0.40)
+    mats.push(glassM)
+
+    var ground = material(TEX_ASPHALT, 0.18, 0.17, 0.24, 0.92, 0.0)
+    ground.normalStrength = 0.5
+    mats.push(ground)
+
+    return World {
+        meshes: meshes, mats: mats, lightPool: pool,
+    }
+}
+
+impl World {
+    fn free(self: Self, gl: &mut GlContext) {
+        // Popped rather than iterated: `free` consumes the mesh, and `for m in`
+        // binds by reference, so the loop cannot hand it over.
+        var meshes = self.meshes
+        while meshes.len > 0 {
+            let m = meshes.pop()!
+            m.free(gl)
+        }
+    }
+
+    // The `max` lights nearest `at`, appended to `out` in the renderer's
+    // packing. A full sort would be tidier; a partial selection over a hundred
+    // candidates is a hundred distance tests and no allocation, and it runs
+    // every frame.
+    fn nearestLights(self: &Self, out: &mut Vec<f64>, at: &Vec3, max: i64) {
+        let count = self.lightPool.len / LIGHT_FLOATS
+        // Distance to each candidate, and a running set of the best `max`.
+        var chosen: Vec<i64> = Vec.new()
+        var chosenD: Vec<f64> = Vec.new()
+        for i in 0..count {
+            let o = i * LIGHT_FLOATS
+            let dx = self.lightPool[o] - at.x
+            let dy = self.lightPool[o + 1] - at.y
+            let dz = self.lightPool[o + 2] - at.z
+            let d = dx * dx + dy * dy + dz * dz
+            // Past its own range it cannot contribute, so it is not a candidate
+            // at all. This is what stops a lamp on the far side of the lap
+            // taking a slot from the one overhead.
+            let range = self.lightPool[o + 6]
+            if d > range * range {
+                continue
+            }
+            if chosen.len < max {
+                chosen.push(i)
+                chosenD.push(d)
+                continue
+            }
+            // Replace the worst of the current set, if this beats it.
+            var worst = 0
+            var worstD = chosenD[0]
+            for k in 1..chosen.len {
+                if chosenD[k] > worstD {
+                    worstD = chosenD[k]
+                    worst = k
+                }
+            }
+            if d < worstD {
+                chosen[worst] = i
+                chosenD[worst] = d
+            }
+        }
+        for k in 0..chosen.len {
+            let o = chosen[k] * LIGHT_FLOATS
+            for f in 0..LIGHT_FLOATS {
+                out.push(self.lightPool[o + f])
+            }
+        }
+    }
+}

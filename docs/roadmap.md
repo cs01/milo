@@ -33,7 +33,7 @@ Diagnostics carry "did you mean" suggestions on a missed method, field, or name 
 - **Arena safety**: identity + generation validation at runtime for `Arena<T>`/`Handle<T>`
 - **No implicit coercion**: explicit `as` casts only
 - **Ranged integers (L1+L2)**: `type Altitude = i32(0..50000)`, range propagation through arithmetic
-- **Off-by-default warnings** promotable with `--deny=`: `unused-move`, `unused-import`, `unverified-extern`, `large-stack-array`, `index-clone`
+- **Off-by-default warnings** promotable with `--deny=`: `unused-move`, `unused-import`, `unverified-extern`, `large-stack-array`
 
 See [safety-roadmap.md](safety-roadmap.md) for the enforced-vs-remaining breakdown and the explicit trust boundaries; [memory-safety-vs-rust.md](memory-safety-vs-rust.md) for the 13-probe battle test (0 UB misses **on those probes** — that is the scope of the claim, not a general one).
 

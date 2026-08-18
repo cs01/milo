@@ -1,0 +1,488 @@
+// REDLINE, a neon street race.
+//
+//   milo run examples/games/redline/main.milo --release
+//
+// Arrows or WASD drive, SHIFT is nitrous, SPACE is the handbrake, F is
+// fullscreen and ESC quits.
+//
+// `--shot out.png` renders one frame to a file and exits, which is how every
+// change to the lighting in this game was actually checked. `--s` puts the car
+// somewhere else on the lap for that capture, `--speed` gives it speed so the
+// camera sits where it would sit at pace, and `--warmup` runs the world forward
+// first.
+
+from "std/math" import {
+    Math
+}
+from "std/args" import {
+    args
+}
+from "std/fs" import {
+    writeFile
+}
+from "std/png" import {
+    encodePng
+}
+from "gl" import {
+    GlContext, Texture2D, Wrap, readPixelsRgba8
+}
+from "sdl" import {
+    SDL_CreateWindow, SDL_DestroyWindow, SDL_GetError, SDL_GetKeyboardState,
+    SDL_GetTicks, SDL_Init, SDL_PollEvent, SDL_Quit, SDL_SetWindowFullscreen,
+    SDL_ShowCursor, SDL_INIT_VIDEO, SDL_QUIT, SDL_WINDOWPOS_CENTERED,
+    SDL_WINDOW_ALLOW_HIGHDPI, SDL_WINDOW_FULLSCREEN_DESKTOP, SDL_WINDOW_HIDDEN,
+    SDL_WINDOW_RESIZABLE, SDL_WINDOW_SHOWN
+}
+from "sdl/glcontext" import {
+    SDL_GL_CreateContext, SDL_GL_DeleteContext, SDL_GL_GetDrawableSize,
+    SDL_GL_SetAttribute, SDL_GL_SetSwapInterval, SDL_GL_SwapWindow,
+    SDL_GL_CONTEXT_MAJOR_VERSION, SDL_GL_CONTEXT_MINOR_VERSION,
+    SDL_GL_CONTEXT_PROFILE_CORE, SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_DEPTH_SIZE,
+    SDL_WINDOW_OPENGL
+}
+from "sdl/keys" import {
+    SC_A, SC_D, SC_DOWN, SC_ESCAPE, SC_F, SC_LEFT, SC_LSHIFT, SC_RIGHT, SC_S,
+    SC_SPACE, SC_UP, SC_W
+}
+from "./camera" import {
+    Chase, newChase
+}
+from "./car" import {
+    Car, buildCarModel, glassMaterial, lampMaterial, newCar, paintMaterial,
+    wheelMaterial
+}
+from "./hud" import {
+    ATLAS, Hud, buildAtlas, newHud
+}
+from "./mat4" import {
+    identity, invertViewProj
+}
+from "./render" import {
+    newGfx, sceneAttrs
+}
+from "./sky" import {
+    buildNight
+}
+from "./textures" import {
+    TEX_SIZE, makeTextures
+}
+from "./track" import {
+    HALF_WIDTH, buildTrack
+}
+from "./vec3" import {
+    v3
+}
+from "./world" import {
+    BUCKETS, buildWorld
+}
+
+fn argValue(name: &string, fallback: &string): string {
+    let a = args()
+    for i in 0..a.len {
+        if a[i] == name && i + 1 < a.len {
+            return a[i + 1].clone()
+        }
+    }
+    return fallback.clone()
+}
+
+fn argPresent(name: &string): bool {
+    let a = args()
+    for i in 0..a.len {
+        if a[i] == name {
+            return true
+        }
+    }
+    return false
+}
+
+// GL hands back rows bottom-up and ABGR; a PNG wants top-down RGB.
+fn toRgb(px: &Vec<u32>, w: i64, h: i64): string {
+    var out = ""
+    for y in 0..h {
+        let row = (h - 1 - y) * w
+        for x in 0..w {
+            let p = px[row + x]
+            out.push((p & 0xFF) as u8)
+            out.push(((p >> 8) & 0xFF) as u8)
+            out.push(((p >> 16) & 0xFF) as u8)
+        }
+    }
+    return out
+}
+
+// Metres per second to the number on the dial.
+fn mph(v: f64): i64 {
+    return (Math.abs(v) * 2.23694) as i64
+}
+
+pub fn main(): i32 {
+    let shot = argValue("--shot", "")
+    let headless = shot.len > 0
+    var winW: i64 = 1440
+    var winH: i64 = 900
+    let skyLight = argValue("--sky", "1").parseF64() ?? 1.0
+    let scalePct = argValue("--scale", "100").parseF64() ?? 100.0
+    let skipBucket = argValue("--skip", "-1").parseInt() ?? -1
+
+    if SDL_Init(SDL_INIT_VIDEO) != 0 {
+        print("SDL_Init failed")
+        return 1
+    }
+    var win: *u8 = 0 as *u8
+    var ctx: *u8 = 0 as *u8
+    unsafe {
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3)
+        let _ = SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+        let _ = SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24)
+        var flags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI
+        if headless {
+            flags = flags | SDL_WINDOW_HIDDEN
+        } else {
+            flags = flags | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        }
+        win = SDL_CreateWindow("REDLINE", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, winW as i32, winH as i32, flags)
+        if (win as i64) == 0 {
+            print("window: " + _cstrToString(SDL_GetError()))
+            return 2
+        }
+        ctx = SDL_GL_CreateContext(win)
+        if (ctx as i64) == 0 {
+            print("no GL 3.3 core context: " + _cstrToString(SDL_GetError()))
+            return 3
+        }
+        let _ = SDL_GL_SetSwapInterval(if headless {
+            0
+        } else {
+            1
+        }
+        )
+        if !headless {
+            let _ = SDL_ShowCursor(0)
+        }
+    }
+
+    var dw: i32 = 0
+    var dh: i32 = 0
+    unsafe {
+        SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
+    }
+    if headless {
+        dw = winW as i32
+        dh = winH as i32
+    }
+    var rw = ((dw as f64) * scalePct / 100.0) as i64
+    var rh = ((dh as f64) * scalePct / 100.0) as i64
+    // Every pass is per-pixel and a retina panel hands back four times the
+    // pixels of the display it is showing, so the scene has its own resolution
+    // cap; the HUD is drawn afterwards at the real size.
+    let cap = 4600000.0
+    if ((rw * rh) as f64) > cap {
+        let k = Math.sqrt(cap / ((rw * rh) as f64))
+        rw = ((rw as f64) * k) as i64
+        rh = ((rh as f64) * k) as i64
+    }
+
+    var gl = GlContext.new()
+    let sky = buildNight(skyLight)
+    var gfx = match newGfx(gl, rw, rh, sky, buildAtlas(), ATLAS) {
+        Result.Ok(g) => g
+        Result.Err(e) => {
+            print("gfx: " + e)
+            return 4
+        }
+    }
+    // Albedo and surface for each material, uploaded in the order textures.milo
+    // declares them; the TEX_* constants index this list, so the order is a
+    // contract.
+    let texes = makeTextures()
+    for t in texes {
+        let a = Texture2D.rgba8(gl, TEX_SIZE, TEX_SIZE, t.albedo.clone(), true)
+        // REPEAT, not the default clamp. Every one of these is tiled across
+        // hundreds of metres of road, and on clamp only the first repeat has any
+        // content at all.
+        a.setWrap(Wrap.Repeat)
+        a.generateMipmaps()
+        a.setAnisotropy(16.0)
+        let s = Texture2D.rgba8(gl, TEX_SIZE, TEX_SIZE, t.surf.clone(), true)
+        s.setWrap(Wrap.Repeat)
+        s.generateMipmaps()
+        s.setAnisotropy(16.0)
+        let _ = gfx.addTexture(a)
+        let _ = gfx.addTexture(s)
+    }
+    gfx.debug = argValue("--debug", "0").parseF64() ?? 0.0
+
+    let track = buildTrack()
+    if !track.validate() {
+        print("track failed validation, see above")
+        return 5
+    }
+    print($"circuit: {(track.length as i64)} m over {track.n} samples")
+
+    var world = buildWorld(gl, track)
+    let carModel = buildCarModel(gl)
+    let glassMat = glassMaterial()
+    let wheelMat = wheelMaterial()
+    let lampMat = lampMaterial()
+
+    var player = newCar(v3(0.95, 0.16, 0.10))
+    let playerPaint = paintMaterial(0.95, 0.16, 0.10)
+    let startS = argValue("--s", "0").parseF64() ?? 0.0
+    player.placeOn(track, startS, argValue("--lat", "0").parseF64() ?? 0.0)
+    // A capture wants the camera where it sits at pace, not where it sits
+    // parked, and the two are several metres apart.
+    let poseSpeed = argValue("--speed", "0").parseF64() ?? 0.0
+    if poseSpeed > 0.0 {
+        player.vel = player.forward().scale(poseSpeed)
+    }
+
+    var cam = newChase()
+    var hud = newHud()
+
+    var quit = false
+    var ev: [u8; 64] = [0; 64]
+    var last = SDL_GetTicks()
+    var prevF = false
+    var fullscreen = false
+    var raceTime = 0.0
+    var warmup = argValue("--warmup", "0").parseInt() ?? 0
+
+    while !quit {
+        let now = SDL_GetTicks()
+        var dt = ((now - last) as f64) / 1000.0
+        last = now
+        if dt > 0.05 {
+            dt = 0.05
+        }
+        if headless {
+            dt = 0.016
+        }
+        gfx.time = gfx.time + dt
+
+        var throttle = 0.0
+        var brake = 0.0
+        var steer = 0.0
+        var nitro = false
+        var handbrake = false
+        if !headless {
+            unsafe {
+                while SDL_PollEvent(ev) != 0 {
+                    let evType: u32 = (ev[0] as u32) | ((ev[1] as u32) << 8) | ((ev[2] as u32) << 16) | ((ev[3] as u32) << 24)
+                    if evType == SDL_QUIT {
+                        quit = true
+                    }
+                }
+                let keys = SDL_GetKeyboardState(0 as *i32)
+                if keys[SC_ESCAPE] != 0 {
+                    quit = true
+                }
+                let fDown = keys[SC_F] != 0
+                if fDown && !prevF {
+                    fullscreen = !fullscreen
+                    let _ = SDL_SetWindowFullscreen(win, if fullscreen {
+                        SDL_WINDOW_FULLSCREEN_DESKTOP
+                    } else {
+                        0
+                    }
+                    )
+                }
+                prevF = fDown
+                if keys[SC_UP] != 0 || keys[SC_W] != 0 {
+                    throttle = 1.0
+                }
+                if keys[SC_DOWN] != 0 || keys[SC_S] != 0 {
+                    brake = 1.0
+                }
+                if keys[SC_LEFT] != 0 || keys[SC_A] != 0 {
+                    steer = steer - 1.0
+                }
+                if keys[SC_RIGHT] != 0 || keys[SC_D] != 0 {
+                    steer = steer + 1.0
+                }
+                nitro = keys[SC_LSHIFT] != 0
+                handbrake = keys[SC_SPACE] != 0
+            }
+        } else {
+            // A capture of a parked car on an empty grid is a capture of a car
+            // park, so the headless path drives.
+            throttle = 1.0
+        }
+
+        // ── simulate ──────────────────────────────────────────────────────────
+        player.drive(dt, throttle, brake, steer, handbrake, nitro, track)
+        raceTime = raceTime + dt
+        if player.scraping {
+            cam.kick(0.55)
+        } else if player.offTrack {
+            cam.kick(dt * 1.4)
+        }
+        cam.follow(player, dt)
+
+        // ── draw ──────────────────────────────────────────────────────────────
+        unsafe {
+            SDL_GL_GetDrawableSize(win, dw.addrOf(), dh.addrOf())
+        }
+        if headless {
+            dw = winW as i32
+            dh = winH as i32
+        }
+
+        // The circuit has about a hundred lights and the shader takes sixteen,
+        // so they are chosen every frame by distance. Rebuilt rather than
+        // patched: a stale light left switched on is the kind of bug that only
+        // ever shows up as "the road is green now".
+        gfx.lights.clear()
+        let eye = cam.shakenEye()
+        world.nearestLights(gfx.lights, eye, 14)
+        // The player's own lamps, which are the only lights that move.
+        gfx.addLight(player.nose(), 5.5, 5.2, 4.4, 26.0)
+        gfx.addLight(player.tail(), 3.4, 0.30, 0.18, 9.0)
+
+        let aspect = (rw as f64) / (rh as f64)
+        // The circuit is already in world space. Handing it the car's matrix is
+        // an easy mistake to make and a strange one to read back: the whole city
+        // rotates with the steering and the road is nowhere in frame.
+        let worldModel = identity()
+        let model = player.modelMatrix()
+
+        // Depth and normals first: the scene pass samples the AO they produce.
+        gfx.prepassBegin(cam.viewM(), cam.projM(aspect))
+        for i in 0..BUCKETS {
+            if i == skipBucket {
+                continue
+            }
+            gfx.prepassDraw(world.meshes[i], worldModel)
+        }
+        gfx.prepassDraw(carModel.body, model)
+        gfx.prepassDraw(carModel.glass, model)
+        for w in 0..4 {
+            gfx.prepassDraw(carModel.wheel, player.wheelMatrix(w))
+        }
+        gfx.aoResolve(cam.tanHalfX(), cam.tanHalfX() / aspect)
+
+        // Centred ahead of the car rather than on it: the shadow map covers a
+        // fixed box, and putting the car in the middle of it wastes half the
+        // resolution on road the player has already driven over.
+        let fwd = player.forward()
+        let shadowAt = player.pos + fwd.scale(18.0)
+        gfx.shadowBegin(v3(shadowAt.x, 0.0, shadowAt.z), 52.0, 320.0)
+        for i in 0..BUCKETS {
+            gfx.shadowDraw(world.meshes[i], worldModel)
+        }
+        gfx.shadowDraw(carModel.body, model)
+        for w in 0..4 {
+            gfx.shadowDraw(carModel.wheel, player.wheelMatrix(w))
+        }
+
+        let vp = cam.viewProj(aspect)
+        let inv = invertViewProj(vp)
+        gfx.sceneBegin(vp, inv, eye)
+        for i in 0..BUCKETS {
+            if i == skipBucket {
+                continue
+            }
+            gfx.sceneDraw(world.meshes[i], worldModel, world.mats[i])
+        }
+        gfx.sceneDraw(carModel.body, model, playerPaint)
+        gfx.sceneDraw(carModel.lamps, model, lampMat)
+        gfx.sceneDraw(carModel.glass, model, glassMat)
+        for w in 0..4 {
+            gfx.sceneDraw(carModel.wheel, player.wheelMatrix(w), wheelMat)
+        }
+
+        gfx.present(dw as i64, dh as i64)
+
+        hud.clear()
+        drawHud(hud, dw as f64, dh as f64, player, raceTime, track.length)
+        gfx.drawHud(hud.verts, dw as i64, dh as i64)
+
+        if headless && warmup > 0 {
+            warmup = warmup - 1
+            SDL_GL_SwapWindow(win)
+            continue
+        }
+        if headless {
+            let px = readPixelsRgba8(dw as i64, dh as i64)
+            match encodePng(toRgb(px, dw as i64, dh as i64), dw as i64, dh as i64, 3) {
+                Result.Ok(bytes) => {
+                    match writeFile(shot, bytes) {
+                        Result.Ok(_v) => {
+                            print($"wrote {shot}")
+                        }
+                        Result.Err(e) => {
+                            print($"write: {e}")
+                        }
+                    }
+                }
+                Result.Err(e) => {
+                    print("png: " + e)
+                }
+            }
+            quit = true
+        }
+
+        SDL_GL_SwapWindow(win)
+    }
+
+    carModel.free(gl)
+    world.free(gl)
+    gfx.free(gl)
+    gl.free()
+    SDL_GL_DeleteContext(ctx)
+    SDL_DestroyWindow(win)
+    SDL_Quit()
+    return 0
+}
+
+// A plaque behind a number, because white text over a lit road is only readable
+// by accident.
+fn plate(hud: &mut Hud, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64) {
+    hud.rect(x, y, w, h, r * 0.14, g * 0.14, b * 0.20, 0.90)
+    hud.rect(x, y, w, 2.0, r, g, b, 0.85)
+}
+
+fn drawHud(hud: &mut Hud, dw: f64, dh: f64, car: &Car, raceTime: f64, lapLength: f64) {
+    let s = Math.maxF64(dh / 900.0, 0.6)
+
+    // Speed, bottom right, the biggest number on the screen. It is the only
+    // reading a driver actually uses moment to moment.
+    let speed = mph(car.forwardSpeed())
+    let bw = 250.0 * s
+    let bx = dw - bw - 34.0 * s
+    let by = dh - 128.0 * s
+    plate(hud, bx, by, bw, 96.0 * s, 0.95, 0.30, 0.20)
+    hud.textCentred($"{speed}", bx + bw * 0.5, by + 16.0 * s, 5.6 * s, 1.0, 0.95, 0.72, 1.0)
+    hud.textCentred("MPH", bx + bw * 0.5, by + 72.0 * s, 1.6 * s, 0.85, 0.70, 0.60, 0.85)
+
+    // Lap and clock, top left.
+    let secs = raceTime as i64
+    let cs = ((raceTime - (secs as f64)) * 100.0) as i64
+    plate(hud, 34.0 * s, 30.0 * s, 250.0 * s, 68.0 * s, 0.30, 0.70, 1.0)
+    let _ = hud.text("LAP TIME", 46.0 * s, 36.0 * s, 1.5 * s, 0.60, 0.85, 1.0, 0.85)
+    let _ = hud.text($"{secs / 60}:{(secs % 60)}.{cs}", 46.0 * s, 54.0 * s, 3.2 * s, 1.0, 0.95, 0.75, 1.0)
+
+    // How far round the lap, as a bar. Standing in for a minimap until there is
+    // a field of cars to put on one.
+    let pw = 320.0 * s
+    let px = dw * 0.5 - pw * 0.5
+    hud.rect(px, 34.0 * s, pw, 8.0 * s, 0.06, 0.05, 0.10, 0.85)
+    let frac = Math.clampF64(car.s / lapLength, 0.0, 1.0)
+    hud.rect(px, 34.0 * s, pw * frac, 8.0 * s, 0.95, 0.35, 0.85, 0.95)
+    hud.textCentred($"LAP {car.lap + 1}", dw * 0.5, 48.0 * s, 1.8 * s, 0.90, 0.92, 1.0, 0.9)
+
+    // The nitrous bottle, bottom left, which is the only resource in the game.
+    if car.boost > 0.01 {
+        let nw = 200.0 * s
+        hud.rect(34.0 * s, dh - 62.0 * s, nw, 14.0 * s, 0.06, 0.05, 0.10, 0.85)
+        hud.rect(34.0 * s, dh - 62.0 * s, nw * car.boost, 14.0 * s, 0.35, 0.90, 1.0, 0.95)
+    }
+
+    // Off the road, say so. The grip change is felt but a driver at speed needs
+    // to be told why.
+    if car.offTrack {
+        hud.textCentred("OFF TRACK", dw * 0.5, dh * 0.62, 2.6 * s, 1.0, 0.55, 0.20, 0.85)
+    }
+    let _ = HALF_WIDTH
+}

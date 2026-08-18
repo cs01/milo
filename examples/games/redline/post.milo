@@ -1,0 +1,258 @@
+// Everything that happens to the frame after the geometry: bloom, tone map, and
+// the edge pass.
+//
+// Bloom is a threshold at quarter resolution and two ping-pong blurs, not a
+// mip pyramid. The scene has one very bright thing in it — the sun, and what the
+// sun does to a steel plate — so what is wanted is a wide soft halo around a few
+// pixels, which two separable passes over a quarter-res buffer give for about a
+// millisecond.
+//
+// The tone map is ACES fitted. A Reinhard curve desaturates highlights towards
+// white, which on a sunlit scene turns every specular into a grey blob; ACES
+// keeps the hue as it rolls off, which is why the sun's edge stays warm.
+
+pub let QUAD_VERT: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+out vec2 vUv;
+void main() {
+    vUv = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+"
+
+pub let BRIGHT_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform float uThreshold;
+uniform vec2 uTexel;
+void main() {
+    // A four-tap box on the way down, so a single blown pixel still contributes
+    // instead of falling between samples and making the halo flicker.
+    vec3 c = vec3(0.0);
+    c += texture(uSrc, vUv + vec2(-0.5, -0.5) * uTexel).rgb;
+    c += texture(uSrc, vUv + vec2( 0.5, -0.5) * uTexel).rgb;
+    c += texture(uSrc, vUv + vec2(-0.5,  0.5) * uTexel).rgb;
+    c += texture(uSrc, vUv + vec2( 0.5,  0.5) * uTexel).rgb;
+    c *= 0.25;
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float k = max(l - uThreshold, 0.0) / max(l, 1e-4);
+    fragColor = vec4(c * k, 1.0);
+}
+"
+
+pub let BLUR_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uDir;
+void main() {
+    // Nine taps as five bilinear fetches — the offsets are the weighted centres
+    // between adjacent texels, which is the standard way to get a 9-tap gaussian
+    // for the cost of 5.
+    float w0 = 0.2270270270;
+    float w1 = 0.3162162162;
+    float w2 = 0.0702702703;
+    vec3 c = texture(uSrc, vUv).rgb * w0;
+    c += texture(uSrc, vUv + uDir * 1.3846153846).rgb * w1;
+    c += texture(uSrc, vUv - uDir * 1.3846153846).rgb * w1;
+    c += texture(uSrc, vUv + uDir * 3.2307692308).rgb * w2;
+    c += texture(uSrc, vUv - uDir * 3.2307692308).rgb * w2;
+    fragColor = vec4(c, 1.0);
+}
+"
+
+pub let COMPOSITE_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform vec2 uTexel;
+uniform float uBloomAmount;
+uniform float uExposure;
+uniform float uVignette;
+uniform float uGrain;
+uniform float uTime;
+uniform float uFlash;
+
+// Narkowicz's fit of the ACES curve.
+vec3 aces(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+// FXAA, the short console version: find the local contrast, walk along the edge
+// perpendicular to the luma gradient, and blend. Cheaper than any amount of
+// supersampling and enough for the wire fences, which are what actually crawl.
+vec3 fxaa(vec2 uv) {
+    vec3 rgbM = texture(uScene, uv).rgb;
+    float lM = luma(rgbM);
+    float lNW = luma(texture(uScene, uv + vec2(-1.0, -1.0) * uTexel).rgb);
+    float lNE = luma(texture(uScene, uv + vec2( 1.0, -1.0) * uTexel).rgb);
+    float lSW = luma(texture(uScene, uv + vec2(-1.0,  1.0) * uTexel).rgb);
+    float lSE = luma(texture(uScene, uv + vec2( 1.0,  1.0) * uTexel).rgb);
+    float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+    float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+    if (lMax - lMin < max(0.05, lMax * 0.125)) return rgbM;
+    vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), ((lNW + lSW) - (lNE + lSE)));
+    float dirReduce = max((lNW + lNE + lSW + lSE) * 0.03125, 0.0078125);
+    float rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+    dir = clamp(dir * rcp, vec2(-8.0), vec2(8.0)) * uTexel;
+    vec3 rgbA = 0.5 * (texture(uScene, uv + dir * (1.0 / 3.0 - 0.5)).rgb
+                     + texture(uScene, uv + dir * (2.0 / 3.0 - 0.5)).rgb);
+    vec3 rgbB = rgbA * 0.5 + 0.25 * (texture(uScene, uv - dir * 0.5).rgb
+                                   + texture(uScene, uv + dir * 0.5).rgb);
+    float lB = luma(rgbB);
+    return (lB < lMin || lB > lMax) ? rgbA : rgbB;
+}
+
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+void main() {
+    vec3 col = fxaa(vUv);
+    col += texture(uBloom, vUv).rgb * uBloomAmount;
+    col += vec3(1.0, 0.86, 0.66) * uFlash;
+    col *= uExposure;
+    col = aces(col);
+    // sRGB transfer. The scene target is linear 16F and the window is not, so
+    // skipping this is what makes a physically lit render look washed out.
+    col = pow(col, vec3(1.0 / 2.2));
+    vec2 d = vUv - 0.5;
+    float vig = 1.0 - uVignette * dot(d, d) * 1.9;
+    col *= clamp(vig, 0.0, 1.0);
+    col += (hash12(vUv * 1024.0 + uTime) - 0.5) * uGrain;
+    fragColor = vec4(col, 1.0);
+}
+"
+
+// ── screen-space ambient occlusion ────────────────────────────────────────────
+
+// How much light a point can see of the sky, estimated from the depth buffer
+// alone: sample a hemisphere of points around it, and count how many of them are
+// behind geometry the camera can see. It is a guess, but it is the guess that
+// puts a dark line where a post meets a boardwalk, and that line is most of what
+// separates a rendered box from a photographed one.
+pub let SSAO_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uDN;
+uniform vec2 uTanHalf;
+uniform float uRadius;
+uniform float uStrength;
+
+// View position from the packed distance: the direction through this pixel,
+// scaled to the recorded distance.
+vec3 viewPos(vec2 uv, float vz) {
+    vec2 ndc = uv * 2.0 - 1.0;
+    return vec3(ndc.x * uTanHalf.x * vz, ndc.y * uTanHalf.y * vz, -vz);
+}
+
+vec2 project(vec3 p) {
+    float vz = max(-p.z, 1e-4);
+    return vec2(p.x / (uTanHalf.x * vz), p.y / (uTanHalf.y * vz)) * 0.5 + 0.5;
+}
+
+void main() {
+    vec4 dn = texture(uDN, vUv);
+    float vz = dn.r;
+    // Sky. Nothing occludes it, and reconstructing a position from a zero
+    // distance would put the samples on top of the eye.
+    if (vz <= 0.0001) { fragColor = vec4(1.0); return; }
+    vec3 p = viewPos(vUv, vz);
+    vec3 n = normalize(dn.gba);
+
+    vec3 kernel[12] = vec3[12](
+        vec3( 0.539,  0.316,  0.290), vec3(-0.288,  0.611,  0.334),
+        vec3(-0.472, -0.402,  0.482), vec3( 0.190, -0.716,  0.201),
+        vec3( 0.766, -0.156,  0.484), vec3(-0.712,  0.196,  0.610),
+        vec3( 0.117,  0.324,  0.834), vec3(-0.135, -0.246,  0.706),
+        vec3( 0.396,  0.585,  0.548), vec3(-0.606, -0.549,  0.276),
+        vec3( 0.028, -0.487,  0.556), vec3( 0.335, -0.104,  0.286));
+
+    // A per-pixel rotation of the kernel. Twelve fixed samples show up as twelve
+    // bands; the same twelve turned by a different angle at each pixel show up as
+    // noise, and the blur pass after this one eats noise.
+    float ang = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    vec3 rv = vec3(cos(ang), sin(ang), 0.0);
+    vec3 t = normalize(rv - n * dot(rv, n));
+    vec3 b = cross(n, t);
+    mat3 tbn = mat3(t, b, n);
+
+    float occ = 0.0;
+    for (int i = 0; i < 12; i++) {
+        float sc = 0.25 + 0.75 * float(i) / 12.0;
+        vec3 sp = p + (tbn * kernel[i]) * (uRadius * sc * sc);
+        vec2 su = project(sp);
+        if (su.x < 0.0 || su.x > 1.0 || su.y < 0.0 || su.y > 1.0) continue;
+        float sz = texture(uDN, su).r;
+        if (sz <= 0.0001) continue;
+        float sampleZ = -sp.z;
+        // The range check is what stops a near object from carving a shadow into
+        // a wall ten metres behind it: a sample only counts if the surface it
+        // lands on is within the radius of the point being shaded.
+        float range = smoothstep(0.0, 1.0, uRadius / max(abs(sampleZ - sz), 1e-4));
+        occ += (sz < sampleZ - 0.02) ? range : 0.0;
+    }
+    float ao = 1.0 - (occ / 12.0) * uStrength;
+    fragColor = vec4(clamp(ao, 0.0, 1.0));
+}
+"
+
+// A box blur wide enough to erase the sample noise, in one pass because the AO
+// buffer is a quarter of the scene's pixels and separability is not worth a
+// second target.
+pub let AO_BLUR_FRAG: string = "#version 330 core
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+void main() {
+    float sum = 0.0;
+    for (int y = -2; y <= 2; y++) {
+        for (int x = -2; x <= 2; x++) {
+            sum += texture(uSrc, vUv + vec2(float(x), float(y)) * uTexel).r;
+        }
+    }
+    fragColor = vec4(sum / 25.0);
+}
+"
+
+// Screen-space quads for the HUD: position in pixels, uv into the font atlas,
+// and a colour per vertex. One draw call for the whole overlay.
+pub let HUD_VERT: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aUv;
+layout (location = 2) in vec4 aColor;
+uniform vec2 uScreen;
+out vec2 vUv;
+out vec4 vColor;
+void main() {
+    vUv = aUv;
+    vColor = aColor;
+    vec2 p = vec2(aPos.x / uScreen.x, 1.0 - aPos.y / uScreen.y) * 2.0 - 1.0;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+"
+
+pub let HUD_FRAG: string = "#version 330 core
+in vec2 vUv;
+in vec4 vColor;
+out vec4 fragColor;
+uniform sampler2D uAtlas;
+void main() {
+    float a = texture(uAtlas, vUv).r;
+    fragColor = vec4(vColor.rgb, vColor.a * a);
+}
+"

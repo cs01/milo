@@ -1,0 +1,214 @@
+// Geometry, built on the CPU into flat float arrays the GPU takes unchanged.
+//
+// One vertex is twelve floats: position, normal, uv, tint, ao. There is no
+// tangent attribute — the fragment shader builds a cotangent frame from screen
+// derivatives instead, which costs a few instructions and removes a whole class
+// of bug where a mesh generator gets the handedness of one primitive wrong and
+// only the normal map on that one primitive comes out inside-out.
+//
+// `tint` is per-vertex albedo, so a whole fence of posts can vary in colour
+// inside one draw call, and `ao` is baked occlusion — the darkening where a post
+// meets the ground, which no light model here would otherwise produce.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./mat4" import {
+    identity, multiply, transformDir, transformPoint
+}
+
+pub let FLOATS_PER_VERTEX: i64 = 12
+
+pub struct Builder {
+    data: Vec<f32>,
+    // Every push runs through this, so a caller places a primitive by setting the
+    // transform once rather than by pre-transforming its corners.
+    xform: Vec<f32>,
+    tintR: f64,
+    tintG: f64,
+    tintB: f64,
+    ao: f64,
+    uvScale: f64,
+}
+
+pub fn builder(): Builder {
+    return Builder {
+        data: Vec.new(),
+        xform: identity(),
+        tintR: 1.0,
+        tintG: 1.0,
+        tintB: 1.0,
+        ao: 1.0,
+        uvScale: 1.0,
+    }
+}
+
+impl Builder {
+    fn vertexCount(self: &Self): i64 {
+        return self.data.len / FLOATS_PER_VERTEX
+    }
+
+    fn setTint(self: &mut Self, r: f64, g: f64, b: f64) {
+        self.tintR = r
+        self.tintG = g
+        self.tintB = b
+    }
+
+    fn setAo(self: &mut Self, a: f64) {
+        self.ao = a
+    }
+
+    // Metres of world per texture repeat. Set it per primitive so a 12 m dirt
+    // patch and a 0.4 m steel plate can share one material without the steel
+    // showing a single stretched texel.
+    fn setUvScale(self: &mut Self, s: f64) {
+        self.uvScale = s
+    }
+
+    fn setXform(self: &mut Self, m: &Vec<f32>) {
+        for i in 0..16 {
+            self.xform[i] = m[i]
+        }
+    }
+
+    fn resetXform(self: &mut Self) {
+        let m = identity()
+        self.setXform(m)
+    }
+
+    fn push(self: &mut Self, p: &Vec3, n: &Vec3, u: f64, v: f64) {
+        let wp = transformPoint(self.xform, p)
+        let wn = transformDir(self.xform, n).norm()
+        self.data.push(wp.x as f32)
+        self.data.push(wp.y as f32)
+        self.data.push(wp.z as f32)
+        self.data.push(wn.x as f32)
+        self.data.push(wn.y as f32)
+        self.data.push(wn.z as f32)
+        self.data.push((u * self.uvScale) as f32)
+        self.data.push((v * self.uvScale) as f32)
+        self.data.push(self.tintR as f32)
+        self.data.push(self.tintG as f32)
+        self.data.push(self.tintB as f32)
+        self.data.push(self.ao as f32)
+    }
+
+    // A flat triangle: one normal from the winding, so a caller building a shard
+    // or a hill never has to supply one.
+    fn tri(self: &mut Self, a: &Vec3, b: &Vec3, c: &Vec3, ua: f64, va: f64, ub: f64, vb: f64, uc: f64, vc: f64) {
+        let n = (b - a).cross(c - a).norm()
+        self.push(a, n, ua, va)
+        self.push(b, n, ub, vb)
+        self.push(c, n, uc, vc)
+    }
+
+    // Counter-clockwise seen from the front, which is where the normal points.
+    fn quad(self: &mut Self, a: &Vec3, b: &Vec3, c: &Vec3, d: &Vec3, uw: f64, vh: f64) {
+        let n = (b - a).cross(d - a).norm()
+        self.push(a, n, 0.0, 0.0)
+        self.push(b, n, uw, 0.0)
+        self.push(c, n, uw, vh)
+        self.push(a, n, 0.0, 0.0)
+        self.push(c, n, uw, vh)
+        self.push(d, n, 0.0, vh)
+    }
+
+    // An axis-aligned box given its centre and half-extents, in the builder's
+    // current transform. Six faces, each with its own uv derived from the two
+    // in-plane extents so texel density is the same on all of them.
+    fn box(self: &mut Self, c: &Vec3, hx: f64, hy: f64, hz: f64) {
+        let px = v3(hx, 0.0, 0.0)
+        let py = v3(0.0, hy, 0.0)
+        let pz = v3(0.0, 0.0, hz)
+        // +X, -X
+        self.quad(c + px - py - pz, c + px - py + pz, c + px + py + pz, c + px + py - pz, 2.0 * hz, 2.0 * hy)
+        self.quad(c - px - py + pz, c - px - py - pz, c - px + py - pz, c - px + py + pz, 2.0 * hz, 2.0 * hy)
+        // +Y, -Y
+        self.quad(c + py - px + pz, c + py + px + pz, c + py + px - pz, c + py - px - pz, 2.0 * hx, 2.0 * hz)
+        self.quad(c - py - px - pz, c - py + px - pz, c - py + px + pz, c - py - px + pz, 2.0 * hx, 2.0 * hz)
+        // +Z, -Z
+        self.quad(c + pz - px - py, c + pz + px - py, c + pz + px + py, c + pz - px + py, 2.0 * hx, 2.0 * hy)
+        self.quad(c - pz + px - py, c - pz - px - py, c - pz - px + py, c - pz + px + py, 2.0 * hx, 2.0 * hy)
+    }
+
+    // A box from one corner to the other, which is how a wall or a plank is
+    // actually described.
+    fn boxSpan(self: &mut Self, lo: &Vec3, hi: &Vec3) {
+        let c = (lo + hi).scale(0.5)
+        let h = (hi - lo).scale(0.5)
+        self.box(c, Math.abs(h.x), Math.abs(h.y), Math.abs(h.z))
+    }
+
+    // Along +Y, centred on `base` at its bottom. `capped` closes both ends; an
+    // open tube is what a pipe rail wants.
+    fn cylinder(self: &mut Self, base: &Vec3, radius: f64, height: f64, sides: i64, capped: bool) {
+        let top = base + v3(0.0, height, 0.0)
+        for i in 0..sides {
+            let a0 = 2.0 * Math.pi() * (i as f64) / (sides as f64)
+            let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (sides as f64)
+            let d0 = v3(Math.cos(a0), 0.0, Math.sin(a0))
+            let d1 = v3(Math.cos(a1), 0.0, Math.sin(a1))
+            let p0 = base + d0.scale(radius)
+            let p1 = base + d1.scale(radius)
+            let q0 = top + d0.scale(radius)
+            let q1 = top + d1.scale(radius)
+            let u0 = 2.0 * Math.pi() * radius * (i as f64) / (sides as f64)
+            let u1 = 2.0 * Math.pi() * radius * ((i + 1) as f64) / (sides as f64)
+            self.push(p0, d0, u0, 0.0)
+            self.push(p1, d1, u1, 0.0)
+            self.push(q1, d1, u1, height)
+            self.push(p0, d0, u0, 0.0)
+            self.push(q1, d1, u1, height)
+            self.push(q0, d0, u0, height)
+            if capped {
+                let up = v3(0.0, 1.0, 0.0)
+                let down = v3(0.0, -1.0, 0.0)
+                self.push(top, up, 0.0, 0.0)
+                self.push(q0, up, u0, radius)
+                self.push(q1, up, u1, radius)
+                self.push(base, down, 0.0, 0.0)
+                self.push(p1, down, u1, radius)
+                self.push(p0, down, u0, radius)
+            }
+        }
+    }
+
+    // A latitude/longitude sphere. Coarse is fine: everything spherical here is
+    // either small or far away.
+    fn sphere(self: &mut Self, c: &Vec3, radius: f64, rings: i64, segs: i64) {
+        for r in 0..rings {
+            let t0 = Math.pi() * (r as f64) / (rings as f64)
+            let t1 = Math.pi() * ((r + 1) as f64) / (rings as f64)
+            for s in 0..segs {
+                let p0 = 2.0 * Math.pi() * (s as f64) / (segs as f64)
+                let p1 = 2.0 * Math.pi() * ((s + 1) as f64) / (segs as f64)
+                let n00 = sphereDir(t0, p0)
+                let n01 = sphereDir(t0, p1)
+                let n10 = sphereDir(t1, p0)
+                let n11 = sphereDir(t1, p1)
+                let a = c + n00.scale(radius)
+                let b = c + n01.scale(radius)
+                let d = c + n11.scale(radius)
+                let e = c + n10.scale(radius)
+                self.push(a, n00, radius * p0, radius * t0)
+                self.push(e, n10, radius * p0, radius * t1)
+                self.push(d, n11, radius * p1, radius * t1)
+                self.push(a, n00, radius * p0, radius * t0)
+                self.push(d, n11, radius * p1, radius * t1)
+                self.push(b, n01, radius * p1, radius * t0)
+            }
+        }
+    }
+
+    fn clear(self: &mut Self) {
+        self.data.clear()
+    }
+}
+
+fn sphereDir(theta: f64, phi: f64): Vec3 {
+    let st = Math.sin(theta)
+    return v3(st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi))
+}

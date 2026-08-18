@@ -1,0 +1,636 @@
+// The car: one lofted shell every car in the race shares, and the handling
+// model underneath it.
+//
+// **One mesh, ten colours.** The body is built once and drawn ten times with ten
+// `Material` values that differ only in albedo. Ten meshes would be ten uploads
+// of the same eight hundred triangles, and the paint is a material property, not
+// a shape property. The wheels are one wheel drawn four times with four
+// matrices, which is also where the steering and the wheel spin live.
+//
+// **The handling is arcade, deliberately.** It is a forward/lateral split of the
+// velocity in the car's own frame: the engine pushes along forward, the tyres
+// eat lateral, and steering turns the *heading* while the velocity follows it at
+// a rate set by grip. Lower the grip and the velocity lags the heading, which is
+// a drift, and it comes out of the same three lines rather than out of a slip
+// curve nobody can tune. A real tyre model is not more fun at 180 mph on a
+// neon boulevard, it is just harder to steer with a keyboard.
+//
+// The car never leaves the ground plane. `y` is a constant and there is no
+// suspension travel; the pitch and roll the body shows are cosmetic, driven by
+// acceleration and yaw rate, because a chassis that stays rigid under braking
+// reads as a prop being slid around rather than as a car.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Mesh
+}
+from "./mesh" import {
+    Builder, builder
+}
+from "./mat4" import {
+    identity, multiply, rotationX, rotationY, rotationZ, translation
+}
+from "./render" import {
+    Material, material, sceneAttrs
+}
+from "./textures" import {
+    TEX_GLASS, TEX_PAINT, TEX_STEEL
+}
+from "./track" import {
+    HALF_WIDTH, Track, WALL
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+// Metres. The shell is a wide low wedge on a 2.6 m wheelbase.
+pub let WHEELBASE: f64 = 2.62
+
+pub let TRACK_WIDTH: f64 = 1.66
+
+pub let WHEEL_R: f64 = 0.36
+
+let WHEEL_W: f64 = 0.32
+
+// Flat-out on the long straight, in metres per second. 82 m/s is 183 mph, which
+// is where the speedometer in the reference sits with the needle buried.
+let TOP_SPEED: f64 = 82.0
+
+// Nitrous adds this fraction on top, and it is the only thing that does.
+let BOOST_GAIN: f64 = 0.26
+
+let ENGINE: f64 = 27.0
+
+let BRAKE: f64 = 36.0
+
+// Quadratic drag, tuned so coasting from top speed bleeds off believably rather
+// than stopping the car dead.
+let DRAG: f64 = 0.0021
+
+let ROLL_RESIST: f64 = 0.42
+
+// Radians of steering at the road wheel, before the speed falloff below.
+let STEER_MAX: f64 = 0.68
+
+// How hard the tyres pull the velocity back in line with the heading, per
+// second. This one number is the whole difference between a kart and a boat.
+let GRIP_ROAD: f64 = 9.0
+
+let GRIP_DIRT: f64 = 3.6
+
+let GRIP_HANDBRAKE: f64 = 2.1
+
+// ---------------------------------------------------------------------------
+// The shell
+// ---------------------------------------------------------------------------
+
+// A car is four meshes because it is four materials, not because it is four
+// objects. Splitting by material is what lets the glass be glass and the lamps
+// be emissive without a per-pixel branch in the shader.
+pub struct CarModel {
+    body: Mesh,
+    glass: Mesh,
+    wheel: Mesh,
+    // Head and tail lamps. Emissive, with the colour carried per vertex so one
+    // material paints white at the front and red at the back.
+    lamps: Mesh,
+}
+
+// A cross-section of the shell, at one station along the car. The loft between
+// consecutive stations is what gives the body its shape; changing the numbers
+// here is the only way the silhouette changes.
+//
+//   z   distance from the centre of the car, positive forward
+//   hw  half width at the waist
+//   yb  floor
+//   yt  roof
+//   rw  half width at the roof, which is what makes it a wedge and not a box
+fn stations(): Vec<f64> {
+    return [
+    // z,     hw,    yb,    yt,    rw
+    2.24, 0.70, 0.30, 0.54, 0.52, 1.86, 0.89, 0.26, 0.64, 0.72, 1.28, 0.98, 0.25, 0.74, 0.84, 0.68, 0.99, 0.26, 1.15, 0.64, -0.34, 0.99, 0.26, 1.17, 0.62, -1.12, 0.96, 0.27, 0.87, 0.79, -1.82, 0.90, 0.29, 0.79, 0.75, -2.24, 0.75, 0.34, 0.72, 0.63,]
+}
+
+let STATION_FLOATS: i64 = 5
+
+// The ring of points at one station, counter-clockwise seen from the front of
+// the car. Six points: the roof line, the shoulder either side, and the sill
+// either side. The bottom closes flat, which is never seen and costs two
+// triangles to keep the shell watertight for the shadow pass.
+fn ringAt(hw: f64, yb: f64, yt: f64, rw: f64, k: i64): Vec3 {
+    let shoulder = yb + (yt - yb) * 0.42
+    if k == 0 {
+        return v3(-hw, yb, 0.0)
+    }
+    if k == 1 {
+        return v3(-hw, shoulder, 0.0)
+    }
+    if k == 2 {
+        return v3(-rw, yt, 0.0)
+    }
+    if k == 3 {
+        return v3(rw, yt, 0.0)
+    }
+    if k == 4 {
+        return v3(hw, shoulder, 0.0)
+    }
+    return v3(hw, yb, 0.0)
+}
+
+let RING: i64 = 6
+
+fn bodyGeometry(b: &mut Builder) {
+    let st = stations()
+    let count = st.len / STATION_FLOATS
+    b.setUvScale(0.9)
+    b.setTint(1.0, 1.0, 1.0)
+    b.setAo(1.0)
+
+    var i = 0
+    while i + 1 < count {
+        let o = i * STATION_FLOATS
+        let p = (i + 1) * STATION_FLOATS
+        let z0 = st[o]
+        let z1 = st[p]
+        for k in 0..RING {
+            let k2 = (k + 1) % RING
+            let a0 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k)
+            let a1 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k2)
+            let b0 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], k)
+            let b1 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], k2)
+            // The roof panel between points 2 and 3 is the greenhouse, and the
+            // glass mesh covers it. Leaving it out of the body would make the
+            // cabin see-through from behind, so it is kept and the glass sits
+            // just proud of it.
+            let q0 = v3(a0.x, a0.y, z0)
+            let q1 = v3(a1.x, a1.y, z0)
+            let q2 = v3(b1.x, b1.y, z1)
+            let q3 = v3(b0.x, b0.y, z1)
+            b.quad(q0, q1, q2, q3, 1.0, 1.0)
+        }
+        // Close the underside so the shell is solid from below, which is what
+        // the shadow map sees.
+        let f0 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], 0)
+        let f5 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], 5)
+        let g0 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], 0)
+        let g5 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], 5)
+        b.quad(v3(f5.x, f5.y, z0), v3(f0.x, f0.y, z0), v3(g0.x, g0.y, z1), v3(g5.x, g5.y, z1), 1.0, 1.0)
+        i = i + 1
+    }
+
+    // Nose and tail caps.
+    capEnd(b, st, 0, true)
+    capEnd(b, st, count - 1, false)
+
+    // Splitter and diffuser: dark, low, and wide. They read as the part of the
+    // car nearest the road, which is what sells the ride height.
+    b.setTint(0.16, 0.16, 0.19)
+    b.boxSpan(v3(-1.00, 0.16, 2.02), v3(1.00, 0.26, 2.34))
+    b.boxSpan(v3(-0.98, 0.16, -2.36), v3(0.98, 0.30, -2.00))
+    // Side sills, tying the wheels together down the flanks.
+    b.boxSpan(v3(-1.02, 0.20, -1.30), v3(-0.88, 0.40, 1.30))
+    b.boxSpan(v3(0.88, 0.20, -1.30), v3(1.02, 0.40, 1.30))
+
+    // The rear wing, on two stanchions. A silhouette needs one thing above the
+    // roofline from behind or every car in the pack reads as the same blob.
+    b.setTint(0.13, 0.13, 0.16)
+    b.boxSpan(v3(-0.62, 0.88, -1.98), v3(-0.52, 1.24, -1.86))
+    b.boxSpan(v3(0.52, 0.88, -1.98), v3(0.62, 1.24, -1.86))
+    b.setTint(1.0, 1.0, 1.0)
+    b.boxSpan(v3(-0.92, 1.24, -2.06), v3(0.92, 1.31, -1.74))
+}
+
+// A flat cap across one end station, so the loft is closed.
+fn capEnd(b: &mut Builder, st: &Vec<f64>, idx: i64, front: bool) {
+    let o = idx * STATION_FLOATS
+    let z = st[o]
+    let c = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], 0)
+    var centre = v3(0.0, 0.0, z)
+    var sum = 0.0
+    for k in 0..RING {
+        let p = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k)
+        sum = sum + p.y
+    }
+    centre.y = sum / (RING as f64)
+    let _ = c
+    for k in 0..RING {
+        let k2 = (k + 1) % RING
+        let a = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k)
+        let d = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k2)
+        let pa = v3(a.x, a.y, z)
+        let pd = v3(d.x, d.y, z)
+        // Wind the two ends opposite ways so both caps face outward.
+        if front {
+            b.tri(centre, pd, pa, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0)
+        } else {
+            b.tri(centre, pa, pd, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0)
+        }
+    }
+}
+
+// Windscreen, side glass and rear window, sitting a centimetre proud of the
+// shell so they never z-fight with the panel behind them.
+fn glassGeometry(b: &mut Builder) {
+    b.setTint(1.0, 1.0, 1.0)
+    b.setUvScale(0.6)
+    let e = 0.012
+    // Windscreen: from the cowl at station z = 1.28 up to the roof at z = 0.68.
+    b.quad(v3(-0.84 - e, 0.74 + e, 1.28), v3(0.84 + e, 0.74 + e, 1.28), v3(0.64 + e, 1.15 + e, 0.68), v3(-0.64 - e, 1.15 + e, 0.68), 1.0, 1.0)
+    // Rear window.
+    b.quad(v3(-0.62 - e, 1.17 + e, -0.34), v3(0.62 + e, 1.17 + e, -0.34), v3(0.79 + e, 0.87 + e, -1.12), v3(-0.79 - e, 0.87 + e, -1.12), 1.0, 1.0)
+    // Side glass, both flanks.
+    b.quad(v3(-0.93, 0.82, 0.66), v3(-0.93, 1.13, 0.64), v3(-0.93, 1.15, -0.32), v3(-0.93, 0.84, -0.30), 1.0, 1.0)
+    b.quad(v3(0.93, 0.84, -0.30), v3(0.93, 1.15, -0.32), v3(0.93, 1.13, 0.64), v3(0.93, 0.82, 0.66), 1.0, 1.0)
+}
+
+// The lamps. Tint carries the colour because one emissive material paints all
+// four: white at the nose, red at the tail.
+fn lampGeometry(b: &mut Builder) {
+    b.setUvScale(1.0)
+    b.setAo(1.0)
+    // Headlights, a slim bar each side of the nose.
+    b.setTint(6.0, 5.8, 5.2)
+    b.boxSpan(v3(-0.66, 0.42, 2.20), v3(-0.26, 0.52, 2.28))
+    b.boxSpan(v3(0.26, 0.42, 2.20), v3(0.66, 0.52, 2.28))
+    // Tail: one bar across the whole width, which is the shape you actually see
+    // of the car in front of you for most of a race.
+    b.setTint(4.2, 0.18, 0.10)
+    b.boxSpan(v3(-0.80, 0.58, -2.30), v3(0.80, 0.68, -2.24))
+    // Brake-light blades higher up, so a car braking in front of you changes
+    // shape as well as brightness.
+    b.setTint(3.4, 0.22, 0.12)
+    b.boxSpan(v3(-0.50, 0.72, -2.26), v3(0.50, 0.78, -2.22))
+}
+
+// One wheel, axle along X, centred on the origin. Tyre dark, rim bright, both
+// in one mesh: the tint does the work, so a wheel is one draw and not two.
+fn wheelGeometry(b: &mut Builder) {
+    let segs = 18
+    b.setUvScale(1.0)
+    for i in 0..segs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+        let c0 = Math.cos(a0)
+        let s0 = Math.sin(a0)
+        let c1 = Math.cos(a1)
+        let s1 = Math.sin(a1)
+        let hw = WHEEL_W * 0.5
+        // Tread band.
+        b.setTint(0.13, 0.13, 0.15)
+        let p0 = v3(-hw, c0 * WHEEL_R, s0 * WHEEL_R)
+        let p1 = v3(-hw, c1 * WHEEL_R, s1 * WHEEL_R)
+        let p2 = v3(hw, c1 * WHEEL_R, s1 * WHEEL_R)
+        let p3 = v3(hw, c0 * WHEEL_R, s0 * WHEEL_R)
+        b.quad(p0, p1, p2, p3, 0.6, 0.3)
+        // Sidewalls, dark, then the rim face inside them.
+        let r0 = v3(-hw, c0 * WHEEL_R * 0.62, s0 * WHEEL_R * 0.62)
+        let r1 = v3(-hw, c1 * WHEEL_R * 0.62, s1 * WHEEL_R * 0.62)
+        b.quad(p1, p0, r0, r1, 0.4, 0.4)
+        let q0 = v3(hw, c0 * WHEEL_R * 0.62, s0 * WHEEL_R * 0.62)
+        let q1 = v3(hw, c1 * WHEEL_R * 0.62, s1 * WHEEL_R * 0.62)
+        b.quad(p3, p2, q1, q0, 0.4, 0.4)
+        // Rim, inset a little so the tyre has a visible lip.
+        b.setTint(0.86, 0.88, 0.95)
+        let ri = hw * 0.72
+        b.quad(r1, r0, v3(-ri, 0.0, 0.0), v3(-ri, 0.0, 0.0), 0.4, 0.4)
+        b.quad(q0, q1, v3(ri, 0.0, 0.0), v3(ri, 0.0, 0.0), 0.4, 0.4)
+    }
+}
+
+pub fn buildCarModel(gl: &mut GlContext): CarModel {
+    var bb = builder()
+    bodyGeometry(bb)
+    var body = Mesh.new(gl, sceneAttrs())
+    body.upload(bb.data.clone())
+
+    var gb = builder()
+    glassGeometry(gb)
+    var glass = Mesh.new(gl, sceneAttrs())
+    glass.upload(gb.data.clone())
+
+    var wb = builder()
+    wheelGeometry(wb)
+    var wheel = Mesh.new(gl, sceneAttrs())
+    wheel.upload(wb.data.clone())
+
+    var lb = builder()
+    lampGeometry(lb)
+    var lamps = Mesh.new(gl, sceneAttrs())
+    lamps.upload(lb.data.clone())
+
+    return CarModel {
+        body: body, glass: glass, wheel: wheel, lamps: lamps,
+    }
+}
+
+impl CarModel {
+    fn free(self: Self, gl: &mut GlContext) {
+        self.body.free(gl)
+        self.glass.free(gl)
+        self.wheel.free(gl)
+        self.lamps.free(gl)
+    }
+}
+
+// Paint for one car. Only the albedo differs between the ten, which is the
+// whole reason there is one body mesh.
+pub fn paintMaterial(r: f64, g: f64, b: f64): Material {
+    var m = material(TEX_PAINT, r, g, b, 0.20, 0.55)
+    m.normalStrength = 0.5
+    return m
+}
+
+pub fn glassMaterial(): Material {
+    var m = material(TEX_GLASS, 0.04, 0.05, 0.07, 0.06, 0.30)
+    m.normalStrength = 0.3
+    return m
+}
+
+pub fn wheelMaterial(): Material {
+    var m = material(TEX_STEEL, 0.30, 0.31, 0.34, 0.44, 0.35)
+    m.normalStrength = 0.8
+    return m
+}
+
+// Emissive white, masked by nothing: the tint in the mesh is what colours each
+// lamp, so the head lamps and the tail lamps come out of one draw.
+pub fn lampMaterial(): Material {
+    var m = material(TEX_PAINT, 0.02, 0.02, 0.02, 0.35, 0.0)
+    m.emissive = v3(1.0, 1.0, 1.0)
+    return m
+}
+
+// ---------------------------------------------------------------------------
+// The car
+// ---------------------------------------------------------------------------
+
+pub struct Car {
+    pos: Vec3,
+    // Heading. 0 looks down +Z, and it grows turning to the right, which is the
+    // same convention the camera uses.
+    yaw: f64,
+    vel: Vec3,
+
+    // Cosmetic only. The chassis does not move relative to the wheels.
+    roll: f64,
+    pitch: f64,
+    steerVis: f64,
+    wheelSpin: f64,
+
+    // Where the car is on the circuit. `hint` is the sample `locate` starts its
+    // search from, and keeping it per car is what makes that search a window
+    // instead of a scan.
+    hint: i64,
+    s: f64,
+    lateral: f64,
+    lap: i64,
+    // The lap counter only advances when `s` wraps forward past the line, and
+    // this is what remembers which side of it the car was on last frame.
+    prevS: f64,
+    // Set for the frame the car is outside the road proper. Drives the grip
+    // model and the dust the renderer draws.
+    offTrack: bool,
+    // Set for the frame the car is put back by the barrier.
+    scraping: bool,
+    boost: f64,
+    colour: Vec3,
+}
+
+pub fn newCar(colour: Vec3): Car {
+    return Car {
+        pos: v3(0.0, 0.0, 0.0),
+        yaw: 0.0,
+        vel: v3(0.0, 0.0, 0.0),
+        roll: 0.0,
+        pitch: 0.0,
+        steerVis: 0.0,
+        wheelSpin: 0.0,
+        hint: 0,
+        s: 0.0,
+        lateral: 0.0,
+        lap: 0,
+        prevS: 0.0,
+        offTrack: false,
+        scraping: false,
+        boost: 0.0,
+        colour: colour,
+    }
+}
+
+impl Car {
+    fn forward(self: &Self): Vec3 {
+        return v3(Math.sin(self.yaw), 0.0, Math.cos(self.yaw))
+    }
+
+    // Up cross forward. Positive yaw turns toward +X, so this is the car's own
+    // right-hand side.
+    fn right(self: &Self): Vec3 {
+        return v3(Math.cos(self.yaw), 0.0, -Math.sin(self.yaw))
+    }
+
+    fn speed(self: &Self): f64 {
+        return self.vel.len()
+    }
+
+    // Signed forward speed, which is what the speedometer wants: a car sliding
+    // sideways at 40 m/s is not doing 40 mph down the road.
+    fn forwardSpeed(self: &Self): f64 {
+        return self.vel.dot(self.forward())
+    }
+
+    // Place the car on the grid, or back on the road after a reset.
+    fn placeOn(self: &mut Self, track: &Track, s: f64, off: f64) {
+        let p = track.pointAt(s, off)
+        let t = track.tangentAt(s)
+        self.pos = v3(p.x, 0.0, p.z)
+        self.yaw = Math.atan2(t.x, t.z)
+        self.vel = v3(0.0, 0.0, 0.0)
+        self.s = s
+        self.prevS = s
+        self.lateral = off
+        self.hint = track.idxAt(s)
+    }
+
+    // One step of the handling model.
+    //
+    // `steerIn` is -1 (left) to +1 (right), `throttle` and `brake` are 0 to 1,
+    // and `nitro` is whether the bottle is open this frame.
+    fn drive(self: &mut Self, dt: f64, throttle: f64, brake: f64, steerIn: f64, handbrake: bool, nitro: bool, track: &Track) {
+        let fwd = self.forward()
+        let rgt = self.right()
+        var vf = self.vel.dot(fwd)
+        var vr = self.vel.dot(rgt)
+
+        self.boost = if nitro {
+            Math.minF64(1.0, self.boost + dt * 4.0)
+        } else {
+            Math.maxF64(0.0, self.boost - dt * 2.0)
+        }
+
+        // Engine. The falloff toward the top speed is what makes the last twenty
+        // mph take the length of a straight to find.
+        let top = TOP_SPEED * (1.0 + BOOST_GAIN * self.boost)
+        if throttle > 0.0 {
+            let head = 1.0 - Math.clampF64(vf / top, 0.0, 1.0)
+            vf = vf + ENGINE * throttle * head * dt
+        }
+        // Brakes stop the car and then reverse it, slowly. A racer with no
+        // reverse is a racer where facing the wrong way ends the run.
+        if brake > 0.0 {
+            if vf > 0.0 {
+                vf = Math.maxF64(0.0, vf - BRAKE * brake * dt)
+            } else {
+                vf = Math.maxF64(-12.0, vf - 9.0 * brake * dt)
+            }
+        }
+        vf = vf - (DRAG * vf * Math.abs(vf) + ROLL_RESIST * vf) * dt
+
+        // Steering authority falls with speed. Without this the car is
+        // uncontrollable flat out and numb in a hairpin, which is the single
+        // most common way an arcade handling model feels wrong.
+        let sp = Math.abs(vf)
+        let auth = STEER_MAX / (1.0 + sp * 0.030)
+        // No steering at a standstill: the yaw rate is a consequence of rolling,
+        // not of turning the wheel.
+        let roll = Math.clampF64(sp / 6.0, 0.0, 1.0)
+        let dir = if vf < 0.0 {
+            -1.0
+        } else {
+            1.0
+        }
+        let yawRate = steerIn * auth * roll * dir * 3.6
+        self.yaw = self.yaw + yawRate * dt
+
+        // Turning the heading throws the body sideways, and the tyres eat it.
+        // Turning right (positive yaw rate) pushes the mass to the car's left,
+        // hence the sign.
+        vr = vr - yawRate * vf * dt
+        var grip = if self.offTrack {
+            GRIP_DIRT
+        } else {
+            GRIP_ROAD
+        }
+        if handbrake {
+            grip = GRIP_HANDBRAKE
+        }
+        vr = vr * Math.exp(-grip * dt)
+        // Off the road the car also simply will not go, which is most of what
+        // stops a player cutting the hairpin across the infield.
+        if self.offTrack {
+            vf = vf - vf * 1.5 * dt
+        }
+
+        // Rebuild the velocity in the NEW heading's frame. Rebuilding rather
+        // than rotating is what keeps a drift from quietly gaining energy.
+        let nf = self.forward()
+        let nr = self.right()
+        self.vel = nf.scale(vf) + nr.scale(vr)
+        self.pos = self.pos + self.vel.scale(dt)
+        self.pos.y = 0.0
+
+        // Cosmetics. The body leans out of the corner and squats under power.
+        let wantRoll = Math.clampF64(-yawRate * vf * 0.020, -0.20, 0.20)
+        self.roll = self.roll + (wantRoll - self.roll) * Math.minF64(1.0, dt * 6.0)
+        let wantPitch = Math.clampF64((brake * 0.055) - (throttle * 0.030), -0.05, 0.07)
+        self.pitch = self.pitch + (wantPitch - self.pitch) * Math.minF64(1.0, dt * 5.0)
+        self.steerVis = self.steerVis + (steerIn * 0.45 - self.steerVis) * Math.minF64(1.0, dt * 10.0)
+        self.wheelSpin = self.wheelSpin + (vf / WHEEL_R) * dt
+
+        self.followTrack(track)
+    }
+
+    // Update where the car is on the circuit, count the lap, and apply what the
+    // road does back to the car: dirt outside the racing surface, and a barrier
+    // outside that.
+    fn followTrack(self: &mut Self, track: &Track) {
+        let loc = track.locate(self.pos.x, self.pos.z, self.hint)
+        self.hint = loc.idx
+        self.lateral = loc.lateral
+        self.offTrack = Math.abs(loc.lateral) > HALF_WIDTH
+
+        // A lap counts when the car crosses the line going forwards. Comparing
+        // `s` to zero is not enough: a car nudged backwards over the line would
+        // score a lap every frame it wobbled there.
+        let step = track.delta(self.prevS, loc.s)
+        if self.prevS > track.length * 0.75 && loc.s < track.length * 0.25 && step > 0.0 {
+            self.lap = self.lap + 1
+        }
+        self.prevS = loc.s
+        self.s = loc.s
+
+        self.scraping = false
+        if Math.abs(loc.lateral) > WALL {
+            self.scraping = true
+            let sign = if loc.lateral > 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
+            // Put the car back exactly on the barrier line rather than pushing
+            // it with a force. A spring here oscillates: the car bounces off the
+            // wall, comes back, and bounces again, which reads as the game
+            // fighting the player.
+            let onWall = track.pointAt(loc.s, sign * WALL)
+            self.pos = v3(onWall.x, 0.0, onWall.z)
+
+            // Cancel the component heading into the wall, and only lightly scrub
+            // the component running along it. The barrier is a redirect, not a
+            // stop: a car that loses its speed to a wall it is merely leaning on
+            // has already lost the race, and reflecting more than the inward
+            // component (or scrubbing hard) turns a graze into a dead halt.
+            let nrm = track.normalAt(loc.s).scale(sign)
+            let into = self.vel.dot(nrm)
+            if into > 0.0 {
+                self.vel = self.vel - nrm.scale(into)
+            }
+            self.vel = self.vel.scale(0.97)
+        }
+    }
+
+    // Body transform: yaw, then the cosmetic lean, then out to where the car is.
+    fn modelMatrix(self: &Self): Vec<f32> {
+        let t = translation(self.pos)
+        let ry = rotationY(self.yaw)
+        let rz = rotationZ(self.roll)
+        let rx = rotationX(self.pitch)
+        return multiply(multiply(t, ry), multiply(rz, rx))
+    }
+
+    // One wheel. `i` is 0 front-left, 1 front-right, 2 rear-left, 3 rear-right.
+    // The fronts steer; all four spin.
+    fn wheelMatrix(self: &Self, i: i64): Vec<f32> {
+        let front = i < 2
+        let left = (i % 2) == 0
+        let x = if left {
+            -TRACK_WIDTH * 0.5
+        } else {
+            TRACK_WIDTH * 0.5
+        }
+        let z = if front {
+            WHEELBASE * 0.5
+        } else {
+            -WHEELBASE * 0.5
+        }
+        let local = translation(v3(x, WHEEL_R, z))
+        let steer = if front {
+            rotationY(self.steerVis)
+        } else {
+            identity()
+        }
+        // The wheel mesh has its axle along X, so the spin is about X.
+        let spin = rotationX(self.wheelSpin)
+        return multiply(self.modelMatrix(), multiply(local, multiply(steer, spin)))
+    }
+
+    // Where the head lamps throw light from, in world space. The renderer hangs
+    // a point light here for the player's car.
+    fn nose(self: &Self): Vec3 {
+        return self.pos + self.forward().scale(2.3) + v3(0.0, 0.5, 0.0)
+    }
+
+    fn tail(self: &Self): Vec3 {
+        return self.pos - self.forward().scale(2.3) + v3(0.0, 0.62, 0.0)
+    }
+}

@@ -1,0 +1,47 @@
+// One deterministic stream, so the range is laid out the same way every run —
+// a stone that moves between launches is a stone you cannot aim at.
+//
+// @wrapping because the whole point of a PCG step is modular arithmetic: Milo
+// traps on overflow everywhere else, which is right everywhere else.
+
+pub struct Rand {
+    state: u64,
+}
+
+pub fn rand(seed: u64): Rand {
+    return Rand {
+        state: seed | 1
+    }
+}
+
+impl Rand {
+    @wrapping
+    fn next(self: &mut Self): u64 {
+        var x = self.state
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+        self.state = x
+        return x
+    }
+
+    fn f(self: &mut Self): f64 {
+        return ((self.next() >> 11) as f64) / 9007199254740992.0
+    }
+
+    fn range(self: &mut Self, lo: f64, hi: f64): f64 {
+        return lo + (hi - lo) * self.f()
+    }
+
+    fn int(self: &mut Self, n: i64): i64 {
+        if n <= 0 {
+            return 0
+        }
+        return (self.next() % (n as u64)) as i64
+    }
+
+    // Symmetric about zero, which is what a jitter wants.
+    fn jitter(self: &mut Self, amount: f64): f64 {
+        return (self.f() * 2.0 - 1.0) * amount
+    }
+}

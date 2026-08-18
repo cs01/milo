@@ -1,0 +1,441 @@
+// Every GLSL string in one file, so a change to the lighting model is one place
+// and the shadow lookup the depth pass writes and the scene pass reads cannot
+// drift apart.
+//
+// Shared chunks are concatenated rather than #include'd, GL 3.3 core has no
+// include, and a shader built from named pieces is still one string by the time
+// the driver sees it.
+
+// ── shared ────────────────────────────────────────────────────────────────────
+
+// The sky table is lat-long with REPEAT wrapping, which is right for the azimuth
+// seam and wrong at the poles: v is clamped half a texel inside so a zenith
+// sample cannot blend into the nadir.
+pub let CHUNK_SKY: string = "
+uniform sampler2D uSky;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+const float PI = 3.14159265;
+
+vec3 skyLookup(vec3 d, float lod) {
+    d = normalize(d);
+    float u = atan(d.z, d.x) / (2.0 * PI) + 0.25;
+    float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+    v = clamp(v, 0.5 / 128.0, 1.0 - 0.5 / 128.0);
+    return textureLod(uSky, vec2(u, v), lod).rgb;
+}
+
+uniform float uTime;
+uniform float uCloudCover;
+
+// What you see where no geometry does. The room is closed, so this is only ever
+// the far end of the vault seen past the edge of a panel, but it has to agree
+// with the table the reflections sample or those edges show as seams.
+//
+// The dither is not decoration: the vault is a near-black gradient over a
+// hundred pixels of screen, which is exactly where 8-bit output bands.
+vec3 roomBackdrop(vec3 d) {
+    vec3 col = skyLookup(d, 0.0);
+    float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    return col + (n - 0.5) * 0.004;
+}
+"
+
+// Ambient as two irradiance values, not one constant. A face pointing up is lit
+// by the vault, a face pointing down by what the carpet bounced back, and the
+// horizon is the mix, which is why a soffit in here goes violet underneath and
+// cold on top without either being painted in.
+pub let CHUNK_LIGHT: string = "
+uniform vec3 uSkyUp;
+uniform vec3 uSkyDown;
+
+vec3 ambientIrradiance(vec3 n) {
+    float t = 0.5 + 0.5 * n.y;
+    return mix(uSkyDown, uSkyUp, t);
+}
+
+// GGX / Smith / Schlick, the standard set.
+float distGGX(float ndh, float a) {
+    float a2 = a * a;
+    float d = ndh * ndh * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-7);
+}
+
+float geomSmith(float ndv, float ndl, float a) {
+    float k = (a + 1.0) * (a + 1.0) / 8.0;
+    float gv = ndv / (ndv * (1.0 - k) + k);
+    float gl = ndl / (ndl * (1.0 - k) + k);
+    return gv * gl;
+}
+
+vec3 fresnel(float ct, vec3 f0) {
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - ct, 0.0, 1.0), 5.0);
+}
+
+// The neon. Nothing in an arcade is lit by the ceiling: the light comes off the
+// tubes and the sign faces, and a room full of glowing geometry that throws no
+// light on the floor in front of it is the tell that the glow is painted on.
+//
+// Sixteen of them, no shadows, inverse-square with a finite reach so a tube at
+// the far end of the room is not still costing a fragment at the near end. The
+// reach is stored as 1/range^2 so the falloff is a multiply.
+const int MAX_LIGHTS = 16;
+uniform int uLightCount;
+uniform vec3 uLightPos[MAX_LIGHTS];
+uniform vec3 uLightColor[MAX_LIGHTS];
+uniform float uLightInvRange2[MAX_LIGHTS];
+
+vec3 pointLights(vec3 p, vec3 n, vec3 v, vec3 albedo, float rough, float metal, vec3 f0) {
+    vec3 sum = vec3(0.0);
+    float a = rough * rough;
+    for (int i = 0; i < MAX_LIGHTS; i++) {
+        if (i >= uLightCount) break;
+        vec3 d = uLightPos[i] - p;
+        float dist2 = dot(d, d);
+        // Windowed inverse square: the 1/r^2 is the physics, the window is what
+        // makes the cost bounded. Without it every light touches every fragment.
+        float win = clamp(1.0 - dist2 * uLightInvRange2[i], 0.0, 1.0);
+        float atten = win * win / max(dist2, 0.04);
+        if (atten < 0.0002) continue;
+        vec3 l = d * inversesqrt(max(dist2, 1e-6));
+        float ndl = max(dot(n, l), 0.0);
+        if (ndl <= 0.0) continue;
+        vec3 h = normalize(v + l);
+        float ndv = max(dot(n, v), 1e-4);
+        float ndh = max(dot(n, h), 0.0);
+        vec3 f = fresnel(max(dot(v, h), 0.0), f0);
+        vec3 spec = distGGX(ndh, a) * geomSmith(ndv, ndl, rough) * f / max(4.0 * ndv * ndl, 1e-4);
+        vec3 kd = (1.0 - f) * (1.0 - metal);
+        sum += (kd * albedo / PI + spec) * uLightColor[i] * ndl * atten;
+    }
+    return sum;
+}
+"
+
+// Depth is in the colour attachment because the gl package attaches depth as a
+// renderbuffer, which is not sampleable. Half floats alone are too coarse over
+// the range the map covers, about 3 cm, which is a visible staircase along the
+// edge of a shadow at 25 m, so the value is split high/low across two channels
+// for roughly 19 bits, at the cost of two instructions.
+pub let CHUNK_SHADOW: string = "
+uniform sampler2D uShadow;
+uniform mat4 uLightVP;
+uniform float uShadowTexel;
+
+float decodeDepth(vec2 rg) {
+    return rg.r + rg.g / 256.0;
+}
+
+float sunVisibility(vec3 world, vec3 n, float ndl) {
+    if (ndl <= 0.0) return 0.0;
+    // Normal offset rather than a constant depth bias: the error in the depth
+    // comparison is proportional to how far one shadow texel reaches across the
+    // surface, which is what peter-panning a flat bias trades against acne.
+    float slope = clamp(1.0 - ndl, 0.0, 1.0);
+    vec3 p = world + n * uShadowTexel * (1.1 + 2.6 * slope);
+    vec4 lc = uLightVP * vec4(p, 1.0);
+    vec3 proj = lc.xyz / lc.w * 0.5 + 0.5;
+    if (proj.x < 0.002 || proj.x > 0.998 || proj.y < 0.002 || proj.y > 0.998 || proj.z > 1.0) return 1.0;
+    float bias = 0.00035;
+    float sum = 0.0;
+    float texel = 1.0 / 2048.0;
+    // A twelve-tap Poisson disc, rotated per pixel. A 3x3 box at one texel is
+    // three pixels of gradient and reads as a hard edge with stair steps on it;
+    // spreading the same idea over a disc and dithering the rotation turns the
+    // steps into noise the eye reads as a soft edge.
+    vec2 disc[12] = vec2[12](
+        vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696,  0.457),
+        vec2(-0.203,  0.621), vec2( 0.962, -0.195), vec2( 0.473, -0.480),
+        vec2( 0.519,  0.767), vec2( 0.185, -0.893), vec2( 0.507,  0.064),
+        vec2( 0.896,  0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));
+    float ang = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    float cs = cos(ang);
+    float sn = sin(ang);
+    for (int i = 0; i < 12; i++) {
+        vec2 d2 = vec2(disc[i].x * cs - disc[i].y * sn, disc[i].x * sn + disc[i].y * cs);
+        vec2 o = d2 * texel * 2.1;
+        float d = decodeDepth(texture(uShadow, proj.xy + o).rg);
+        sum += (proj.z - bias <= d) ? 1.0 : 0.0;
+    }
+    return sum / 12.0;
+}
+"
+
+// ── shadow pass ───────────────────────────────────────────────────────────────
+
+pub let SHADOW_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aUv;
+layout (location = 3) in vec3 aTint;
+layout (location = 4) in float aAo;
+uniform mat4 uLightVP;
+uniform mat4 uModel;
+void main() {
+    gl_Position = uLightVP * uModel * vec4(aPos, 1.0);
+}
+"
+
+pub let SHADOW_FRAG: string = "#version 330 core
+out vec4 fragColor;
+void main() {
+    float d = gl_FragCoord.z;
+    float hi = floor(d * 256.0) / 256.0;
+    float lo = (d - hi) * 256.0;
+    fragColor = vec4(hi, lo, 0.0, 1.0);
+}
+"
+
+// ── sky dome ──────────────────────────────────────────────────────────────────
+
+pub let SKY_VERT: string = "#version 330 core
+layout (location = 0) in vec2 aPos;
+uniform mat4 uInvViewProj;
+out vec3 vDir;
+void main() {
+    vec4 near = uInvViewProj * vec4(aPos, -1.0, 1.0);
+    vec4 far = uInvViewProj * vec4(aPos, 1.0, 1.0);
+    vDir = far.xyz / far.w - near.xyz / near.w;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+"
+
+pub fn skyFrag(): string {
+    return "#version 330 core
+in vec3 vDir;
+out vec4 fragColor;
+"
+
+    + CHUNK_SKY + "
+void main() {
+    fragColor = vec4(roomBackdrop(normalize(vDir)), 1.0);
+}
+"
+
+}
+
+// ── scene ─────────────────────────────────────────────────────────────────────
+
+pub let SCENE_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aUv;
+layout (location = 3) in vec3 aTint;
+layout (location = 4) in float aAo;
+uniform mat4 uViewProj;
+uniform mat4 uModel;
+out vec3 vWorld;
+out vec3 vNormal;
+out vec2 vUv;
+out vec3 vTint;
+out float vAo;
+void main() {
+    vec4 wp = uModel * vec4(aPos, 1.0);
+    vWorld = wp.xyz;
+    // Every model matrix here is rigid (rotation and translation only) so the
+    // matrix is its own normal matrix. Introduce a non-uniform scale and this
+    // line silently starts bending normals.
+    vNormal = mat3(uModel) * aNormal;
+    vUv = aUv;
+    vTint = aTint;
+    vAo = aAo;
+    gl_Position = uViewProj * wp;
+}
+"
+
+// ── depth + normal prepass ────────────────────────────────────────────────────
+
+// SSAO needs to know, for every pixel, where the surface is and which way it
+// faces. The scene pass cannot supply that: it is forward-lit into an HDR colour
+// buffer, and the gl package attaches depth as a renderbuffer, which is not
+// sampleable. So the geometry is drawn once more, cheaply, into a buffer holding
+// view-space distance in the red channel and the view-space normal in the rest.
+pub let DEPTH_VERT: string = "#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aUv;
+layout (location = 3) in vec3 aTint;
+layout (location = 4) in float aAo;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform mat4 uModel;
+out vec3 vViewPos;
+out vec3 vViewNormal;
+void main() {
+    vec4 vp = uView * uModel * vec4(aPos, 1.0);
+    vViewPos = vp.xyz;
+    vViewNormal = mat3(uView) * (mat3(uModel) * aNormal);
+    gl_Position = uProj * vp;
+}
+"
+
+pub let DEPTH_FRAG: string = "#version 330 core
+in vec3 vViewPos;
+in vec3 vViewNormal;
+out vec4 fragColor;
+void main() {
+    // Distance along the view axis, positive in front of the eye. Zero means
+    // nothing was drawn here, which is how the AO pass recognises the sky.
+    fragColor = vec4(-vViewPos.z, normalize(vViewNormal));
+}
+"
+
+pub fn sceneFrag(): string {
+    return "#version 330 core
+in vec3 vWorld;
+in vec3 vNormal;
+in vec2 vUv;
+in vec3 vTint;
+in float vAo;
+out vec4 fragColor;
+
+uniform sampler2D uAlbedoTex;
+uniform sampler2D uSurfTex;
+uniform vec3 uCam;
+uniform vec3 uAlbedo;
+uniform float uRough;
+uniform float uMetal;
+uniform vec3 uEmissive;
+uniform float uEmissiveMap;
+uniform float uAlpha;
+uniform float uNormalStrength;
+uniform float uDetail;
+uniform float uDebug;
+uniform sampler2D uAo;
+uniform vec2 uAoTexel;
+uniform float uAoAmount;
+"
+
+    + CHUNK_SKY + CHUNK_LIGHT + CHUNK_SHADOW + "
+
+// A tangent frame from screen derivatives. No tangent attribute means no mesh
+// generator can get the handedness of one primitive wrong on its own.
+vec3 applyNormalMap(vec3 n, vec3 nmap, float strength) {
+    vec3 dp1 = dFdx(vWorld);
+    vec3 dp2 = dFdy(vWorld);
+    vec2 duv1 = dFdx(vUv);
+    vec2 duv2 = dFdy(vUv);
+    vec3 dp2perp = cross(dp2, n);
+    vec3 dp1perp = cross(n, dp1);
+    vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+    float inv = inversesqrt(max(dot(t, t), dot(b, b)));
+    if (!(inv < 1e18)) return n;
+    mat3 tbn = mat3(t * inv, b * inv, n);
+    vec3 m = nmap * 2.0 - 1.0;
+    m.xy *= strength;
+    return normalize(tbn * normalize(m));
+}
+
+void main() {
+    vec3 geoN = normalize(vNormal);
+    vec4 surf = texture(uSurfTex, vUv);
+    vec3 baseAlbedo = texture(uAlbedoTex, vUv).rgb;
+    // A second sample of the same texture at a much finer scale. Ground seen
+    // from standing height covers three orders of magnitude of distance, and one
+    // texture scale can only be right for one of them: at the near end it is a
+    // smear and at the far end it is a repeating stamp. Multiplying in a fine
+    // copy puts grain under your feet and breaks up the tile at range, from one
+    // texture and one extra fetch.
+    if (uDetail > 0.0) {
+        // The detail copy is rotated. Sampling the same texture twice on the
+        // same axes stacks its ripples on top of themselves and the ground comes
+        // out as corduroy; crossing them at fifty degrees is what wind-blown
+        // sand actually does, and it hides the tile at the same time.
+        vec2 duv = vec2(vUv.x * 0.623 - vUv.y * 0.782,
+                        vUv.x * 0.782 + vUv.y * 0.623) * uDetail;
+        // and the macro copy is pulled towards its own mean, so the big ripple
+        // train reads as relief rather than as painted stripes
+        baseAlbedo = mix(vec3(0.55), baseAlbedo, 0.40);
+        vec3 dA = texture(uAlbedoTex, duv).rgb;
+        // Strong enough to actually show. A gentle multiply reads as noise on a
+        // wash; what the near ground needs is contrast at the pixel scale.
+        baseAlbedo *= mix(vec3(1.0), dA * 2.05, 0.38);
+        vec4 dS = texture(uSurfTex, duv);
+        vec3 nb = surf.rgb * 2.0 - 1.0;
+        vec3 nd = dS.rgb * 2.0 - 1.0;
+        surf.rgb = normalize(vec3(nb.xy + nd.xy * 1.5, nb.z * 0.8)) * 0.5 + 0.5;
+        surf.a = mix(surf.a, dS.a, 0.45);
+    }
+    vec3 n = applyNormalMap(geoN, surf.rgb, uNormalStrength);
+    vec3 albedo = baseAlbedo * uAlbedo * vTint;
+    float rough = clamp(uRough * (0.55 + 0.9 * surf.a), 0.04, 1.0);
+    float metal = uMetal;
+
+    vec3 v = normalize(uCam - vWorld);
+    vec3 l = uSunDir;
+    vec3 h = normalize(v + l);
+    float ndl = max(dot(n, l), 0.0);
+    float ndv = max(dot(n, v), 1e-4);
+    float ndh = max(dot(n, h), 0.0);
+    float vdh = max(dot(v, h), 0.0);
+
+    vec3 f0 = mix(vec3(0.04), albedo, metal);
+    float a = rough * rough;
+    vec3 f = fresnel(vdh, f0);
+    float ndf = distGGX(ndh, a);
+    float g = geomSmith(ndv, ndl, rough);
+    vec3 spec = ndf * g * f / max(4.0 * ndv * ndl, 1e-4);
+    vec3 kd = (1.0 - f) * (1.0 - metal);
+
+    // Geometric normal for the shadow lookup: the offset is about where the
+    // surface is, and a normal map perturbs where it points, not where it is.
+    float vis = sunVisibility(vWorld, geoN, dot(geoN, uSunDir));
+    vec3 direct = (kd * albedo / PI + spec) * uSunColor * ndl * vis;
+    direct += pointLights(vWorld, n, v, albedo, rough, metal, f0);
+
+    // Ambient: diffuse from the sky's irradiance, specular from the sky itself
+    // in the mirror direction, blurred by roughness through the mip chain.
+    float ao = clamp(vAo * (0.35 + 0.65 * surf.a * 0.0 + 0.65), 0.0, 1.0);
+    // Screen-space occlusion, on top of the AO baked into the mesh. It only
+    // touches ambient: the sun is a single direction and is already occluded by
+    // the shadow map, and darkening direct sunlight with a screen-space guess is
+    // what makes an SSAO pass look like dirt sprayed on the frame.
+    float ssao = texture(uAo, gl_FragCoord.xy * uAoTexel).r;
+    ao *= mix(1.0, ssao, uAoAmount);
+    vec3 amb = ambientIrradiance(n) * albedo * (1.0 - metal) * ao / PI;
+    vec3 r = reflect(-v, n);
+    vec3 envSpec = skyLookup(r, rough * 7.0) * fresnel(ndv, f0);
+    // A horizon-facing reflection on a floor should not sample the ground half
+    // of the table, which holds no useful radiance.
+    float horiz = clamp(1.0 + dot(r, geoN) * 0.0 + r.y * 2.5, 0.0, 1.0);
+    amb += envSpec * ao * mix(0.15, 1.0, horiz) * (0.35 + 0.65 * metal);
+
+    // Emissive is tinted by the vertex colour, so one neon material paints every
+    // tube in the room: the tint carries the colour and the brightness. With
+    // uEmissiveMap on it is also masked by the albedo texture, which is how a
+    // printed number on a target face glows and the disc around it does not.
+    vec3 col = direct + amb + uEmissive * vTint * mix(vec3(1.0), baseAlbedo, uEmissiveMap);
+
+    // Haze, towards the room's own radiance in the view direction rather than
+    // towards a grey. A hall thirty metres deep with this much light in the air
+    // is what puts the far end of the vault behind the near end.
+    float dist = length(uCam - vWorld);
+    float ext = 1.0 - exp(-dist * 0.012);
+    col = mix(col, skyLookup(-v, 2.0), ext * 0.55);
+
+    fragColor = vec4(col, uAlpha);
+    // --debug 3 shows the occlusion buffer on its own, which is the only way to
+    // tell a working AO pass from a pass that is silently returning white.
+    if (uDebug > 2.5) {
+        fragColor = vec4(vec3(ssao), 1.0);
+        return;
+    }
+    if (uDebug > 0.5) {
+        // uv sanity: the raw coordinate as colour, and the mip level the driver
+        // picks for it. A ground that blurs where it should be sharp is one of
+        // these two lying, and guessing which costs more than asking.
+        vec2 dx = dFdx(vUv);
+        vec2 dy = dFdy(vUv);
+        float rho = max(length(dx), length(dy)) * 256.0;
+        float lod = log2(max(rho, 1e-6));
+        if (uDebug > 1.5) {
+            fragColor = vec4(clamp(lod / 8.0, 0.0, 1.0), clamp(-lod / 8.0, 0.0, 1.0), 0.0, 1.0);
+        } else {
+            fragColor = vec4(fract(vUv), 0.0, 1.0);
+        }
+    }
+}
+"
+
+}

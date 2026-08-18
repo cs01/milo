@@ -1,0 +1,212 @@
+// The night the race runs under, tabulated once at startup.
+//
+// There is no sun and no atmospheric model here. What the reflection lookup and
+// the ambient term need is the radiance of a *city at night under a storm* in
+// every direction: a near-black violet overhead, cloud bellies lit from below by
+// the city they are sitting on, a bright ring of skyline glow all the way round
+// the horizon, and one quadrant blown out by lightning. It is stored lat-long
+// (u = azimuth, v = zenith angle), the same layout the shader already samples.
+//
+// Two things come out of it and both decide how the game looks:
+//
+//   - the lat-long radiance table, drawn as the backdrop and sampled for rough
+//     reflections. Wet asphalt is most of this scene by area and nearly all of
+//     what you see in it is this table.
+//   - the irradiance it delivers to an up-facing and a down-facing surface,
+//     which IS the ambient term. Ambient picked by eye is what makes a render
+//     look like a render.
+//
+// The scene is deliberately dim. Every value here competes with the neon, the
+// head lamps and the tail lights, and those are the things the player is meant
+// to be looking at: brighten the sky and the track furniture stops glowing and
+// starts merely being pink.
+//
+// The table is sampled with v clamped half a texel off each pole (`skyLookup` in
+// the shader), because the wrap mode has to be REPEAT for the azimuth seam and
+// REPEAT at the poles would blend the zenith into the nadir.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+pub let SKY_W: i64 = 256
+
+pub let SKY_H: i64 = 128
+
+pub struct Sky {
+    // SKY_W * SKY_H * 3 floats of linear radiance, u = azimuth, v = zenith angle.
+    table: Vec<f32>,
+    sun: Vec3,
+    // The one directional source: moonlight through the cloud deck, cold and
+    // weak. It exists to put a shadow under the cars. A night scene with no
+    // directional light at all reads as flat however much neon is in it, and a
+    // car with no shadow reads as a sticker on the road.
+    sunColor: Vec3,
+    // Irradiance from the sky alone, on an up-facing and a down-facing surface.
+    // `ambientIrradiance(n)` in the shader interpolates between them.
+    skyUp: Vec3,
+    skyDown: Vec3,
+}
+
+// Smooth pulse, 1 at `c` and 0 more than `w` away.
+fn lobe(x: f64, c: f64, w: f64): f64 {
+    let d = Math.abs(x - c) / w
+    if d >= 1.0 {
+        return 0.0
+    }
+    let t = 1.0 - d
+    return t * t * (3.0 - 2.0 * t)
+}
+
+// Same, wrapped in azimuth so a lobe centred on the seam does not tear.
+fn lobeAz(a: f64, c: f64, w: f64): f64 {
+    var d = a - c
+    while d > Math.pi() {
+        d = d - 2.0 * Math.pi()
+    }
+    while d < -Math.pi() {
+        d = d + 2.0 * Math.pi()
+    }
+    return lobe(Math.abs(d), 0.0, w)
+}
+
+// The radiance of the night in one direction.
+//
+// Everything is hand-placed rather than simulated. The sky over a city is three
+// bands (cloud deck, skyline, ground) and the interesting structure is all in
+// how the deck is lit from underneath, which no physical model reproduces
+// without also reproducing the city.
+fn nightRadiance(dir: &Vec3): Vec3 {
+    let up = Math.clampF64(dir.y, -1.0, 1.0)
+    let az = Math.atan2(dir.x, dir.z)
+
+    // The cloud deck. Near-black indigo at the apex, warming through violet as
+    // it comes down to the horizon, because the underside of the deck is what
+    // the city is shining on.
+    var col = v3(0.006, 0.005, 0.022)
+    let toHorizon = 1.0 - Math.clampF64(Math.abs(up), 0.0, 1.0)
+    let h2 = toHorizon * toHorizon
+    col = col + v3(0.055, 0.012, 0.105).scale(h2)
+    col = col + v3(0.030, 0.008, 0.070).scale(h2 * h2)
+
+    // Torn cloud structure: a few broad lobes of brighter magenta where the deck
+    // is thinner. Without this the sky is a smooth gradient, and a smooth
+    // gradient behind a skyline is the tell that the backdrop is a ramp.
+    if up > -0.05 {
+        col = col + v3(0.085, 0.020, 0.130).scale(lobeAz(az, 0.9, 1.0) * lobe(up, 0.30, 0.40))
+        col = col + v3(0.050, 0.030, 0.115).scale(lobeAz(az, -2.1, 1.2) * lobe(up, 0.46, 0.44))
+        col = col + v3(0.038, 0.010, 0.075).scale(lobeAz(az, 2.6, 0.9) * lobe(up, 0.18, 0.30))
+    }
+
+    // The skyline: a bright band right at the horizon, all the way round,
+    // because the circuit is a loop and there is city on every side of it. The
+    // colour shifts with bearing so that which way you are pointing is
+    // something you can read off the sky.
+    let band = lobe(up, 0.020, 0.115)
+    col = col + v3(0.40, 0.10, 0.52).scale(band * (0.55 + 0.45 * lobeAz(az, 0.0, 2.2)))
+    col = col + v3(0.08, 0.34, 0.62).scale(band * lobeAz(az, 2.0, 1.5))
+    col = col + v3(0.52, 0.20, 0.14).scale(band * lobeAz(az, -1.4, 1.1))
+    // A tighter, hotter core inside the band: the downtown cluster.
+    col = col + v3(0.62, 0.26, 0.70).scale(lobe(up, 0.035, 0.045) * lobeAz(az, -0.5, 0.85))
+
+    // Lightning, one quadrant, standing still. It is baked into the table rather
+    // than flashed per frame: a strike that lights the whole sky for two frames
+    // also has to light every surface in the scene to be believable, and a table
+    // rebuild is far too expensive to do on a flash. The bolt itself is drawn as
+    // geometry by the world, and this is the sky it is standing in front of.
+    let strike = lobeAz(az, 2.35, 0.55) * lobe(up, 0.42, 0.50)
+    col = col + v3(0.34, 0.26, 0.68).scale(strike * strike)
+
+    // Below the horizon: the ground, which at night gives back almost nothing
+    // except where the streetlights are. Warm, so a surface facing down is not
+    // the same colour as one facing up, which is most of what keeps the cars
+    // from looking like they are lit by one lamp.
+    if up < 0.0 {
+        let d = -up
+        col = v3(0.030, 0.014, 0.040).scale(1.0 - 0.55 * d)
+        col = col + v3(0.075, 0.045, 0.030).scale(lobe(d, 0.16, 0.20))
+    }
+
+    return col
+}
+
+fn dirFromLatLong(u: f64, v: f64): Vec3 {
+    let theta = v * Math.pi()
+    let phi = (u - 0.25) * 2.0 * Math.pi()
+    let st = Math.sin(theta)
+    return v3(st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi))
+}
+
+// `intensity` scales the whole sky. It is the one knob worth having, because the
+// bloom threshold is fixed: brightening the sky and brightening the neon are not
+// the same operation and only one of them changes what glows.
+pub fn buildNight(intensity: f64): Sky {
+    // High and behind the downtown cluster, so cars are rim-lit from the side
+    // the brightest part of the sky is on and the shadow falls across the road
+    // rather than straight down it.
+    let sun = v3(0.42, 0.84, -0.34).norm()
+
+    var table: Vec<f32> = Vec.filled(SKY_W * SKY_H * 3, 0.0)
+    // Cosine-weighted sums over the whole sphere, split by which side of the
+    // horizon the direction is on, so one pass yields both hemispheres.
+    var upR = 0.0
+    var upG = 0.0
+    var upB = 0.0
+    var downR = 0.0
+    var downG = 0.0
+    var downB = 0.0
+    var upW = 0.0
+    var downW = 0.0
+    for j in 0..SKY_H {
+        let v = ((j as f64) + 0.5) / (SKY_H as f64)
+        let theta = v * Math.pi()
+        // Solid angle of this ring, for the irradiance sums.
+        let dOmega = Math.sin(theta) * (Math.pi() / (SKY_H as f64)) * (2.0 * Math.pi() / (SKY_W as f64))
+        for i in 0..SKY_W {
+            let u = ((i as f64) + 0.5) / (SKY_W as f64)
+            let dir = dirFromLatLong(u, v)
+            let rad = nightRadiance(dir).scale(intensity)
+            let o = (j * SKY_W + i) * 3
+            table[o] = rad.x as f32
+            table[o + 1] = rad.y as f32
+            table[o + 2] = rad.z as f32
+            let cosT = dir.y
+            if cosT > 0.0 {
+                let w = cosT * dOmega
+                upR = upR + rad.x * w
+                upG = upG + rad.y * w
+                upB = upB + rad.z * w
+                upW = upW + w
+            } else {
+                let w = -cosT * dOmega
+                downR = downR + rad.x * w
+                downG = downG + rad.y * w
+                downB = downB + rad.z * w
+                downW = downW + w
+            }
+        }
+    }
+    if upW <= 0.0 {
+        upW = 1.0
+    }
+    if downW <= 0.0 {
+        downW = 1.0
+    }
+    // Irradiance, not average radiance: the pi is the integral of the cosine
+    // over the hemisphere, and dropping it is the classic way a render comes out
+    // three times too dark in shadow.
+    let skyUp = v3(upR, upG, upB).scale(Math.pi() / upW)
+    let below = v3(downR, downG, downB).scale(Math.pi() / downW)
+    // Moonlight through cloud: cold, and weak enough that the neon still wins.
+    let sunC = v3(0.20, 0.24, 0.42).scale(intensity)
+    // What the road throws back up. Wet asphalt under magenta signs bounces
+    // magenta, and a car's underside picking that up is most of what says the
+    // race is happening in a city rather than in a void.
+    let bounce = below.scale(0.85) + v3(0.022, 0.008, 0.030).scale(intensity)
+    return Sky {
+        table: table, sun: sun, sunColor: sunC, skyUp: skyUp, skyDown: bounce,
+    }
+}

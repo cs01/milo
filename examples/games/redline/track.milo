@@ -1,0 +1,409 @@
+// The circuit: one closed loop, resampled into a table that every other system
+// reads.
+//
+// The centreline is a closed Catmull-Rom through hand-placed control points,
+// then resampled at a uniform arc length. The resampling is the whole reason
+// this file exists. A spline parameter `t` is not distance: on a Catmull-Rom
+// through unevenly spaced points, equal steps in `t` are wildly unequal steps in
+// metres, so anything built on raw `t` (grid spacing, the AI's lookahead, "how
+// far ahead is the car in front") is wrong by a factor that changes with the
+// corner. Every query here is in metres along the road, which is the only unit
+// the rest of the game ever needs.
+//
+// Three things come out of the table and all three are hot:
+//
+//   - `locate(x, z, hint)`, the inverse map. Given a world position it returns
+//     how far round the lap you are and how far off the centre line, which is
+//     what decides off-track handling, lap counting and race position.
+//   - `posAt(s)` / `tangentAt(s)`, the forward map, which is what the AI steers
+//     along and what the start grid is laid out on.
+//   - `curvatureAt(s)`, which is how fast a corner can be taken. It is measured
+//     off the resampled centreline rather than differentiated from the spline,
+//     because the second derivative of a Catmull-Rom is discontinuous at every
+//     control point and a corner-speed target built on it steps at the seams.
+
+from "std/math" import {
+    Math
+}
+from "./vec3" import {
+    Vec3, v3
+}
+
+// Half the road width in metres. Ten cars have to be able to run three abreast
+// and still leave room to pass, and the reference this game is aiming at is a
+// wide arcade boulevard rather than a real circuit.
+pub let HALF_WIDTH: f64 = 11.0
+
+// The dirt shoulder outside the road proper, before the barrier. Running wide
+// costs grip here rather than ending the lap, which is the arcade bargain: a
+// mistake is slow, not fatal.
+pub let SHOULDER: f64 = 4.5
+
+// Where the barrier stands. Beyond this the car is redirected, hard. Spelled as
+// a literal rather than as `HALF_WIDTH + SHOULDER`: a global whose initializer
+// reads other globals is only run by an entry point, so writing it that way
+// makes this module fail to type-check on its own.
+pub let WALL: f64 = 15.5
+
+// Metres between centreline samples. At 2.5 m a 2.7 km lap is about 1100
+// samples, which is small enough to scan linearly when a search hint goes stale
+// and fine enough that the road mesh has no visible facets on the hairpin.
+let SPACING: f64 = 2.5
+
+// Points per control segment when the spline is walked to measure its length.
+// This only sets the accuracy of the arc-length table, not the smoothness of
+// the road, so it can be generous.
+let DENSE: i64 = 64
+
+// The circuit, counter-clockwise seen from above, in metres. A long pit straight
+// to start, a fast double-apex right onto the east side, a tightening left over
+// the top into a hairpin, then an S down the west side that puts one genuine
+// right-hander in a lap that would otherwise turn one way for two minutes.
+//
+// Hand-placed rather than generated: a circuit is a sequence of decisions the
+// player learns, and a procedural loop has no decisions in it, only curves.
+fn controlPoints(): Vec<f64> {
+    return [
+    // start/finish straight, running +X at z = -380
+    -300.0, -380.0, -140.0, -382.0, 20.0, -383.0, 180.0, -380.0, 320.0, -370.0,
+    // turn 1, a long fast left onto the east side
+    440.0, -300.0, 490.0, -170.0, 480.0, -30.0,
+    // east side, with a kink out that stops it being a straight
+    430.0, 90.0, 445.0, 200.0,
+    // over the top
+    390.0, 310.0, 270.0, 380.0,
+    // the hairpin
+    140.0, 400.0, 30.0, 372.0, -20.0, 300.0,
+    // west side: right, then left, the only right-hander on the lap
+    -90.0, 210.0, -210.0, 150.0, -330.0, 120.0, -410.0, 30.0, -430.0, -110.0, -400.0, -250.0, -340.0, -350.0,]
+}
+
+pub struct Track {
+    // One entry per sample, all parallel. Flat Vec<f64> rather than a Vec of a
+    // sample struct because `let s = samples[i]` deep-copies a struct out of a
+    // Vec in this language, and `locate` touches sixty of these per car per
+    // frame.
+    xs: Vec<f64>,
+    zs: Vec<f64>,
+    // Unit tangent, pointing the way the lap runs.
+    txs: Vec<f64>,
+    tzs: Vec<f64>,
+    // Signed curvature, positive turning left. Smoothed, see `buildTrack`.
+    ks: Vec<f64>,
+    n: i64,
+    // Total lap distance in metres. `s` is always taken modulo this.
+    length: f64,
+}
+
+fn catmull(p0: f64, p1: f64, p2: f64, p3: f64, t: f64): f64 {
+    let t2 = t * t
+    let t3 = t2 * t
+    return 0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3)
+}
+
+// Wrap a control index into range. The loop is closed, so the segment before
+// the first point is the one after the last.
+fn wrapC(i: i64, n: i64): i64 {
+    var m = i % n
+    if m < 0 {
+        m = m + n
+    }
+    return m
+}
+
+pub fn buildTrack(): Track {
+    let ctrl = controlPoints()
+    let nc = ctrl.len / 2
+
+    // Walk the spline densely and keep cumulative distance, so the resample
+    // below can be done by inverting that table.
+    var dx: Vec<f64> = Vec.new()
+    var dz: Vec<f64> = Vec.new()
+    var ds: Vec<f64> = Vec.new()
+    var run = 0.0
+    var px = 0.0
+    var pz = 0.0
+    for i in 0..nc {
+        let i0 = wrapC(i - 1, nc)
+        let i1 = i
+        let i2 = wrapC(i + 1, nc)
+        let i3 = wrapC(i + 2, nc)
+        for j in 0..DENSE {
+            let t = (j as f64) / (DENSE as f64)
+            let x = catmull(ctrl[i0 * 2], ctrl[i1 * 2], ctrl[i2 * 2], ctrl[i3 * 2], t)
+            let z = catmull(ctrl[i0 * 2 + 1], ctrl[i1 * 2 + 1], ctrl[i2 * 2 + 1], ctrl[i3 * 2 + 1], t)
+            if dx.len > 0 {
+                run = run + Math.sqrt((x - px) * (x - px) + (z - pz) * (z - pz))
+            }
+            dx.push(x)
+            dz.push(z)
+            ds.push(run)
+            px = x
+            pz = z
+        }
+    }
+    // Close the loop: the distance from the last dense point back to the first.
+    let total = run + Math.sqrt((dx[0] - px) * (dx[0] - px) + (dz[0] - pz) * (dz[0] - pz))
+
+    let n = Math.maxI64(16, (total / SPACING) as i64)
+    let step = total / (n as f64)
+
+    var xs: Vec<f64> = Vec.filled(n, 0.0)
+    var zs: Vec<f64> = Vec.filled(n, 0.0)
+    // Walk the dense table once, in step with the output, rather than searching
+    // it per sample. Both are monotonic in distance, so this is linear.
+    var cursor = 0
+    for i in 0..n {
+        let want = (i as f64) * step
+        while cursor + 1 < ds.len && ds[cursor + 1] < want {
+            cursor = cursor + 1
+        }
+        // Interpolate inside the dense segment the target distance falls in.
+        let s0 = ds[cursor]
+        let s1 = if cursor + 1 < ds.len {
+            ds[cursor + 1]
+        } else {
+            total
+        }
+        let x1 = if cursor + 1 < dx.len {
+            dx[cursor + 1]
+        } else {
+            dx[0]
+        }
+        let z1 = if cursor + 1 < dz.len {
+            dz[cursor + 1]
+        } else {
+            dz[0]
+        }
+        let span = s1 - s0
+        let f = if span > 1e-9 {
+            (want - s0) / span
+        } else {
+            0.0
+        }
+        xs[i] = dx[cursor] + (x1 - dx[cursor]) * f
+        zs[i] = dz[cursor] + (z1 - dz[cursor]) * f
+    }
+
+    // Tangents by central difference on the resampled points. Uniform spacing is
+    // what makes this legitimate: on the raw spline the neighbours are unequal
+    // distances away and the difference is biased toward the closer one.
+    var txs: Vec<f64> = Vec.filled(n, 0.0)
+    var tzs: Vec<f64> = Vec.filled(n, 0.0)
+    for i in 0..n {
+        let a = wrapC(i - 1, n)
+        let b = wrapC(i + 1, n)
+        let vx = xs[b] - xs[a]
+        let vz = zs[b] - zs[a]
+        let len = Math.sqrt(vx * vx + vz * vz)
+        let inv = if len > 1e-9 {
+            1.0 / len
+        } else {
+            0.0
+        }
+        txs[i] = vx * inv
+        tzs[i] = vz * inv
+    }
+
+    // Curvature as the rate the tangent turns, per metre. The cross product of
+    // successive tangents gives the sine of the angle between them, which at
+    // these spacings is the angle.
+    var raw: Vec<f64> = Vec.filled(n, 0.0)
+    for i in 0..n {
+        let b = wrapC(i + 1, n)
+        let cross = txs[i] * tzs[b] - tzs[i] * txs[b]
+        raw[i] = Math.asin(Math.clampF64(cross, -1.0, 1.0)) / step
+    }
+    // Smoothed over about fifteen metres. Unsmoothed curvature off a resampled
+    // polyline is a staircase, and an AI that sets its speed from it brakes and
+    // accelerates several times inside one corner.
+    let half = Math.maxI64(1, (7.5 / step) as i64)
+    var ks: Vec<f64> = Vec.filled(n, 0.0)
+    for i in 0..n {
+        var sum = 0.0
+        var cnt = 0
+        var j = -half
+        while j <= half {
+            sum = sum + raw[wrapC(i + j, n)]
+            cnt = cnt + 1
+            j = j + 1
+        }
+        ks[i] = sum / (cnt as f64)
+    }
+
+    return Track {
+        xs: xs, zs: zs, txs: txs, tzs: tzs, ks: ks, n: n, length: total,
+    }
+}
+
+// Where a car is: how far round the lap, how far off the centre line, and which
+// sample that was measured against.
+pub struct Loc {
+    idx: i64,
+    s: f64,
+    // Signed metres from the centre line, positive to the left of the direction
+    // of travel.
+    lateral: f64,
+}
+
+impl Track {
+    fn wrapS(self: &Self, s: f64): f64 {
+        var t = s % self.length
+        if t < 0.0 {
+            t = t + self.length
+        }
+        return t
+    }
+
+    fn idxAt(self: &Self, s: f64): i64 {
+        let step = self.length / (self.n as f64)
+        var i = (self.wrapS(s) / step) as i64
+        if i < 0 {
+            i = 0
+        }
+        if i >= self.n {
+            i = self.n - 1
+        }
+        return i
+    }
+
+    fn posAt(self: &Self, s: f64): Vec3 {
+        let step = self.length / (self.n as f64)
+        let w = self.wrapS(s)
+        let i = self.idxAt(w)
+        let j = wrapC(i + 1, self.n)
+        let f = (w - (i as f64) * step) / step
+        return v3(self.xs[i] + (self.xs[j] - self.xs[i]) * f, 0.0, self.zs[i] + (self.zs[j] - self.zs[i]) * f)
+    }
+
+    fn tangentAt(self: &Self, s: f64): Vec3 {
+        let i = self.idxAt(s)
+        return v3(self.txs[i], 0.0, self.tzs[i])
+    }
+
+    // The left-hand normal, in the plane. Cross the tangent with up.
+    fn normalAt(self: &Self, s: f64): Vec3 {
+        let i = self.idxAt(s)
+        return v3(-self.tzs[i], 0.0, self.txs[i])
+    }
+
+    fn curvatureAt(self: &Self, s: f64): f64 {
+        return self.ks[self.idxAt(s)]
+    }
+
+    // A point on the road surface: `off` metres left of the centre line at `s`.
+    fn pointAt(self: &Self, s: f64, off: f64): Vec3 {
+        let p = self.posAt(s)
+        let nrm = self.normalAt(s)
+        return v3(p.x + nrm.x * off, 0.0, p.z + nrm.z * off)
+    }
+
+    // The inverse map. `hint` is the caller's last known sample index, and the
+    // search is a window either side of it: a car moves a couple of metres a
+    // frame, so the answer is always within a few samples of the last one.
+    //
+    // If the best match lands on the window edge the hint was stale (a car was
+    // teleported to the grid, or this is the first frame) and the whole table is
+    // scanned. Falling back rather than trusting the edge is what stops a car
+    // that clips a wall from locking onto the wrong part of the lap and being
+    // scored as having jumped half a circuit.
+    fn locate(self: &Self, x: f64, z: f64, hint: i64): Loc {
+        let window: i64 = 24
+        var best = -1
+        var bestD = 1e30
+        var k = -window
+        while k <= window {
+            let i = wrapC(hint + k, self.n)
+            let dx = x - self.xs[i]
+            let dz = z - self.zs[i]
+            let d = dx * dx + dz * dz
+            if d < bestD {
+                bestD = d
+                best = i
+            }
+            k = k + 1
+        }
+        let edge = wrapC(hint - window, self.n)
+        let edge2 = wrapC(hint + window, self.n)
+        if best < 0 || best == edge || best == edge2 {
+            best = 0
+            bestD = 1e30
+            for i in 0..self.n {
+                let dx = x - self.xs[i]
+                let dz = z - self.zs[i]
+                let d = dx * dx + dz * dz
+                if d < bestD {
+                    bestD = d
+                    best = i
+                }
+            }
+        }
+        // Refine along the tangent: the nearest *sample* is up to half a spacing
+        // away from the nearest *point*, which at 2.5 m spacing is enough to
+        // make a lap timer jitter.
+        let step = self.length / (self.n as f64)
+        let dx = x - self.xs[best]
+        let dz = z - self.zs[best]
+        let along = dx * self.txs[best] + dz * self.tzs[best]
+        let lateral = -dx * self.tzs[best] + dz * self.txs[best]
+        return Loc {
+            idx: best, s: self.wrapS((best as f64) * step + along), lateral: lateral,
+        }
+    }
+
+    // The tightest corner within `dist` metres ahead, as a curvature magnitude.
+    // This is what a driver actually reacts to: not how tight the road is here
+    // but how tight it is about to be.
+    fn maxCurveAhead(self: &Self, s: f64, dist: f64): f64 {
+        let step = self.length / (self.n as f64)
+        let steps = Math.maxI64(1, (dist / step) as i64)
+        let start = self.idxAt(s)
+        var worst = 0.0
+        for j in 0..steps {
+            let k = Math.abs(self.ks[wrapC(start + j, self.n)])
+            if k > worst {
+                worst = k
+            }
+        }
+        return worst
+    }
+
+    // Signed lap distance from `a` to `b`, in [-length/2, +length/2]. Comparing
+    // two raw `s` values breaks at the start/finish line, where one car is at 5 m
+    // and the car it just overtook is at 2690 m.
+    fn delta(self: &Self, a: f64, b: f64): f64 {
+        var d = self.wrapS(b - a)
+        if d > self.length * 0.5 {
+            d = d - self.length
+        }
+        return d
+    }
+
+    // Does the loop cross itself, or come close enough that two parts of the
+    // road overlap? A circuit that touches itself is a circuit where `locate`
+    // returns whichever pass happens to be nearer, and the symptom is a lap
+    // counter that jumps, which is very hard to read back to a control point
+    // typed in wrong. Checked once at startup rather than assumed.
+    fn validate(self: &Self): bool {
+        let need = (WALL * 2.0 + 6.0) * (WALL * 2.0 + 6.0)
+        // Ignore neighbours: adjacent samples are 2.5 m apart by construction.
+        let skip = ((WALL * 3.0) / (self.length / (self.n as f64))) as i64
+        var i = 0
+        while i < self.n {
+            var j = i + skip
+            while j < self.n - skip {
+                let dx = self.xs[i] - self.xs[j]
+                let dz = self.zs[i] - self.zs[j]
+                if dx * dx + dz * dz < need {
+                    print($"track: self-intersection between sample {i} and {j}")
+                    return false
+                }
+                j = j + 1
+            }
+            // Every fourth sample is enough to catch a crossing at this scale
+            // and turns a 1.2 M pair check into 75 k.
+            i = i + 4
+        }
+        return true
+    }
+}

@@ -1,0 +1,659 @@
+// The frame: shadow pass, sky, opaque geometry, bloom, composite.
+//
+// The scene renders into an RGBA16F target at a resolution capped independently
+// of the window, because every pass here is per-pixel and a retina panel hands
+// back four times the pixels of the display it is showing. `--scale` moves that
+// cap; the HUD is drawn afterwards at the real drawable size so text stays sharp
+// however low the scene goes.
+
+from "std/math" import {
+    Math
+}
+from "gl" import {
+    GlContext, Gpu, Mesh, Shader, Target, Texture2D, Wrap, bindScreen
+}
+from "./mat4" import {
+    identity, multiply
+}
+from "./vec3" import {
+    Vec3, v3
+}
+from "./sky" import {
+    SKY_H, SKY_W, Sky
+}
+from "./shaders" import {
+    SCENE_VERT, SHADOW_FRAG, SHADOW_VERT, SKY_VERT, sceneFrag, skyFrag, DEPTH_FRAG, DEPTH_VERT
+}
+from "./post" import {
+    AO_BLUR_FRAG, BLUR_FRAG, BRIGHT_FRAG, COMPOSITE_FRAG, HUD_FRAG, HUD_VERT,
+    QUAD_VERT, SSAO_FRAG
+}
+
+pub let SHADOW_SIZE: i64 = 2048
+
+// How the surface is lit, independent of what shape it is. Textures are indices
+// into `Gfx.tex` rather than `Texture2D` values because a Texture2D is @noCopy, 
+// two materials naming one texture would otherwise be two things that each think
+// they may free it.
+pub struct Material {
+    albedoTex: i64,
+    surfTex: i64,
+    albedo: Vec3,
+    rough: f64,
+    metal: f64,
+    normalStrength: f64,
+    // Extra repeats of the same texture, multiplied in for close-up grain. 0 is
+    // off, and off is right for anything you never stand on top of.
+    detail: f64,
+    emissive: Vec3,
+    // 1 multiplies the emissive by the albedo texture instead of by white, which
+    // is what makes a printed sign glow in the shape of what is printed on it, 
+    // a uniform glow over a picture just washes the picture out.
+    emissiveMap: f64,
+    alpha: f64,
+}
+
+// `slot` is a TEX_* index from textures.milo. Each material contributes two GL
+// textures in order (albedo then surface) so the slot doubles into `Gfx.tex`.
+// Passing the GL indices directly is how a material ends up sampling its own
+// albedo as a normal map, which looks almost right and is very hard to see.
+pub fn material(slot: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Material {
+    return Material {
+        albedoTex: slot * 2,
+        surfTex: slot * 2 + 1,
+        albedo: v3(r, g, b),
+        rough: rough,
+        metal: metal,
+        normalStrength: 1.0,
+        detail: 0.0,
+        emissive: v3(0.0, 0.0, 0.0),
+        emissiveMap: 0.0,
+        alpha: 1.0,
+    }
+}
+
+// For the handful of surfaces that are one-of-a-kind, a poster, a painted
+// board, where there is no tiling surface map to pair with the picture.
+pub fn materialTex(albedoTex: i64, surfTex: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Material {
+    return Material {
+        albedoTex: albedoTex,
+        surfTex: surfTex,
+        albedo: v3(r, g, b),
+        rough: rough,
+        metal: metal,
+        normalStrength: 1.0,
+        detail: 0.0,
+        emissive: v3(0.0, 0.0, 0.0),
+        emissiveMap: 0.0,
+        alpha: 1.0,
+    }
+}
+
+pub struct Gfx {
+    scene: Shader,
+    shadowSh: Shader,
+    depthSh: Shader,
+    ssaoSh: Shader,
+    aoBlurSh: Shader,
+    skySh: Shader,
+    bright: Shader,
+    blur: Shader,
+    composite: Shader,
+    hudSh: Shader,
+
+    sceneTgt: Target,
+    shadowTgt: Target,
+    dnTgt: Target,
+    aoTgt: Target,
+    aoBlurTgt: Target,
+    bloomA: Target,
+    bloomB: Target,
+
+    quad: Mesh,
+    hudMesh: Mesh,
+
+    skyTex: Texture2D,
+    atlas: Texture2D,
+    tex: Vec<Texture2D>,
+
+    lightVP: Vec<f32>,
+    shadowTexel: f64,
+    sunDir: Vec3,
+    sunColor: Vec3,
+    skyUp: Vec3,
+    skyDown: Vec3,
+    cloudCover: f64,
+
+    rw: i64,
+    rh: i64,
+    aoStrength: f64,
+    aoRadius: f64,
+    // The neon, as seven floats per light (position, colour, range) in one
+    // flat list. A Vec<Light> would be tidier and this is uploaded element by
+    // element every frame anyway.
+    lights: Vec<f64>,
+    debug: f64,
+    exposure: f64,
+    bloomAmount: f64,
+    // Additive white the composite adds before tone mapping, the muzzle flash
+    // lighting the whole frame for two frames rather than only the barrel.
+    flash: f64,
+    time: f64,
+}
+
+fn quadMesh(gl: &mut GlContext): Mesh {
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(2)
+    var m = Mesh.new(gl, attrs)
+    var d: Vec<f32> = Vec.new()
+    d.push(-1.0)
+    d.push(-1.0)
+    d.push(3.0)
+    d.push(-1.0)
+    d.push(-1.0)
+    d.push(3.0)
+    m.upload(d)
+    return m
+}
+
+pub fn sceneAttrs(): Vec<i64> {
+    var attrs: Vec<i64> = Vec.new()
+    attrs.push(3) // position
+    attrs.push(3) // normal
+    attrs.push(2) // uv
+    attrs.push(3) // tint
+    attrs.push(1) // baked ao
+    return attrs
+}
+
+pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec<u32>, atlasSize: i64): Result<Gfx, string> {
+    let scene = match Shader.compile(gl, SCENE_VERT, sceneFrag()) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("scene: " + e)
+        }
+    }
+    let shadowSh = match Shader.compile(gl, SHADOW_VERT, SHADOW_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("shadow: " + e)
+        }
+    }
+    let skySh = match Shader.compile(gl, SKY_VERT, skyFrag()) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("sky: " + e)
+        }
+    }
+    let bright = match Shader.compile(gl, QUAD_VERT, BRIGHT_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("bright: " + e)
+        }
+    }
+    let blur = match Shader.compile(gl, QUAD_VERT, BLUR_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("blur: " + e)
+        }
+    }
+    let composite = match Shader.compile(gl, QUAD_VERT, COMPOSITE_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("composite: " + e)
+        }
+    }
+    let depthSh = match Shader.compile(gl, DEPTH_VERT, DEPTH_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("depth: " + e)
+        }
+    }
+    let ssaoSh = match Shader.compile(gl, QUAD_VERT, SSAO_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("ssao: " + e)
+        }
+    }
+    let aoBlurSh = match Shader.compile(gl, QUAD_VERT, AO_BLUR_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("ao blur: " + e)
+        }
+    }
+    let hudSh = match Shader.compile(gl, HUD_VERT, HUD_FRAG) {
+        Result.Ok(s) => s
+        Result.Err(e) => {
+            return Result.Err("hud: " + e)
+        }
+    }
+    let sceneTgt = match Target.new(gl, rw, rh, true, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("scene target: " + e)
+        }
+    }
+    let shadowTgt = match Target.new(gl, SHADOW_SIZE, SHADOW_SIZE, true, false) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("shadow target: " + e)
+        }
+    }
+    // The prepass buffer is full resolution, AO reads neighbouring depths, and
+    // halving it halves the distance a sample can tell apart. The AO itself is
+    // half, because it is blurred anyway.
+    let dnTgt = match Target.new(gl, rw, rh, true, false) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("depth target: " + e)
+        }
+    }
+    let aw = rw / 2
+    let ah = rh / 2
+    let aoTgt = match Target.new(gl, aw, ah, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("ao target: " + e)
+        }
+    }
+    let aoBlurTgt = match Target.new(gl, aw, ah, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("ao blur target: " + e)
+        }
+    }
+    let bw = rw / 4
+    let bh = rh / 4
+    let bloomA = match Target.new(gl, bw, bh, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("bloom a: " + e)
+        }
+    }
+    let bloomB = match Target.new(gl, bw, bh, false, true) {
+        Result.Ok(t) => t
+        Result.Err(e) => {
+            return Result.Err("bloom b: " + e)
+        }
+    }
+    let skyTex = Texture2D.rgb32f(gl, SKY_W, SKY_H, sky.table.clone(), true)
+    skyTex.setWrap(Wrap.Repeat)
+    skyTex.generateMipmaps()
+    let atlas = Texture2D.rgba8(gl, atlasSize, atlasSize, atlasPixels.clone(), true)
+
+    var hudAttrs: Vec<i64> = Vec.new()
+    hudAttrs.push(2)
+    hudAttrs.push(2)
+    hudAttrs.push(4)
+
+    return Result.Ok(Gfx {
+        scene: scene,
+        shadowSh: shadowSh,
+        skySh: skySh,
+        bright: bright,
+        blur: blur,
+        composite: composite,
+        depthSh: depthSh,
+        ssaoSh: ssaoSh,
+        aoBlurSh: aoBlurSh,
+        hudSh: hudSh,
+        sceneTgt: sceneTgt,
+        shadowTgt: shadowTgt,
+        dnTgt: dnTgt,
+        aoTgt: aoTgt,
+        aoBlurTgt: aoBlurTgt,
+        bloomA: bloomA,
+        bloomB: bloomB,
+        quad: quadMesh(gl),
+        hudMesh: Mesh.new(gl, hudAttrs),
+        skyTex: skyTex,
+        atlas: atlas,
+        tex: Vec.new(),
+        lightVP: identity(),
+        shadowTexel: 0.03,
+        sunDir: sky.sun,
+        sunColor: sky.sunColor,
+        skyUp: sky.skyUp,
+        skyDown: sky.skyDown,
+        cloudCover: 0.0,
+        rw: rw,
+        rh: rh,
+        // Tuned by eye against the target posts and the platform steps, which
+        // are the only contacts in this scene big enough to judge from a
+        // screenshot.
+        aoStrength: 1.7,
+        aoRadius: 0.95,
+        lights: Vec.new(),
+        debug: 0.0,
+        exposure: 1.0,
+        // Far more than a film camera would give you, and the right amount for
+        // a room whose subject IS its light sources: the bloom is what carries
+        // a tube's glow out past its own silhouette, and without it every neon
+        // in here is a coloured wire.
+        bloomAmount: 0.20,
+        flash: 0.0,
+        time: 0.0,
+    }
+    )
+}
+
+impl Gfx {
+    fn addTexture(self: &mut Self, t: Texture2D): i64 {
+        self.tex.push(t)
+        return self.tex.len - 1
+    }
+
+    // Uniforms every pass that reads the sky needs, in one place: the sky pass
+    // and the scene pass share CHUNK_SKY, so they have to be fed identically or
+    // the horizon disagrees with the ground it meets.
+    fn bindSkyUniforms(self: &Self, sh: &Shader) {
+        sh.uniform3F("uSunDir", self.sunDir.x, self.sunDir.y, self.sunDir.z)
+        sh.uniform3F("uSunColor", self.sunColor.x, self.sunColor.y, self.sunColor.z)
+        sh.uniformF("uTime", self.time)
+        sh.uniformF("uCloudCover", self.cloudCover)
+        sh.sampler("uSky", self.skyTex, 2)
+    }
+
+    // ── depth prepass and ambient occlusion ───────────────────────────────────
+
+    // Geometry only, into the view-space depth+normal buffer. Runs before the
+    // shadow pass because the scene pass needs the AO texture it feeds.
+    fn prepassBegin(self: &mut Self, view: &Vec<f32>, proj: &Vec<f32>) {
+        self.dnTgt.bind()
+        // Zero red means "no geometry here", which the AO pass reads as sky, so
+        // the clear colour is part of the contract.
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(true)
+        self.depthSh.bind()
+        self.depthSh.uniformMat4("uView", view)
+        self.depthSh.uniformMat4("uProj", proj)
+    }
+
+    fn prepassDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>) {
+        self.depthSh.uniformMat4("uModel", model)
+        mesh.draw()
+    }
+
+    // Resolve the prepass into a blurred AO buffer. `tanHalfX`/`tanHalfY` are the
+    // tangents of the half field of view, which is all the AO pass needs of the
+    // projection to turn a pixel and a distance back into a position.
+    fn aoResolve(self: &mut Self, tanHalfX: f64, tanHalfY: f64) {
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+
+        self.aoTgt.bind()
+        self.ssaoSh.bind()
+        self.dnTgt.bindTexture(0)
+        self.ssaoSh.uniformI("uDN", 0)
+        self.ssaoSh.uniform2F("uTanHalf", tanHalfX, tanHalfY)
+        self.ssaoSh.uniformF("uRadius", self.aoRadius)
+        self.ssaoSh.uniformF("uStrength", self.aoStrength)
+        self.quad.draw()
+
+        self.aoBlurTgt.bind()
+        self.aoBlurSh.bind()
+        self.aoTgt.bindTexture(0)
+        self.aoBlurSh.uniformI("uSrc", 0)
+        self.aoBlurSh.uniform2F("uTexel", 1.0 / (self.aoTgt.w as f64), 1.0 / (self.aoTgt.h as f64))
+        self.quad.draw()
+    }
+
+    // ── shadow pass ───────────────────────────────────────────────────────────
+
+    // A box in light space around `centre`. Everything that can cast into the
+    // range fits in it; nothing outside it is drawn, so the extent is the whole
+    // budget for how far a shadow can reach.
+    fn shadowBegin(self: &mut Self, centre: &Vec3, extent: f64, depth: f64) {
+        let eye = centre + self.sunDir.scale(depth * 0.5)
+        var up = v3(0.0, 1.0, 0.0)
+        if Math.abs(self.sunDir.y) > 0.98 {
+            up = v3(0.0, 0.0, 1.0)
+        }
+        let view = lookAtM(eye, centre, up)
+        let proj = orthoM(-extent, extent, -extent, extent, 0.05, depth)
+        self.lightVP = multiply(proj, view)
+        self.shadowTexel = 2.0 * extent / (SHADOW_SIZE as f64)
+        self.shadowTgt.bind()
+        Gpu.clear(1.0, 1.0, 0.0, 1.0, true)
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.blendOff()
+        // Front-face culling in the depth pass moves acne onto surfaces the
+        // camera cannot see. It costs nothing and removes the need for a large
+        // constant bias, which is what makes a shadow detach from its object.
+        Gpu.cullBackFaces(false)
+        self.shadowSh.bind()
+        self.shadowSh.uniformMat4("uLightVP", self.lightVP)
+    }
+
+    fn shadowDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>) {
+        self.shadowSh.uniformMat4("uModel", model)
+        mesh.draw()
+    }
+
+    // ── scene ─────────────────────────────────────────────────────────────────
+
+    fn sceneBegin(self: &mut Self, viewProj: &Vec<f32>, invViewProj: &Vec<f32>, cam: &Vec3) {
+        self.sceneTgt.bind()
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+
+        self.skySh.bind()
+        self.skySh.uniformMat4("uInvViewProj", invViewProj)
+        self.bindSkyUniforms(self.skySh)
+        self.quad.draw()
+
+        Gpu.depthTest(true)
+        Gpu.depthWrite(true)
+        Gpu.cullBackFaces(true)
+        self.scene.bind()
+        self.scene.uniformMat4("uViewProj", viewProj)
+        self.scene.uniform3F("uCam", cam.x, cam.y, cam.z)
+        self.bindSkyUniforms(self.scene)
+        self.scene.uniform3F("uSkyUp", self.skyUp.x, self.skyUp.y, self.skyUp.z)
+        self.scene.uniform3F("uSkyDown", self.skyDown.x, self.skyDown.y, self.skyDown.z)
+        self.scene.uniformF("uDebug", self.debug)
+        self.scene.uniformMat4("uLightVP", self.lightVP)
+        self.scene.uniformF("uShadowTexel", self.shadowTexel)
+        self.shadowTgt.bindTexture(3)
+        self.scene.uniformI("uShadow", 3)
+        self.aoBlurTgt.bindTexture(4)
+        self.scene.uniformI("uAo", 4)
+        self.scene.uniform2F("uAoTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
+        self.scene.uniformF("uAoAmount", 1.0)
+        self.bindLights()
+    }
+
+    // Seven floats in, three uniforms out. The count is clamped to the shader's
+    // own array bound rather than trusted: an out-of-range uniform name silently
+    // resolves to -1 and the light simply never appears, which is a much harder
+    // thing to notice than a light that is missing because you can count them.
+    fn bindLights(self: &Self) {
+        var n = self.lights.len / 7
+        if n > 16 {
+            n = 16
+        }
+        self.scene.uniformI("uLightCount", n)
+        for i in 0..n {
+            let o = i * 7
+            self.scene.uniform3F($"uLightPos[{i}]", self.lights[o], self.lights[o + 1], self.lights[o + 2])
+            self.scene.uniform3F($"uLightColor[{i}]", self.lights[o + 3], self.lights[o + 4], self.lights[o + 5])
+            let range = Math.maxF64(self.lights[o + 6], 0.05)
+            self.scene.uniformF($"uLightInvRange2[{i}]", 1.0 / (range * range))
+        }
+    }
+
+    // Position, colour and reach. Colour is radiant intensity, not a 0..1 tint:
+    // a tube two metres away wants a number well above one or the inverse square
+    // eats it before it reaches anything.
+    fn addLight(self: &mut Self, p: Vec3, r: f64, g: f64, b: f64, range: f64) {
+        self.lights.push(p.x)
+        self.lights.push(p.y)
+        self.lights.push(p.z)
+        self.lights.push(r)
+        self.lights.push(g)
+        self.lights.push(b)
+        self.lights.push(range)
+    }
+
+    // The view model is drawn through the same shader but is not in the prepass,
+    // so it must not read the AO buffer: at its screen position that buffer holds
+    // the occlusion of whatever the gun is covering up.
+    fn setAoAmount(self: &Self, amount: f64) {
+        self.scene.uniformF("uAoAmount", amount)
+    }
+
+    fn sceneDraw(self: &Self, mesh: &Mesh, model: &Vec<f32>, m: &Material) {
+        self.scene.uniformMat4("uModel", model)
+        self.scene.uniform3F("uAlbedo", m.albedo.x, m.albedo.y, m.albedo.z)
+        self.scene.uniformF("uRough", m.rough)
+        self.scene.uniformF("uMetal", m.metal)
+        self.scene.uniformF("uNormalStrength", m.normalStrength)
+        self.scene.uniformF("uDetail", m.detail)
+        self.scene.uniform3F("uEmissive", m.emissive.x, m.emissive.y, m.emissive.z)
+        self.scene.uniformF("uEmissiveMap", m.emissiveMap)
+        self.scene.uniformF("uAlpha", m.alpha)
+        self.scene.sampler("uAlbedoTex", self.tex[m.albedoTex], 0)
+        self.scene.sampler("uSurfTex", self.tex[m.surfTex], 1)
+        mesh.draw()
+    }
+
+    // ── post ──────────────────────────────────────────────────────────────────
+
+    fn present(self: &mut Self, dw: i64, dh: i64) {
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendOff()
+        Gpu.cullBackFaces(false)
+
+        let bw = self.bloomA.w
+        let bh = self.bloomA.h
+        self.bloomA.bind()
+        self.bright.bind()
+        self.sceneTgt.bindTexture(0)
+        self.bright.uniformI("uSrc", 0)
+        self.bright.uniformF("uThreshold", 1.1)
+        self.bright.uniform2F("uTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
+        self.quad.draw()
+
+        for _pass in 0..2 {
+            self.bloomB.bind()
+            self.blur.bind()
+            self.bloomA.bindTexture(0)
+            self.blur.uniformI("uSrc", 0)
+            self.blur.uniform2F("uDir", 1.0 / (bw as f64), 0.0)
+            self.quad.draw()
+
+            self.bloomA.bind()
+            self.blur.bind()
+            self.bloomB.bindTexture(0)
+            self.blur.uniformI("uSrc", 0)
+            self.blur.uniform2F("uDir", 0.0, 1.0 / (bh as f64))
+            self.quad.draw()
+        }
+
+        bindScreen(dw, dh)
+        Gpu.clear(0.0, 0.0, 0.0, 1.0, true)
+        self.composite.bind()
+        self.sceneTgt.bindTexture(0)
+        self.composite.uniformI("uScene", 0)
+        self.bloomA.bindTexture(1)
+        self.composite.uniformI("uBloom", 1)
+        self.composite.uniform2F("uTexel", 1.0 / (self.rw as f64), 1.0 / (self.rh as f64))
+        self.composite.uniformF("uBloomAmount", self.bloomAmount)
+        self.composite.uniformF("uExposure", self.exposure)
+        self.composite.uniformF("uVignette", 0.55)
+        self.composite.uniformF("uGrain", 0.018)
+        self.composite.uniformF("uTime", self.time)
+        self.composite.uniformF("uFlash", self.flash)
+        self.quad.draw()
+    }
+
+    // The overlay, at the real drawable size rather than the scene's, as one
+    // draw call of textured quads. A CPU canvas uploaded per frame would be
+    // several megabytes a frame to say the same thing.
+    fn drawHud(self: &mut Self, verts: &Vec<f32>, dw: i64, dh: i64) {
+        if verts.len == 0 {
+            return
+        }
+        self.hudMesh.upload(verts.clone())
+        Gpu.depthTest(false)
+        Gpu.depthWrite(false)
+        Gpu.blendAlpha()
+        Gpu.cullBackFaces(false)
+        self.hudSh.bind()
+        self.hudSh.uniform2F("uScreen", dw as f64, dh as f64)
+        self.hudSh.sampler("uAtlas", self.atlas, 0)
+        self.hudMesh.draw()
+        Gpu.blendOff()
+    }
+
+    fn free(self: Self, gl: &mut GlContext) {
+        self.scene.free(gl)
+        self.shadowSh.free(gl)
+        self.depthSh.free(gl)
+        self.ssaoSh.free(gl)
+        self.aoBlurSh.free(gl)
+        self.skySh.free(gl)
+        self.bright.free(gl)
+        self.blur.free(gl)
+        self.composite.free(gl)
+        self.hudSh.free(gl)
+        self.sceneTgt.free(gl)
+        self.shadowTgt.free(gl)
+        self.dnTgt.free(gl)
+        self.aoTgt.free(gl)
+        self.aoBlurTgt.free(gl)
+        self.bloomA.free(gl)
+        self.bloomB.free(gl)
+        self.quad.free(gl)
+        self.hudMesh.free(gl)
+        self.skyTex.free(gl)
+        self.atlas.free(gl)
+        var tex = self.tex
+        while tex.len > 0 {
+            let t = tex.pop()!
+            t.free(gl)
+        }
+    }
+}
+
+// Local copies rather than an import cycle: mat4 does not know about the light.
+fn lookAtM(eye: Vec3, at: Vec3, up: Vec3): Vec<f32> {
+    let f = (at - eye).norm()
+    let s = f.cross(up).norm()
+    let u = s.cross(f)
+    var m = identity()
+    m[0] = s.x as f32
+    m[4] = s.y as f32
+    m[8] = s.z as f32
+    m[1] = u.x as f32
+    m[5] = u.y as f32
+    m[9] = u.z as f32
+    m[2] = (-f.x) as f32
+    m[6] = (-f.y) as f32
+    m[10] = (-f.z) as f32
+    m[12] = (-s.dot(eye)) as f32
+    m[13] = (-u.dot(eye)) as f32
+    m[14] = f.dot(eye) as f32
+    return m
+}
+
+fn orthoM(l: f64, r: f64, b: f64, t: f64, near: f64, far: f64): Vec<f32> {
+    var m = identity()
+    m[0] = (2.0 / (r - l)) as f32
+    m[5] = (2.0 / (t - b)) as f32
+    m[10] = (-2.0 / (far - near)) as f32
+    m[12] = (-(r + l) / (r - l)) as f32
+    m[13] = (-(t + b) / (t - b)) as f32
+    m[14] = (-(far + near) / (far - near)) as f32
+    return m
+}

@@ -73,7 +73,7 @@ from "./vec3" import {
     Vec3, v3
 }
 from "./world" import {
-    BUCKETS, DROP_COUNT, World, buildWorld, dronePos, roomLights
+    BUCKETS, DROP_COUNT, World, buildWorld, dronePos, payloadCentre, roomLights
 }
 
 fn argValue(name: &string, fallback: &string): string {
@@ -418,19 +418,17 @@ pub fn main(): i32 {
         // and when it lets one go you shoot the gold one before it drops.
         bonusLive = Math.maxF64(0.0, bonusLive - dt)
         payloadOut = Math.maxF64(0.0, payloadOut - dt)
+        // Either the clock runs out on the rack or the player shoots it off.
+        // The shot is resolved further down, so the two paths meet at one flag
+        // instead of two copies of the drop.
+        var dropNow = false
         if running {
             bonusIn = bonusIn - dt
-            if bonusIn <= 0.0 {
-                bonusIn = 13.0
-                let dp = dronePos(gfx.time)
-                let dropped = targets.dropBonus(dp.x, dp.z, 3.8, DROP_COUNT)
-                if dropped > 0 {
-                    targets.flash(v3(dp.x, dp.y - 0.55, dp.z), v3(2.2, 1.6, 0.4))
-                    // The last one out of the rack is held longest, so the
-                    // marquee stays lit exactly as long as there is one to shoot.
-                    bonusLive = 3.8 + 0.35 * ((dropped - 1) as f64)
-                    payloadOut = 4.6
-                }
+            // The timer keeps running while the rack is empty and the drop
+            // fires the moment it is loaded again, so a shot at the rack costs
+            // the player nothing on the clock.
+            if bonusIn <= 0.0 && payloadOut <= 0.0 {
+                dropNow = true
             }
         }
         targets.update(dt, pressure, running)
@@ -466,15 +464,45 @@ pub fn main(): i32 {
             }
             ))
             let hit = targets.trace(cam.eye(), cam.forward())
+            // Shooting the rack itself. Four gold discs hanging in the air are
+            // the brightest thing in the room and every player shoots them, so
+            // they do the obvious thing: the drone lets go, over whatever it
+            // happens to be above. That turns "wait for the drop" into "aim the
+            // drop", which is the only decision the drone was missing.
+            var rackT = 1.0e30
+            var rackAt = v3(0.0, 0.0, 0.0)
+            if payloadOut <= 0.0 {
+                for i in 0..DROP_COUNT {
+                    let c = payloadCentre(gfx.time, i)
+                    let toC = c - cam.eye()
+                    let t = toC.dot(cam.forward())
+                    if t <= 0.0 || t >= rackT {
+                        continue
+                    }
+                    // Generous: it is a coin the size of a fist at fifteen
+                    // metres, and a miss there reads as the game ignoring you.
+                    if (toC - cam.forward().scale(t)).len() <= 0.34 {
+                        rackT = t
+                        rackAt = cam.eye() + cam.forward().scale(t)
+                    }
+                }
+            }
+            // The rack is in front of the field, so it wins any tie on depth.
+            let rackHit = rackT < 1.0e29 && (!hit.ok || rackT < (hit.point - cam.eye()).len())
             // The bolt has to end somewhere even on a miss, or there is nothing
             // to draw: fifty metres down the aim line is past the back wall.
-            let end = if hit.ok {
+            let end = if rackHit {
+                rackAt
+            } else if hit.ok {
                 hit.point
             } else {
                 cam.eye() + cam.forward().scale(50.0)
             }
-            gun.fire(end, hit.ok)
-            if hit.ok {
+            gun.fire(end, rackHit || hit.ok)
+            if rackHit {
+                dropNow = true
+                hitFlash = 1.0
+            } else if hit.ok {
                 targets.shatter(hit.index, cam.eye())
                 hitFlash = 1.0
                 if running {
@@ -493,6 +521,23 @@ pub fn main(): i32 {
                 if running {
                     combo = 0
                 }
+            }
+        }
+        if dropNow {
+            bonusIn = 13.0
+            let dp = dronePos(gfx.time)
+            let dropped = targets.dropBonus(dp.x, dp.z, 3.8, DROP_COUNT)
+            if dropped > 0 {
+                targets.flash(v3(dp.x, dp.y - 0.55, dp.z), v3(2.2, 1.6, 0.4))
+                // The last one out of the rack is held longest, so the marquee
+                // stays lit exactly as long as there is one to shoot.
+                bonusLive = 3.8 + 0.35 * ((dropped - 1) as f64)
+                payloadOut = 4.6
+            } else {
+                // Nothing under it worth dropping on. Try again shortly rather
+                // than burning the whole cycle, or a shot at the rack over the
+                // aisle is a shot that did nothing.
+                bonusIn = 1.5
             }
         }
         // The muzzle flash is a light on the gun, not a strobe over the whole
@@ -797,25 +842,31 @@ pub let POP_LIFE: f64 = 0.85
 //
 // Three passes over a five-character string is fifteen quads. The HUD is one
 // buffer and one draw call; this costs nothing worth measuring.
+// A number drawn over the scene, at the thing it came from.
+//
+// This used to smear four full-strength copies of the glyph a third of a stroke
+// apart, which is how you fake a bold face when you only have one weight, and
+// over a lit wall it came out as a solid slab: opaque, heavier than the HUD it
+// was quoting, and covering the target that had just broken. One face at a
+// time now, translucent, held off the background by a thin dark rim rather than
+// by sheer weight. The wide halo stays, because it is what lets the number sit
+// on a bright sign without an outline thick enough to close up the glyphs.
 fn boldText(hud: &mut Hud, msg: &string, cx: f64, y: f64, size: f64, r: f64, g: f64, b: f64, a: f64) {
     let w = hud.textWidth(msg, size)
     let x = cx - w * 0.5
-    let o = size * 0.9
+    let o = size * 0.55
     let dirs: Vec<f64> = [1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.7, 0.7, -0.7, 0.7, 0.7, -0.7, -0.7, -0.7,]
     var i = 0
     while i < 8 {
-        let _ = hud.text(msg, x + dirs[i * 2] * o, y + dirs[i * 2 + 1] * o, size, 0.0, 0.0, 0.0, a * 0.85)
+        let _ = hud.text(msg, x + dirs[i * 2] * o * 3.2, y + dirs[i * 2 + 1] * o * 3.2, size, r, g, b, a * 0.10)
         i = i + 1
     }
     i = 0
     while i < 8 {
-        let _ = hud.text(msg, x + dirs[i * 2] * o * 2.4, y + dirs[i * 2 + 1] * o * 2.4, size, r, g, b, a * 0.20)
+        let _ = hud.text(msg, x + dirs[i * 2] * o, y + dirs[i * 2 + 1] * o, size, 0.0, 0.0, 0.0, a * 0.40)
         i = i + 1
     }
-    let _ = hud.text(msg, x - o * 0.35, y, size, r, g, b, a)
-    let _ = hud.text(msg, x + o * 0.35, y, size, r, g, b, a)
-    let _ = hud.text(msg, x, y - o * 0.35, size, r, g, b, a)
-    let _ = hud.text(msg, x, y + o * 0.35, size, r, g, b, a)
+    let _ = hud.text(msg, x, y, size, r, g, b, a * 0.72)
 }
 
 // The colour a value flashes up in: the same code the face is printed in, so

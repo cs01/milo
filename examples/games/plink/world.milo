@@ -852,7 +852,11 @@ fn payloadGeometry(b: &mut Builder) {
         let x = -0.525 + 0.35 * (i as f64)
         b.setTint(0.55, 0.58, 0.68)
         bar(b, v3(x, -0.30, 0.0), v3(x, -0.46, 0.0), 0.022, 5)
-        // Edge on to the player, the way a coin sits in a rack.
+        // Edge on to the player, the way a coin sits in a rack. The body goes
+        // down first: two rims on their own are an annulus, and at twenty metres
+        // a gold annulus reads as a hole rather than as a prize.
+        b.setTint(1.90, 1.30, 0.24)
+        bar(b, v3(x, -0.62, -0.016), v3(x, -0.62, 0.016), 0.150, 14)
         b.setTint(2.60, 1.90, 0.45)
         ring(b, v3(x, -0.62, 0.0), v3(0.0, 0.0, 1.0), 0.155, 0.030, 14)
         b.setTint(1.80, 1.25, 0.22)
@@ -1026,32 +1030,49 @@ pub fn buildWorld(gl: &mut GlContext, marqueeTex: i64, flatTex: i64, bannerTex: 
     }
 }
 
+// Where the i-th disc on the rack is, in world space. The player can shoot the
+// rack to make the drone let go early, so this has to be the same number the
+// mesh is drawn at: the offsets here and in `payloadGeometry` are one shape.
+pub fn payloadCentre(time: f64, i: i64): Vec3 {
+    let m = droneXform(time)
+    let x = -0.525 + 0.35 * (i as f64)
+    let y = -0.62
+    return v3((m[0] as f64) * x + (m[4] as f64) * y + (m[12] as f64), (m[1] as f64) * x + (m[5] as f64) * y + (m[13] as f64), (m[2] as f64) * x + (m[6] as f64) * y + (m[14] as f64))
+}
+
+// The drone flies its patrol. It is not a target and it is not decoration:
+// it is where the gold target comes from, so it has to be the thing your eye
+// follows between waves.
+//
+// A free function rather than a method because the hit test needs it and there
+// is no World on hand there; nothing in it reads the world anyway.
+pub fn droneXform(time: f64): Vec<f32> {
+    let p = dronePos(time)
+    // Banked into the turn, from how fast the heading is changing. The
+    // difference is taken over a twentieth of a second and the two samples
+    // are unwrapped against each other first: without that, one sample
+    // either side of the +/-pi seam reports a turn rate of sixty radians a
+    // second and the drone snaps onto its back for a frame. The clamp is
+    // deliberately shallow: the body is a flat hexagon and past about
+    // fifteen degrees it stops reading as a bank and starts reading as a
+    // dropped plate.
+    let y0 = droneYaw(time)
+    var y1 = droneYaw(time + 0.05)
+    while y1 - y0 > Math.pi() {
+        y1 = y1 - 2.0 * Math.pi()
+    }
+    while y1 - y0 < -Math.pi() {
+        y1 = y1 + 2.0 * Math.pi()
+    }
+    let bank = Math.clampF64((y1 - y0) * 7.0, -0.26, 0.26)
+    // and a touch of nose-down when it is climbing away from the stage
+    let pitch = Math.clampF64(-droneVel(time).y * 0.10, -0.10, 0.10)
+    return multiply(translation(p), multiply(rotationY(y0), multiply(rotationX(pitch), rotationZ(bank))))
+}
+
 impl World {
-    // The drone flies its patrol. It is not a target and it is not decoration:
-    // it is where the gold target comes from, so it has to be the thing your eye
-    // follows between waves.
     fn droneMatrix(self: &Self, time: f64): Vec<f32> {
-        let p = dronePos(time)
-        // Banked into the turn, from how fast the heading is changing. The
-        // difference is taken over a twentieth of a second and the two samples
-        // are unwrapped against each other first: without that, one sample
-        // either side of the +/-pi seam reports a turn rate of sixty radians a
-        // second and the drone snaps onto its back for a frame. The clamp is
-        // deliberately shallow: the body is a flat hexagon and past about
-        // fifteen degrees it stops reading as a bank and starts reading as a
-        // dropped plate.
-        let y0 = droneYaw(time)
-        var y1 = droneYaw(time + 0.05)
-        while y1 - y0 > Math.pi() {
-            y1 = y1 - 2.0 * Math.pi()
-        }
-        while y1 - y0 < -Math.pi() {
-            y1 = y1 + 2.0 * Math.pi()
-        }
-        let bank = Math.clampF64((y1 - y0) * 7.0, -0.26, 0.26)
-        // and a touch of nose-down when it is climbing away from the stage
-        let pitch = Math.clampF64(-droneVel(time).y * 0.10, -0.10, 0.10)
-        return multiply(translation(p), multiply(rotationY(y0), multiply(rotationX(pitch), rotationZ(bank))))
+        return droneXform(time)
     }
 
     fn rotorMatrix(self: &Self, time: f64, i: i64): Vec<f32> {

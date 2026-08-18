@@ -212,3 +212,13 @@ pub fn invert(m: &Vec<f32>): Vec<f32> {
 pub fn invertViewProj(m: &Vec<f32>): Vec<f32> {
     return invert(m)
 }
+
+// x and z displaced in proportion to height. The rain block is the only user:
+// sheared, a lattice is still a lattice, so the periodic tiling that lets eight
+// copies of one tile stand in for a whole sky survives being slanted.
+pub fn shearXZ(kx: f64, kz: f64): Vec<f32> {
+    var m = identity()
+    m[4] = kx as f32
+    m[6] = kz as f32
+    return m
+}

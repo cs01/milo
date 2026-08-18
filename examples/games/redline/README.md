@@ -277,25 +277,51 @@ of the road is the one thing that has to be readable at every point on the lap.
 
 ## Rain
 
-The curtain is one tile drawn eight times, not a particle system. Rain is
+The curtain is one tile drawn twenty-seven times, not a particle system. Rain is
 statistically uniform, so there is nothing to simulate: what the eye reads is
-density and streak length, and a static mesh has both. The tile holds its streaks
-at positions in `[0, RAIN_CELL)` on every axis, which makes the field *periodic*,
-and periodicity is the whole trick — a translation by any whole number of cells
-is invisible, so the frame loop keeps the block centred on the camera by snapping
-to the cell grid and makes the rain fall by sliding it down and wrapping. Both
-motions are one matrix and nothing is ever re-uploaded.
+density, streak length and slant, and a static mesh has all three. The tile holds
+its streaks at positions in `[0, RAIN_CELL)` on every axis, which makes the field
+*periodic*, and periodicity is the whole trick: a translation by any whole number
+of cells is invisible, so the frame loop keeps the block on the camera by
+snapping to the cell grid and makes the rain fall by sliding it down and
+wrapping. Both motions are one matrix and nothing is ever re-uploaded.
 
 One tile snapped to the camera does not work: a single tile of random content
 does not tile, so the entire field reshuffles the moment the camera crosses a
-cell boundary. Eight copies of one periodic tile do.
+cell boundary. Copies of one periodic tile do.
+
+Three cells on a side, not two. Snapping down to the grid leaves the camera
+anywhere inside its own cell, so a 2x2x2 block guarantees a cell of rain on one
+side of it and, in the limit, none on the other. In the vertical the slide makes
+that a certainty rather than a possibility: just before the wrap the whole block
+has fallen a full cell, and a two-cell block has fallen out from under the
+camera. The rain used to disappear for a beat roughly once a second and it was
+this. Three cells is a cell of rain in every direction whatever the fractional
+position, and that guaranteed radius is the ceiling on how far the fade below may
+reach.
 
 Each streak is two quads crossed at right angles, because a single quad
-disappears edge-on and at any moment a third of the field would be. And they are
-hair thin — four to ten millimetres. The first pass used centimetre-wide quads
-and produced a field of white bars: a raindrop at speed is a streak a few
-millimetres across, and the moment it is wide enough to read as a shape it stops
-reading as rain. Length carries it instead.
+disappears edge-on and at any moment a third of the field would be. They fade at
+both ends of their distance range, and the near end is the one that matters. A
+drop two metres from the lens is a white bar across a third of the screen, which
+is correct geometry and is exactly what made the first version read as
+scaffolding; a real lens disposes of it by not being able to focus that close, so
+the near ramp stands in for the depth of field the game has not got. The far ramp
+is the other half: a streak thinner than a pixel cannot be drawn, only aliased,
+and unfaded the distance turns into a flickering hatch across the sky.
+
+Each streak is also bright at the bottom and dark at the top, a per-vertex tint
+that costs nothing. A streak is one drop smeared over an exposure, brightest
+where the drop is now and fading along where it has been. Drawn flat it
+terminates in a hard edge at both ends, and a straight bright line with two hard
+ends is a pole.
+
+At speed the whole block is sheared by the car's own velocity over the fall
+speed, which is what rain does in the frame of something moving through it: it
+stops falling past you and starts coming at you. A sheared lattice is still a
+lattice, so the copies still meet edge to edge, and the camera is unsheared
+before the grid snap so that drops at its own height land where they would have
+with no shear at all.
 
 The road's roughness drops for the wet look. At night it is lit almost entirely
 by things beside it, and a rough surface returns that as a dull even grey;

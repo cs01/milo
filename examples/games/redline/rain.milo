@@ -1,17 +1,27 @@
 // Rain: the falling curtain, and what the tyres throw up out of it.
 //
-// **The curtain is one tile drawn eight times, not a particle system.** Rain is
-// statistically uniform, so there is nothing to simulate: what the eye reads is
-// density and streak length, both of which a static mesh has. The tile is built
-// once with its streaks at positions in [0, RAIN_CELL) on every axis, which makes the
-// field RAIN_CELL-periodic, and periodicity is the whole trick. A translation by any
-// whole number of cells is invisible, so the frame loop can keep the block
-// centred on the camera by snapping to the cell grid, and it can make the rain
-// fall by sliding it down and wrapping at RAIN_CELL. Both motions are one matrix.
+// **The curtain is one tile drawn twenty-seven times, not a particle system.**
+// Rain is statistically uniform, so there is nothing to simulate: what the eye
+// reads is density, streak length and slant, all of which a static mesh has. The
+// tile is built once with its streaks at positions in [0, RAIN_CELL) on every
+// axis, which makes the field RAIN_CELL-periodic, and periodicity is the whole
+// trick. A translation by any whole number of cells is invisible, so the frame
+// loop can keep the block on the camera by snapping to the cell grid, and it can
+// make the rain fall by sliding it down and wrapping at RAIN_CELL. Both motions
+// are one matrix, and so is the slant.
 //
 // The alternative - one tile snapped to the camera - reshuffles the entire field
 // the moment the camera crosses a cell boundary, because a single tile of random
-// content does not tile. Eight copies of one periodic tile do.
+// content does not tile. Copies of one periodic tile do.
+//
+// **Three cells on a side, not two.** Snapping down to the grid puts the camera
+// anywhere in its cell, so a 2x2x2 block guarantees a whole cell of rain on one
+// side of it and, in the limit, none at all on the other. In y the slide makes
+// that certain rather than merely possible: at the moment before the wrap the
+// whole block has fallen a full cell, and a two-cell block has fallen out from
+// under the camera. That is what the curtain vanishing for a beat every 1.1
+// seconds was. Three cells is a cell of rain in every direction whatever the
+// fractional position, which is why the fade window below has to fit inside one.
 //
 // **Each streak is two crossed quads.** A single quad disappears edge-on, and at
 // any moment a third of the field would be facing the camera edge-on. Crossing
@@ -25,7 +35,7 @@ from "gl" import {
     GlContext, Mesh
 }
 from "./mat4" import {
-    multiply, scaleXyz, translation
+    multiply, scaleXyz, shearXZ, translation
 }
 from "./mesh" import {
     Builder, builder
@@ -43,15 +53,23 @@ from "./vec3" import {
     Vec3, v3
 }
 
-// The tile edge, in metres. The drawn block is two cells on a side, so this is
-// half the distance from the camera to the edge of the rain. Big enough that the
-// boundary is outside anything you would look at, small enough that the streaks
-// inside it are dense without needing tens of thousands.
-pub let RAIN_CELL: f64 = 30.0
+// The tile edge, in metres. Three cells are drawn on a side, so this is the
+// guaranteed radius of rain around the camera, and therefore the ceiling on how
+// far the fade window below may reach: fading out past the guaranteed radius
+// puts the corner of the block on screen.
+pub let RAIN_CELL: f64 = 22.0
 
-// Streaks per tile. Eight tiles are drawn, so this is an eighth of what is in
-// the air at once.
-let PER_TILE: i64 = 1500
+// Streaks per tile. Twenty-seven tiles are drawn, so this is a twenty-seventh of
+// what is in the air at once. What matters is the ratio to RAIN_CELL cubed -
+// that is the density, and it is what has to hold if either number moves.
+let PER_TILE: i64 = 1030
+
+// The near and far ends of the alpha window, in metres. Nothing inside NEAR is
+// drawn at full strength and nothing survives past 1.7x FAR; between them is the
+// band the curtain actually lives in. Both ends are doing real work, and the
+// near one is doing most of it - see uAlphaFade in the scene shader.
+let FADE_NEAR: f64 = 7.0
+let FADE_FAR: f64 = 13.0
 
 // How fast the curtain falls, in metres per second. Faster than real rain: real
 // rain at this streak length reads as drifting snow, and the point of the effect
@@ -76,19 +94,20 @@ pub fn buildRain(gl: &mut GlContext): Rain {
         let y = rg.range(0.0, RAIN_CELL)
         let z = rg.range(0.0, RAIN_CELL)
         // Length and brightness vary together, so the field has near drops and
-        // far ones in it rather than one uniform hatch.
-        // Long and HAIR thin. The first pass used centimetre-wide quads and the
-        // result was a field of white bars: a raindrop seen at speed is a streak
-        // a few millimetres across, and the moment it is wide enough to read as
-        // a shape it stops reading as rain. Length is what carries it instead.
-        let len = rg.range(0.95, 2.30)
-        let w = rg.range(0.004, 0.010)
-        let k = rg.range(0.40, 1.10)
+        // far ones in it rather than one uniform hatch. Short: the streak is
+        // stretched again by the shear once the car is moving, and a length that
+        // reads right parked reads as a dropped scaffolding pole at speed.
+        let len = rg.range(0.45, 1.15)
+        // Wider than the first pass, not narrower: with the near band gone the
+        // nearest surviving drop is eight metres out, and a four-millimetre
+        // quad at eight metres is a sub-pixel line, which does not draw thin -
+        // it draws as a dashed flicker.
+        let w = rg.range(0.008, 0.019)
+        let k = rg.range(0.35, 1.0)
         // A slight lean, different per streak. Uniformly vertical rain reads as
         // a wire fence.
-        let lean = rg.jitter(0.16)
-        b.setTint(k * 0.72, k * 0.82, k * 1.0)
-        streak(b, v3(x, y, z), len, w, lean)
+        let lean = rg.jitter(0.10)
+        streak(b, v3(x, y, z), len, w, lean, k)
         i = i + 1
     }
     var m = Mesh.new(gl, sceneAttrs())
@@ -106,24 +125,43 @@ pub fn buildRain(gl: &mut GlContext): Rain {
     }
 }
 
-// One streak: two quads crossed at right angles about the fall axis.
-fn streak(b: &mut Builder, p: &Vec3, len: f64, w: f64, lean: f64) {
+// One streak: two quads crossed at right angles about the fall axis, dark at the
+// tail and bright at the head.
+//
+// The gradient is the difference between rain and a fence. A streak is one drop
+// smeared over an exposure, so it is brightest where the drop is now - at the
+// bottom - and fades to nothing along where it has been. Drawn flat, both ends
+// terminate in a hard edge, and a hard edge at both ends of a straight bright
+// line is a pole. It costs nothing: the tint is per-vertex either way.
+fn streak(b: &mut Builder, p: &Vec3, len: f64, w: f64, lean: f64, k: f64) {
     let top = v3(p.x + lean * len, p.y + len, p.z + lean * len * 0.5)
     // The normal points up rather than at anything in particular: this material
     // is pure emissive, so nothing reads it, and giving it a real one would cost
     // a cross product per drop for no pixels.
     let n = v3(0.0, 1.0, 0.0)
+    let hr = k * 0.72
+    let hg = k * 0.82
+    let hb = k
+
+    b.setTint(hr, hg, hb)
     b.push(v3(p.x - w, p.y, p.z), n, 0.0, 0.0)
     b.push(v3(p.x + w, p.y, p.z), n, 1.0, 0.0)
+    b.setTint(0.0, 0.0, 0.0)
     b.push(v3(top.x + w, top.y, top.z), n, 1.0, 1.0)
+    b.setTint(hr, hg, hb)
     b.push(v3(p.x - w, p.y, p.z), n, 0.0, 0.0)
+    b.setTint(0.0, 0.0, 0.0)
     b.push(v3(top.x + w, top.y, top.z), n, 1.0, 1.0)
     b.push(v3(top.x - w, top.y, top.z), n, 0.0, 1.0)
 
+    b.setTint(hr, hg, hb)
     b.push(v3(p.x, p.y, p.z - w), n, 0.0, 0.0)
     b.push(v3(p.x, p.y, p.z + w), n, 1.0, 0.0)
+    b.setTint(0.0, 0.0, 0.0)
     b.push(v3(top.x, top.y, top.z + w), n, 1.0, 1.0)
+    b.setTint(hr, hg, hb)
     b.push(v3(p.x, p.y, p.z - w), n, 0.0, 0.0)
+    b.setTint(0.0, 0.0, 0.0)
     b.push(v3(top.x, top.y, top.z + w), n, 1.0, 1.0)
     b.push(v3(top.x, top.y, top.z - w), n, 0.0, 1.0)
 }
@@ -162,7 +200,13 @@ fn sprayGeometry(b: &mut Builder, rg: &mut Rand) {
 pub fn rainMaterial(k: f64): Material {
     var m = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
     m.emissive = v3(k, k, k)
-    m.alpha = 0.42
+    // Faint. A drop is a highlight on a moving lens of water, not a light
+    // source, and the only reason it is visible at all against a black street
+    // is that there are thousands of them. Painted at the strength one streak
+    // deserves in isolation, the curtain comes out as white bars.
+    m.alpha = 0.15
+    m.fadeNear = FADE_NEAR
+    m.fadeFar = FADE_FAR
     return m
 }
 
@@ -170,19 +214,43 @@ pub fn sprayMaterial(k: f64): Material {
     var m = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
     m.emissive = v3(k * 0.9, k * 0.95, k)
     m.alpha = 0.30
+    // No near fade: the spray lives four metres behind the camera's own car,
+    // which is inside the window the rain is faded out of.
     return m
 }
 
-// Where tile (i, j, l) of the block goes this frame. The camera is snapped down
-// to the cell grid and backed off by one cell, so the eight tiles straddle it,
-// and the fall is a slide that wraps at RAIN_CELL - which is invisible precisely
-// because every tile is the same tile.
-pub fn tileMatrix(cam: &Vec3, t: f64, i: i64, j: i64, l: i64): Vec<f32> {
-    let bx = Math.floor(cam.x / RAIN_CELL) * RAIN_CELL - RAIN_CELL
-    let by = Math.floor(cam.y / RAIN_CELL) * RAIN_CELL - RAIN_CELL
-    let bz = Math.floor(cam.z / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+// Where tile (i, j, l) of the block goes this frame.
+//
+// Three motions, one matrix. The fall is a slide down that wraps at RAIN_CELL,
+// invisible precisely because every tile is the same tile. The slant is a shear
+// by the car's own velocity over the fall speed, which is what rain does in the
+// frame of something moving through it - at speed it is not falling past you,
+// it is coming at you - and it is legal here because a sheared lattice is still
+// a lattice, so the eight copies still meet edge to edge. And the block follows
+// the camera by snapping to the cell grid: in UNSHEARED coordinates, because the
+// shear is what maps those cells to where they end up, and snapping after it
+// would walk the block sideways out from under the camera at speed.
+pub fn tileMatrix(cam: &Vec3, vel: &Vec3, t: f64, i: i64, j: i64, l: i64): Vec<f32> {
+    // Clamped: past about this the streaks are nearer horizontal than vertical
+    // and the curtain stops reading as rain at all, which is true of real rain
+    // at 200 km/h too and is no more use on screen for being true.
+    let kx = Math.clampF64(-vel.x / FALL, -0.8, 0.8)
+    let kz = Math.clampF64(-vel.z / FALL, -0.8, 0.8)
+    // Unshearing the camera before the snap is also what centres the block on
+    // it: a drop at the camera's own height comes out exactly where it would
+    // have with no shear, and only drops well above or below it slide sideways.
+    let ux = cam.x - kx * cam.y
+    let uz = cam.z - kz * cam.y
     let drop = t * FALL - Math.floor(t * FALL / RAIN_CELL) * RAIN_CELL
-    return translation(v3(bx + (i as f64) * RAIN_CELL, by + (j as f64) * RAIN_CELL - drop, bz + (l as f64) * RAIN_CELL))
+    let bx = Math.floor(ux / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+    // The slide is subtracted after the snap, so the snap has to be taken on
+    // where the camera will be relative to the slid field, not where it is in
+    // the unslid one. Snapping on cam.y alone lets the whole block fall out from
+    // under the camera once per wrap.
+    let by = Math.floor((cam.y + drop) / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+    let bz = Math.floor(uz / RAIN_CELL) * RAIN_CELL - RAIN_CELL
+    let off = translation(v3(bx + (i as f64) * RAIN_CELL, by + (j as f64) * RAIN_CELL - drop, bz + (l as f64) * RAIN_CELL))
+    return multiply(shearXZ(kx, kz), off)
 }
 
 // One rear tyre's spray, placed in the car's frame and stretched by how fast it

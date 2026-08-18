@@ -51,6 +51,9 @@ pub struct Material {
     // a uniform glow over a picture just washes the picture out.
     emissiveMap: f64,
     alpha: f64,
+    // See uAlphaFade in the scene shader. (0, 0) is no fade at all.
+    fadeNear: f64,
+    fadeFar: f64,
 }
 
 // `slot` is a TEX_* index from textures.milo. Each material contributes two GL
@@ -69,6 +72,8 @@ pub fn material(slot: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Mate
         emissive: v3(0.0, 0.0, 0.0),
         emissiveMap: 0.0,
         alpha: 1.0,
+        fadeNear: 0.0,
+        fadeFar: 0.0,
     }
 }
 
@@ -86,6 +91,8 @@ pub fn materialTex(albedoTex: i64, surfTex: i64, r: f64, g: f64, b: f64, rough: 
         emissive: v3(0.0, 0.0, 0.0),
         emissiveMap: 0.0,
         alpha: 1.0,
+        fadeNear: 0.0,
+        fadeFar: 0.0,
     }
 }
 
@@ -542,6 +549,7 @@ impl Gfx {
         self.scene.uniform3F("uEmissive", m.emissive.x, m.emissive.y, m.emissive.z)
         self.scene.uniformF("uEmissiveMap", m.emissiveMap)
         self.scene.uniformF("uAlpha", m.alpha)
+        self.scene.uniform2F("uAlphaFade", m.fadeNear, m.fadeFar)
         self.scene.sampler("uAlbedoTex", self.tex[m.albedoTex], 0)
         self.scene.sampler("uSurfTex", self.tex[m.surfTex], 1)
         mesh.draw()

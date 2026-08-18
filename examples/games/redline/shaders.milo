@@ -298,6 +298,16 @@ uniform float uMetal;
 uniform vec3 uEmissive;
 uniform float uEmissiveMap;
 uniform float uAlpha;
+// Distance window for alpha, in metres: (nearFull, farStart). Zero is off, and
+// off is right for everything except the rain. A raindrop two metres from the
+// lens is a white bar across a third of the screen - correct geometry, and the
+// single thing that made the curtain read as scaffolding rather than as weather.
+// Real optics dispose of it (a drop that close is out of focus and out of the
+// depth of field), so the near ramp is the stand-in for a lens the game has not
+// got. The far ramp is the other half: a streak thinner than a pixel at forty
+// metres cannot be drawn, only aliased, and unfaded it flickers as a dotted
+// hatch across the sky.
+uniform vec2 uAlphaFade;
 uniform float uNormalStrength;
 uniform float uDetail;
 uniform float uDebug;
@@ -416,7 +426,13 @@ void main() {
     float ext = 1.0 - exp(-dist * 0.0017);
     col = mix(col, skyLookup(-v, 2.0), ext * 0.30);
 
-    fragColor = vec4(col, uAlpha);
+    float alpha = uAlpha;
+    if (uAlphaFade.y > 0.0) {
+        alpha *= smoothstep(uAlphaFade.x * 0.35, uAlphaFade.x, dist)
+               * (1.0 - smoothstep(uAlphaFade.y, uAlphaFade.y * 1.7, dist));
+    }
+
+    fragColor = vec4(col, alpha);
     // --debug 3 shows the occlusion buffer on its own, which is the only way to
     // tell a working AO pass from a pass that is silently returning white.
     if (uDebug > 2.5) {

@@ -494,13 +494,15 @@ pub fn main(): i32 {
         if rainAmount > 0.0 {
             gfx.sceneBlendOn()
             let rainM = rainMaterial(rainAmount * 1.05)
+            // Three cells on a side, not two: two only ever guarantees rain on
+            // one side of the camera. See tileMatrix.
             var ti = 0
-            while ti < 2 {
+            while ti < 3 {
                 var tj = 0
-                while tj < 2 {
+                while tj < 3 {
                     var tl = 0
-                    while tl < 2 {
-                        gfx.sceneDraw(rain.tile, tileMatrix(eye, gfx.time, ti, tj, tl), rainM)
+                    while tl < 3 {
+                        gfx.sceneDraw(rain.tile, tileMatrix(eye, player.vel, gfx.time, ti, tj, tl), rainM)
                         tl = tl + 1
                     }
                     tj = tj + 1

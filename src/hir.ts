@@ -240,4 +240,8 @@ export interface HIRModule {
   cValues?: { global: string; cName: string; header: string; value: string; signed: boolean }[];
   // From `@link("SDL2")` on extern fns: native libs to pass to the linker.
   linkLibs?: string[];
+  // Globals whose initializer has to run (CheckResult.nonConstGlobals, carried through
+  // so the driver can see it). Codegen puts exactly these in `@__milo.global_init`;
+  // `emit-obj --no-entry` has nothing that calls it, so it rejects on this list.
+  nonConstGlobals?: string[];
 }

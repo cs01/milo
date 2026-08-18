@@ -4,7 +4,7 @@
 // separately-compiled objects keep their own copies at link time (internal linkage).
 import { test, expect } from "bun:test";
 import { execSync, spawnSync } from "child_process";
-import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "fs";
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -137,6 +137,35 @@ int main(void) { printf("%lld %lld\\n", fromA(), fromB()); return 0; }
   execSync(`cc ${cMain} ${objA} ${objB} -o ${bin}`, { stdio: ["pipe", "pipe", "pipe"] });
   const out = execSync(bin, { encoding: "utf-8" });
   expect(out.trim()).toBe("111 222");
+});
+
+// `--no-entry` strips @main, and @main is the only caller of @__milo.global_init, so a
+// global whose initializer has to RUN stays zero in the object with nothing said about
+// it. `pub let A: string = "hello"` came out as the empty string. The condition is the
+// flag alone: a module that HAS a main is no safer, because --no-entry renames it to
+// @_milo_unused_main and strands the init call in dead code.
+test("emit-obj --no-entry rejects a global whose initializer has to run", () => {
+  const lib = write("no_entry_runtime_global.milo", `pub let GREETING: string = "hello"\npub fn greet(): string { return GREETING }\n`);
+  const r = milo(`emit-obj ${lib} --no-entry -o ${join(DIR, "no_entry_runtime_global.o")}`);
+  expect(r.code).not.toBe(0);
+  expect(r.err).toContain("global 'GREETING' needs an initializer that runs");
+  expect(existsSync(join(DIR, "no_entry_runtime_global.o"))).toBe(false);
+
+  // Same module with a main(): still rejected, for the stranded-init reason.
+  const withMain = write("no_entry_runtime_global_main.milo", `pub let GREETING: string = "hello"\nfn main(): void { print(GREETING) }\n`);
+  const r2 = milo(`emit-obj ${withMain} --no-entry -o ${join(DIR, "no_entry_runtime_global_main.o")}`);
+  expect(r2.code).not.toBe(0);
+  expect(r2.err).toContain("needs an initializer that runs");
+});
+
+// The case --no-entry exists for: constant globals fold to real LLVM constants, so
+// there is nothing for the init routine to run and the object is complete on its own.
+test("emit-obj --no-entry still accepts constant globals", () => {
+  const lib = write("no_entry_const_global.milo", `pub let N: i64 = 5\npub fn twice(): i64 { return N * 2 }\n`);
+  const obj = join(DIR, "no_entry_const_global.o");
+  const r = milo(`emit-obj ${lib} --no-entry -o ${obj}`);
+  expect(`${r.code}: ${r.err}`).toBe(`0: ${r.err}`);
+  expect(existsSync(obj)).toBe(true);
 });
 
 // Regression: a type error in an *imported* module must be reported against that

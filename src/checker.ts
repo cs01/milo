@@ -247,6 +247,11 @@ export interface CheckResult {
   autoJsonToJson: Map<Expr, string>;
   anonStructs: { name: string; fields: { name: string; type: TypeKind }[] }[];
   globalTypes?: Map<string, TypeKind>;
+  // Module-level globals whose initializer has to RUN (a non-empty string, a Vec, any
+  // call). Codegen collects exactly these into `@__milo.global_init` and calls it from
+  // main, so a build with no entry point to call it leaves them zeroed: `emit-obj
+  // --no-entry` reads this list and refuses rather than emitting the silent zero.
+  nonConstGlobals: string[];
   iteratorForIns: Map<Stmt, { nextMethod: string; elemType: TypeKind; optionEnumName: string }>;
   stringViewForIns: Map<Stmt, { mode: "lines" | "split" }>;
   // `for x in wrapper` where the struct has an `@iter` field: the field to walk instead.
@@ -323,6 +328,7 @@ export class TypeChecker {
   private inferVecElems = new WeakSet<object>();
   private pendingInferVecs: Array<{ elem: TypeKind; span: Span | undefined }> = [];
   private _globalTypes = new Map<string, TypeKind>();
+  private _nonConstGlobals: string[] = [];
   private functions = new Map<string, FnSig>();
   private fnDecls = new Map<string, Function>();
   // Which contract clause is being checked, if any. `old()` is legal only inside `ensures`,
@@ -1752,6 +1758,7 @@ export class TypeChecker {
       autoJsonToJson: this.autoJsonToJson,
       anonStructs: this.anonStructs,
       globalTypes: this._globalTypes,
+      nonConstGlobals: this._nonConstGlobals,
       iteratorForIns: this.iteratorForIns,
       stringViewForIns: this.stringViewForIns,
       iterDelegates: this.iterDelegates,
@@ -2206,7 +2213,6 @@ export class TypeChecker {
     // type-check module-level globals — push a module scope so declare() works
     this.pushScope();
     const globalTypes = new Map<string, TypeKind>();
-    const hasMain = program.functions.some(f => f.name === "main" && !f.isExtern);
     // Declare annotated globals up front. Checking one global's initializer can
     // monomorphize a function whose body reads a global declared further down the
     // list (a `var g: Arena<T> = arenaNew<T>()` reaches std/arena's `nextArenaId`),
@@ -2226,17 +2232,19 @@ export class TypeChecker {
         this.error(`global '${g.name}': type mismatch: expected ${typeName(hint)}, got ${typeName(valType)}`, g.span);
       }
       globalTypes.set(g.name, finalType);
-      // Non-constant initializers used to be rejected outright, because codegen emitted
-      // globals as LLVM constants only and a runtime-evaluated one silently became
-      // zeroinitializer ("" / 0 / empty). They now run in a generated routine that main
-      // calls before its body, in declaration order — so this is a real initializer, and
-      // the only remaining rule is that it can't run before main exists.
-      if (!this.isConstGlobalInit(g.value) && !hasMain) {
-        this.error(
-          `global '${g.name}': initializer is not a compile-time constant, and this module has no main() to run it before — give it a constant initializer ('= ""', '= 0', '= []') and assign the real value at the start of your entry point`,
-          g.span,
-        );
-      }
+      // Non-constant initializers used to be rejected when the module had no main(),
+      // because the generated init routine is called from main. That answered a
+      // whole-program question ("is anything going to link this?") inside a per-module
+      // pass, so `milo check` rejected every library holding a string constant. A
+      // Milo string is an owned heap buffer, so `pub let A: string = "hi"` is never
+      // const. The missing-entry-point diagnostic now lives in the driver, where the
+      // build/run path is the one that actually needs an entry point.
+      //
+      // The decision is still made and published on CheckResult, because one build
+      // mode does have no entry point to run the routine: `emit-obj --no-entry`
+      // strips `@main`, so nothing ever calls `@__milo.global_init` and every global
+      // in this list would silently stay zero. That path rejects on this list.
+      if (!this.isConstGlobalInit(g.value)) this._nonConstGlobals.push(g.name);
       if (!g.type) this.declare(g.name, { type: finalType, mutable: g.mutable, moved: false, borrowed: false, read: true, span: g.span });
       for (const attr of g.attributes ?? []) {
         if (attr.name === "cValue") this.checkCValue(g, attr, finalType);
@@ -5801,6 +5809,11 @@ export class TypeChecker {
   // Mirrors codegen's getConstantInitializer: what can actually be emitted as
   // an LLVM constant for a module-scope global. Empty string/vec are allowed
   // (they ARE zeroinitializer); a non-empty string would need heap allocation.
+  //
+  // It must never claim MORE than codegen folds: `--no-entry` rejects a module on
+  // this answer (nothing calls the init routine there), so a "const" the codegen
+  // side emits as zeroinitializer would wave through a silent zero. Codegen's side
+  // is Codegen.isFullyConstInit / tryConstantExpr; a case added here needs one there.
   private isConstGlobalInit(e: Expr): boolean {
     switch (e.kind) {
       case "IntLit":

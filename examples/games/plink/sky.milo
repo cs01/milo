@@ -2,7 +2,7 @@
 //
 // This game is indoors, so there is no sky to integrate: what the reflection
 // lookup and the ambient term need is the radiance of the *arcade* in every
-// direction — a dark vault overhead, a lit floor underfoot, and a ring of neon
+// direction, a dark vault overhead, a lit floor underfoot, and a ring of neon
 // around the walls. It is stored in exactly the layout the atmospheric table
 // used (lat-long, u = azimuth, v = zenith angle) so the shader side is unchanged.
 //
@@ -36,7 +36,7 @@ pub struct Sky {
     sun: Vec3,
     // The house light: the one directional source, hung high and behind the
     // firing line so the faces you shoot at are the faces it reaches. It is
-    // deliberately weak — the neon does the work — but it is what puts a
+    // deliberately weak, the neon does the work, but it is what puts a
     // shadow under the rigs, and a scene with no shadow at all reads as flat
     // no matter how much of it glows.
     sunColor: Vec3,
@@ -70,7 +70,7 @@ fn lobeAz(a: f64, c: f64, w: f64): f64 {
 
 // The radiance of the room in one direction. Everything here is hand-placed
 // rather than traced: the room is a tube, and a tube seen from inside is three
-// bands — vault, wall, floor — with the light sources on known bearings.
+// bands (vault, wall, floor) with the light sources on known bearings.
 fn roomRadiance(dir: &Vec3): Vec3 {
     let up = Math.clampF64(dir.y, -1.0, 1.0)
     // Azimuth measured the way the world is laid out: 0 is straight down +Z,

@@ -1,4 +1,4 @@
-// PLINK — reflex target practice in a dead western town.
+// PLINK, reflex target practice in a dead western town.
 //
 //   milo run examples/games/plink/main.milo --release
 //
@@ -117,7 +117,7 @@ pub fn main(): i32 {
     var winW: i64 = 1440
     var winH: i64 = 900
     // How bright the room itself is, before any of the neon. Turning this up
-    // does not make the tubes glow more — it makes everything else compete with
+    // does not make the tubes glow more, it makes everything else compete with
     // them, which is the one thing that can kill this look.
     let houseLight = argValue("--house", "1").parseF64() ?? 1.0
     let scalePct = argValue("--scale", "100").parseF64() ?? 100.0
@@ -179,7 +179,7 @@ pub fn main(): i32 {
     var rw = ((dw as f64) * scalePct / 100.0) as i64
     var rh = ((dh as f64) * scalePct / 100.0) as i64
     // The scene's pixel budget. It was 2.6 MP, which on a retina panel meant the
-    // whole frame was rendered at about seventy per cent and stretched — soft
+    // whole frame was rendered at about seventy per cent and stretched, soft
     // edges everywhere. At 400 frames in two seconds on this hardware there was
     // no reason for it; 4.6 MP renders a 2880x1800 drawable at nine tenths.
     let cap = 4600000.0
@@ -199,13 +199,13 @@ pub fn main(): i32 {
         }
     }
     // Albedo and surface for each material, uploaded in the order textures.milo
-    // declares — the TEX_* constants index this list, so the order is a contract.
+    // declares, the TEX_* constants index this list, so the order is a contract.
     let texes = makeTextures()
     for t in texes {
         let a = Texture2D.rgba8(gl, TEX_SIZE, TEX_SIZE, t.albedo.clone(), true)
         // REPEAT, not the default clamp. Every one of these is tiled across
         // metres of surface, and on clamp only the first repeat has any content
-        // at all — the rest is the edge texel smeared, which reads as a smooth
+        // at all, the rest is the edge texel smeared, which reads as a smooth
         // wash and looks exactly like a texture that is simply too soft.
         a.setWrap(Wrap.Repeat)
         a.generateMipmaps()
@@ -222,7 +222,7 @@ pub fn main(): i32 {
     // rather than repeated and they share a single flat surface map.
     var flatPixels: Vec<u32> = Vec.filled(4, 0)
     for i in 0..4 {
-        // A normal straight out of the surface, and a roughness of 0.5 — which
+        // A normal straight out of the surface, and a roughness of 0.5, which
         // the shader reads as "exactly what the material says".
         flatPixels[i] = 0xFF8080FF
     }
@@ -623,7 +623,7 @@ pub fn main(): i32 {
 }
 
 // A filled disc, as a stack of horizontal bars. The HUD shader draws one thing
-// — a textured quad — so every round corner in here is a scanline fill. Twenty
+// (a textured quad) so every round corner in here is a scanline fill. Twenty
 // eight rows is enough that a 40 px badge has no visible steps.
 fn disc(hud: &mut Hud, cx: f64, cy: f64, r: f64, red: f64, g: f64, b: f64, a: f64) {
     let rows = 28
@@ -788,7 +788,7 @@ pub let POP_LIFE: f64 = 0.85
 
 // A number drawn to survive this background. `textCentred` hangs one black copy
 // down and to the right, which at popup sizes reads as a second number in a
-// second colour rather than as a shadow — so the popup draws its own:
+// second colour rather than as a shadow, so the popup draws its own:
 //
 //   - a dark ring in eight directions, which is an outline and not a shadow
 //   - a soft halo in the number's own colour, standing in for the glow the
@@ -875,7 +875,7 @@ fn stepPops(pops: &mut Vec<f64>, dt: f64) {
 
 // What a hit is worth, printed where the target was and rising off it.
 //
-// Scoring you cannot see is scoring you cannot play towards — this is the whole
+// Scoring you cannot see is scoring you cannot play towards, this is the whole
 // feedback loop for the ladder, so it is deliberately loud: it pops in at one
 // and a half size, snaps down to one, climbs about a target's width, and goes
 // out over the last third of its life.

@@ -2,7 +2,7 @@
 // and the faces of the targets themselves.
 //
 // These are the only textures in the game that carry words or a device, so they
-// are built here rather than in textures.milo — they need the HUD's font table,
+// are built here rather than in textures.milo, they need the HUD's font table,
 // they are not square, they are not tiled, and there is exactly one of each.
 //
 // Everything here is drawn to be *glowed*: the materials that use these
@@ -76,7 +76,7 @@ fn pack(r: f64, g: f64, b: f64): u32 {
 }
 
 // Stamp one 5x7 glyph at `scale`, in ink that is not quite black and not quite
-// even — printed on a press, on paper, a century ago.
+// even, printed on a press, on paper, a century ago.
 fn stampGlyph(px: &mut Vec<u32>, w: i64, h: i64, table: &Vec<i64>, code: i64, x0: i64, y0: i64, scale: i64, r: f64, g: f64, b: f64) {
     if code <= 0 || code >= 128 {
         return
@@ -239,7 +239,7 @@ fn drawFace(px: &mut Vec<u32>, cell: i64, msg: &string, gr: f64, gg: f64, gb: f6
         }
     }
     // The number, as big as fits inside the inner ring. The glyph cell is 5x7
-    // design units, the pen advances 6, and the last glyph does not advance —
+    // design units, the pen advances 6, and the last glyph does not advance, 
     // so a string of n is 6n-1 units wide and 7 tall, and both have to clear the
     // ring at 0.62 of the radius, which is 78 px across.
     var n = 0
@@ -258,15 +258,15 @@ fn drawFace(px: &mut Vec<u32>, cell: i64, msg: &string, gr: f64, gg: f64, gb: f6
 
 // The faces, in the order targets.milo's KIND_* constants expect. The ladder is
 // colour-coded and the code is the contract with the player: red is cheap, blue
-// is next, magenta is worth going for, and the two that glow — orange and hot
-// magenta — are the ones at the back that you have to reach for.
+// is next, magenta is worth going for, and the two that glow, orange and hot
+// magenta, are the ones at the back that you have to reach for.
 //
-//   0   100 — red on white
-//   1   250 — blue on white
-//   2   500 — magenta on white
-//   3  1000 — orange, and lit from inside
-//   4  5000 — magenta, and lit harder still
-//   5 BONUS — gold, and only ever seen when the drone has dropped one
+//   0   100, red on white
+//   1   250, blue on white
+//   2   500, magenta on white
+//   3  1000, orange, and lit from inside
+//   4  5000, magenta, and lit harder still
+//   5 BONUS, gold, and only ever seen when the drone has dropped one
 pub fn facePixels(): Vec<u32> {
     var px: Vec<u32> = Vec.filled(FACE_SIZE * FACE_SIZE, 0)
     drawFace(px, 0, "100", 0.96, 0.96, 0.93, 1.00, 0.11, 0.08)

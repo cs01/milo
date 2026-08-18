@@ -32,7 +32,7 @@ from "./post" import {
 pub let SHADOW_SIZE: i64 = 2048
 
 // How the surface is lit, independent of what shape it is. Textures are indices
-// into `Gfx.tex` rather than `Texture2D` values because a Texture2D is @noCopy —
+// into `Gfx.tex` rather than `Texture2D` values because a Texture2D is @noCopy, 
 // two materials naming one texture would otherwise be two things that each think
 // they may free it.
 pub struct Material {
@@ -47,14 +47,14 @@ pub struct Material {
     detail: f64,
     emissive: Vec3,
     // 1 multiplies the emissive by the albedo texture instead of by white, which
-    // is what makes a printed sign glow in the shape of what is printed on it —
+    // is what makes a printed sign glow in the shape of what is printed on it, 
     // a uniform glow over a picture just washes the picture out.
     emissiveMap: f64,
     alpha: f64,
 }
 
 // `slot` is a TEX_* index from textures.milo. Each material contributes two GL
-// textures in order — albedo then surface — so the slot doubles into `Gfx.tex`.
+// textures in order (albedo then surface) so the slot doubles into `Gfx.tex`.
 // Passing the GL indices directly is how a material ends up sampling its own
 // albedo as a normal map, which looks almost right and is very hard to see.
 pub fn material(slot: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Material {
@@ -72,8 +72,8 @@ pub fn material(slot: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Mate
     }
 }
 
-// For the handful of surfaces that are one-of-a-kind — a poster, a painted
-// board — where there is no tiling surface map to pair with the picture.
+// For the handful of surfaces that are one-of-a-kind, a poster, a painted
+// board, where there is no tiling surface map to pair with the picture.
 pub fn materialTex(albedoTex: i64, surfTex: i64, r: f64, g: f64, b: f64, rough: f64, metal: f64): Material {
     return Material {
         albedoTex: albedoTex,
@@ -128,14 +128,14 @@ pub struct Gfx {
     rh: i64,
     aoStrength: f64,
     aoRadius: f64,
-    // The neon, as seven floats per light — position, colour, range — in one
+    // The neon, as seven floats per light (position, colour, range) in one
     // flat list. A Vec<Light> would be tidier and this is uploaded element by
     // element every frame anyway.
     lights: Vec<f64>,
     debug: f64,
     exposure: f64,
     bloomAmount: f64,
-    // Additive white the composite adds before tone mapping — the muzzle flash
+    // Additive white the composite adds before tone mapping, the muzzle flash
     // lighting the whole frame for two frames rather than only the barrel.
     flash: f64,
     time: f64,
@@ -239,7 +239,7 @@ pub fn newGfx(gl: &mut GlContext, rw: i64, rh: i64, sky: &Sky, atlasPixels: &Vec
             return Result.Err("shadow target: " + e)
         }
     }
-    // The prepass buffer is full resolution — AO reads neighbouring depths, and
+    // The prepass buffer is full resolution, AO reads neighbouring depths, and
     // halving it halves the distance a sample can tell apart. The AO itself is
     // half, because it is blurred anyway.
     let dnTgt = match Target.new(gl, rw, rh, true, false) {

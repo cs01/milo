@@ -3,7 +3,7 @@
 // Six materials, each a 256x256 albedo plus a 256x256 "surf" map that packs a
 // tangent-space normal in RGB and a roughness multiplier in A. Both come out of
 // one height field per material, so the bumps in the normal map are the same
-// bumps the colour shows — a stone that looks raised is raised.
+// bumps the colour shows, a stone that looks raised is raised.
 //
 // Two constraints shape everything here:
 //
@@ -19,7 +19,7 @@
 // The albedo is deliberately near-neutral: the shader multiplies it by a
 // per-material colour and a per-vertex tint, so what lives in the texture is
 // *detail*, not identity. Making the carpet purple here and purple again in the
-// material would double the saturation — and the tint is how one neon material
+// material would double the saturation, and the tint is how one neon material
 // paints tubes in six different colours.
 //
 // Integer overflow traps in Milo rather than wrapping, so the hash keeps every
@@ -32,7 +32,7 @@ from "std/math" import {
 
 pub let TEX_SIZE: i64 = 256
 
-// The index order is the contract with render.milo — it indexes the returned Vec
+// The index order is the contract with render.milo, it indexes the returned Vec
 // with these names, never with a literal.
 pub let TEX_CARPET: i64 = 0
 
@@ -70,7 +70,7 @@ fn latticeHash(ix: i64, iy: i64, seed: i64): u64 {
     return h
 }
 
-// Uniform in [0,1). `ix`/`iy` must already be non-negative — every caller wraps.
+// Uniform in [0,1). `ix`/`iy` must already be non-negative, every caller wraps.
 fn rand01(ix: i64, iy: i64, seed: i64): f64 {
     return (latticeHash(ix, iy, seed) as f64) / 4294967296.0
 }
@@ -108,7 +108,7 @@ fn smoothT(t: f64): f64 {
 }
 
 // Radius multiplier that turns a disc into a chipped outline. One harmonic is
-// not enough — a single lobe term makes every stone the same rounded triangle,
+// not enough, a single lobe term makes every stone the same rounded triangle,
 // which the eye picks out of a gravel bed instantly.
 fn lobeRadius(ang: f64, phase: f64): f64 {
     return 0.87 + 0.13 * (Math.sin(ang * 3.0 + phase) * 0.55 + Math.sin(ang * 5.0 + phase * 2.3) * 0.30 + Math.sin(ang * 8.0 + phase * 0.7) * 0.15)
@@ -164,7 +164,7 @@ fn fleckOf(x: i64, y: i64, seed: i64): f64 {
 }
 
 // Bilinear value noise on a lattice that wraps at `px` cells across u and `py`
-// down v. Separate periods are what make anisotropic detail possible — brushed
+// down v. Separate periods are what make anisotropic detail possible, brushed
 // steel is the same noise with a low u period and a high v one.
 fn valueNoise(u: f64, v: f64, px: i64, py: i64, seed: i64): f64 {
     let fx = u * (px as f64)
@@ -285,11 +285,11 @@ fn stamp(f: &mut Field, px: i64, py: i64, w: f64, r: f64, g: f64, b: f64, dh: f6
 }
 
 // ---------------------------------------------------------------------------
-// 0 — carpet
+// 0, carpet
 // ---------------------------------------------------------------------------
 
 // Midway carpet: dense short pile with a woven diamond motif in it. The motif is
-// the point — plain noise at this scale reads as static, and a floor that reads
+// the point, plain noise at this scale reads as static, and a floor that reads
 // as static is the one surface a player is guaranteed to be looking at while
 // they wait for the next target.
 fn makeCarpet(): TexData {
@@ -324,12 +324,12 @@ fn makeCarpet(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 1 — tread plate
+// 1, tread plate
 // ---------------------------------------------------------------------------
 
 // Diamond plate: the stepped platform tops and the stage edging. Lozenges on a
 // 32 px cell, alternating direction row by row, each comfortably inside its own
-// cell — at 40 degrees the half-diagonal is under 12 px, so nothing crosses a
+// cell, at 40 degrees the half-diagonal is under 12 px, so nothing crosses a
 // cell boundary and the wrap is free.
 fn makeTread(): TexData {
     var f = newField()
@@ -379,7 +379,7 @@ fn makeTread(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 2 — panel
+// 2, panel
 // ---------------------------------------------------------------------------
 
 // One painted sheet-metal panel per repeat: a groove all the way round the tile,
@@ -442,7 +442,7 @@ fn makePanel(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 3 — steel
+// 3, steel
 // ---------------------------------------------------------------------------
 
 fn makeSteel(): TexData {
@@ -487,7 +487,7 @@ fn makeSteel(): TexData {
                     continue
                 }
                 let n = rand01(wrapIdx(cix + dx), wrapIdx(ciy + dy), 5202)
-                // Bare steel under a chip is cool and dark, not brown — rust is
+                // Bare steel under a chip is cool and dark, not brown, rust is
                 // a different material and it has its own texture.
                 let l = 0.33 + n * 0.12
                 stamp(f, cix + dx, ciy + dy, w, l * 0.97, l * 0.99, l * 1.02, -0.35 * w, 0.86)
@@ -498,7 +498,7 @@ fn makeSteel(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 4 — paint
+// 4, paint
 // ---------------------------------------------------------------------------
 
 fn makePaint(): TexData {
@@ -525,7 +525,7 @@ fn makePaint(): TexData {
 }
 
 // ---------------------------------------------------------------------------
-// 5 — glass
+// 5, glass
 // ---------------------------------------------------------------------------
 
 fn makeGlass(): TexData {

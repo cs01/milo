@@ -2,14 +2,14 @@
 // marquee, and the drone hanging over the middle of it.
 //
 // All of it is built once into a handful of meshes, one per material, and never
-// touched again — the only things that move in this room are the targets, the
+// touched again, the only things that move in this room are the targets, the
 // drone's rotors and the gun. Buckets are the unit: every primitive is pushed
 // into the builder for the material it wants, so the whole hall draws in nine
 // calls no matter how many pieces it is made of.
 //
 // The one bucket that is not a material in the usual sense is B_NEON. Its
 // material has a black albedo and a white emissive, and the shader multiplies
-// emissive by the vertex tint — so one bucket, one draw call, paints every tube
+// emissive by the vertex tint, so one bucket, one draw call, paints every tube
 // in the room in whatever colour and at whatever brightness the tint says. That
 // is why there is no "cyan tube material" and no "magenta tube material".
 //
@@ -174,12 +174,12 @@ fn faceQuad(b: &mut Builder, z: f64, x0: f64, y0: f64, x1: f64, y1: f64) {
     b.quad(v3(x0, y0, z), v3(x0, y1, z), v3(x1, y1, z), v3(x1, y0, z), y1 - y0, x1 - x0)
 }
 
-// Same, with the uv running along x rather than y — for anything that carries a
+// Same, with the uv running along x rather than y, for anything that carries a
 // picture rather than a tiling surface. u runs from x1 to x0, not the other way:
 // the view basis is s = forward x up, which puts world +X on the *left* of the
 // screen, so a sign lettered along +X comes out mirrored.
 // Wound counter-clockwise seen from -Z, which is where the player is. The
-// normal argument does not decide this — the winding does, and a sign wound the
+// normal argument does not decide this, the winding does, and a sign wound the
 // other way is simply not drawn.
 fn signQuad(b: &mut Builder, z: f64, x0: f64, y0: f64, x1: f64, y1: f64) {
     b.push(v3(x0, y0, z), v3(0.0, 0.0, -1.0), 1.0, 1.0)
@@ -235,7 +235,7 @@ fn addFloor(carpet: &mut Builder, neon: &mut Builder, tread: &mut Builder) {
     tread.setUvScale(1.0)
 }
 
-// The counter you shoot over. It closes the bottom of the frame — without it the
+// The counter you shoot over. It closes the bottom of the frame, without it the
 // nearest thing in the picture is nine metres away and the room has no floor you
 // feel you are standing on.
 fn addCounter(panel: &mut Builder, chrome: &mut Builder, neon: &mut Builder, plastic: &mut Builder) {
@@ -540,7 +540,7 @@ fn addStage(tread: &mut Builder, panel: &mut Builder, neon: &mut Builder, plasti
         chrome.setTint(1.0, 1.0, 1.0)
 
         // Lamps along the riser. The front riser is the single biggest flat
-        // surface the player ever looks at — it fills the bottom of the frame —
+        // surface the player ever looks at (it fills the bottom of the frame)
         // and a metre of unlit panel there is a hole in the picture.
         var lx = -STAGE_HALF + 0.62
         var n = 0
@@ -624,7 +624,7 @@ fn addBackWall(panel: &mut Builder, neon: &mut Builder, dark: &mut Builder, chro
 
 // The bonus board over the back of the stage: a lit face in a chrome frame with
 // a run of bulbs round it. The bulbs are geometry rather than a texture because
-// the bloom has to see them individually — a painted row of dots does not throw
+// the bloom has to see them individually, a painted row of dots does not throw
 // light and a row of small emissive spheres does.
 fn addMarquee(sign: &mut Builder, chrome: &mut Builder, neon: &mut Builder, dark: &mut Builder) {
     let z = 19.5
@@ -783,7 +783,7 @@ pub let DROP_COUNT: i64 = 4
 // The drone's patrol: a figure eight, x at one frequency and z at twice it.
 //
 // The old path used two incommensurate frequencies so it would never repeat a
-// pass, and that is exactly what made it look drunk — a Lissajous with unrelated
+// pass, and that is exactly what made it look drunk, a Lissajous with unrelated
 // periods brings the velocity to a near stop every so often, and a heading taken
 // from a velocity that is about to vanish swings through a hundred and eighty
 // degrees on its way out. A figure eight never stops: the two components hit
@@ -809,7 +809,7 @@ pub fn droneYaw(time: f64): f64 {
 }
 
 // The thing hanging over the middle of the stage: a hexagonal body on six arms,
-// each ending in a lit rotor ring. It does not do anything — it is the piece of
+// each ending in a lit rotor ring. It does not do anything, it is the piece of
 // the room your eye goes to when there is no target up, and every gallery like
 // this one has exactly one of them.
 fn droneGeometry(b: &mut Builder) {
@@ -827,7 +827,7 @@ fn droneGeometry(b: &mut Builder) {
         b.setTint(0.22, 0.90, 0.35)
         bar(b, v3(Math.cos(a) * 0.5, 0.0, Math.sin(a) * 0.5), p, 0.075, 6)
         // The ring the rotor turns inside, which is the shape that reads at
-        // twenty metres — the blades do not.
+        // twenty metres, the blades do not.
         b.setTint(0.35, 2.60, 0.80)
         ring(b, p, v3(0.0, 1.0, 0.0), 0.60, 0.045, 20)
         b.setTint(0.20, 1.40, 0.45)
@@ -843,7 +843,7 @@ fn droneGeometry(b: &mut Builder) {
 }
 
 // The payload itself: four gold discs slung under the rack. Drawn as its own
-// mesh so it can be left out for the seconds after a drop — the drone visibly
+// mesh so it can be left out for the seconds after a drop, the drone visibly
 // carries the bonus, visibly lets go of it, and comes back round loaded again.
 // A machine that hands out a prize with nothing in its hands is a machine the
 // player has no reason to watch.
@@ -984,7 +984,7 @@ pub fn buildWorld(gl: &mut GlContext, marqueeTex: i64, flatTex: i64, bannerTex: 
     mats.push(dark)
 
     // The neon. Black albedo, white emissive, and the vertex tint carries both
-    // the colour and the brightness — so this one material is every tube, every
+    // the colour and the brightness, so this one material is every tube, every
     // bulb and every light channel in the room.
     var neon = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
     neon.emissive = v3(1.0, 1.0, 1.0)

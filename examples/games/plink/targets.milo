@@ -4,11 +4,11 @@
 // A rig is a chrome post on a deck with a printed disc hinged at the top of it.
 // The disc lies flat until the rig is called, then a spring snaps it up to face
 // the firing line; it holds a couple of seconds and drops. Hit it anywhere and
-// it comes apart — there is no bullseye, only how fast you are.
+// it comes apart, there is no bullseye, only how fast you are.
 //
 // The four kinds differ in exactly two things: which cell of the face atlas they
-// print, and what they are worth. Everything else — the post, the hinge, the
-// spring, the break — is shared, which is why adding a fifth is a row in a table
+// print, and what they are worth. Everything else, the post, the hinge, the
+// spring, the break, is shared, which is why adding a fifth is a row in a table
 // rather than a new mesh.
 
 from "std/math" import {
@@ -207,7 +207,7 @@ pub struct Targets {
     // slot on a target nobody can shoot.
     eligible: Vec<bool>,
     shards: Vec<Shard>,
-    // One disc mesh per kind — same geometry, different cell of the face atlas.
+    // One disc mesh per kind, same geometry, different cell of the face atlas.
     faceMeshes: Vec<Mesh>,
     rimMeshes: Vec<Mesh>,
     baseMesh: Mesh,
@@ -681,7 +681,7 @@ impl Targets {
             }
             // Distance from the ray to the centre. A sphere is close enough for
             // a disc seen face on, and it means a shot that clips the rim still
-            // counts — which is the point of the game.
+            // counts, which is the point of the game.
             let perp = toC - dir.scale(t)
             if perp.len() <= self.rigs[i].hitRadius {
                 best = t

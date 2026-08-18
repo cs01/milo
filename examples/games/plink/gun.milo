@@ -3,8 +3,8 @@
 // This is a midway gun on a tether, not a firearm: a fat moulded body in
 // arcade green, a yellow barrel shroud with a lit ring round the muzzle, an
 // orange trigger and a bright lens on the top rib. What makes one recognisable
-// at a glance is the proportion — a stubby wide body, a barrel about three
-// times its own diameter, a raked grip — and boxes are enough if those are
+// at a glance is the proportion, a stubby wide body, a barrel about three
+// times its own diameter, a raked grip, and boxes are enough if those are
 // right.
 //
 // The bolt is a real piece of geometry too: a thin emissive bar from the muzzle
@@ -60,7 +60,7 @@ pub struct Gun {
 }
 
 // The moulded body: built along -Z with the hand at the origin, so the barrel
-// axis IS the local -Z axis. That matters more than it sounds — the bolt leaves
+// axis IS the local -Z axis. That matters more than it sounds, the bolt leaves
 // along the aim line, and any angle between the barrel and that line reads
 // immediately as a gun firing sideways.
 //
@@ -123,7 +123,7 @@ fn gripGeometry(b: &mut Builder) {
 
 // Everything on the gun that glows: the bore, a strip down the hump, and three
 // vents each side. All of it is emissive and tinted per piece, the same trick
-// the room's neon uses — and all of it is kept well under the values the tubes
+// the room's neon uses, and all of it is kept well under the values the tubes
 // carry, because a viewmodel is a metre from the lens and blooms accordingly.
 fn glowGeometry(b: &mut Builder) {
     // The bore: a small disc set back inside the collar, so it reads as a hole
@@ -269,7 +269,7 @@ impl Gun {
         basis[10] = (-fwd.z) as f32
         // Held out to the right and low, the way a gallery gun on a tether sits
         // in the hand. `right` here is the caller's fwd x up, which is already
-        // the screen-right direction — world +x is the *left* of the screen, and
+        // the screen-right direction, world +x is the *left* of the screen, and
         // reasoning from world axes instead of from this basis puts the gun in
         // the wrong corner.
         let ox = 0.215 - 0.215 * aim
@@ -304,7 +304,7 @@ impl Gun {
     // painted over the barrel, and the far wall of every tube showed through its
     // own near wall. That is what made it look like glass. The scene's near
     // plane is 6 cm and the gun is held at about 60, so it needs no special
-    // frustum — it is simply the nearest thing in the world.
+    // frustum, it is simply the nearest thing in the world.
     fn draw(self: &Self, gfx: &Gfx, eye: Vec3, fwd: Vec3, right: Vec3, up: Vec3, aim: f64, bob: f64, viewProj: &Vec<f32>) {
         let model = self.modelMatrix(eye, fwd, right, up, aim, bob)
         gfx.scene.bind()

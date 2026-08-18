@@ -2,7 +2,7 @@
 // and the shadow lookup the depth pass writes and the scene pass reads cannot
 // drift apart.
 //
-// Shared chunks are concatenated rather than #include'd — GL 3.3 core has no
+// Shared chunks are concatenated rather than #include'd, GL 3.3 core has no
 // include, and a shader built from named pieces is still one string by the time
 // the driver sees it.
 
@@ -29,7 +29,7 @@ uniform float uTime;
 uniform float uCloudCover;
 
 // What you see where no geometry does. The room is closed, so this is only ever
-// the far end of the vault seen past the edge of a panel — but it has to agree
+// the far end of the vault seen past the edge of a panel, but it has to agree
 // with the table the reflections sample or those edges show as seams.
 //
 // The dither is not decoration: the vault is a near-black gradient over a
@@ -43,7 +43,7 @@ vec3 roomBackdrop(vec3 d) {
 
 // Ambient as two irradiance values, not one constant. A face pointing up is lit
 // by the vault, a face pointing down by what the carpet bounced back, and the
-// horizon is the mix — which is why a soffit in here goes violet underneath and
+// horizon is the mix, which is why a soffit in here goes violet underneath and
 // cold on top without either being painted in.
 pub let CHUNK_LIGHT: string = "
 uniform vec3 uSkyUp;
@@ -114,8 +114,8 @@ vec3 pointLights(vec3 p, vec3 n, vec3 v, vec3 albedo, float rough, float metal, 
 
 // Depth is in the colour attachment because the gl package attaches depth as a
 // renderbuffer, which is not sampleable. Half floats alone are too coarse over
-// the range the map covers — about 3 cm, which is a visible staircase along the
-// edge of a shadow at 25 m — so the value is split high/low across two channels
+// the range the map covers, about 3 cm, which is a visible staircase along the
+// edge of a shadow at 25 m, so the value is split high/low across two channels
 // for roughly 19 bits, at the cost of two instructions.
 pub let CHUNK_SHADOW: string = "
 uniform sampler2D uShadow;
@@ -232,7 +232,7 @@ out float vAo;
 void main() {
     vec4 wp = uModel * vec4(aPos, 1.0);
     vWorld = wp.xyz;
-    // Every model matrix here is rigid — rotation and translation only — so the
+    // Every model matrix here is rigid (rotation and translation only) so the
     // matrix is its own normal matrix. Introduce a non-uniform scale and this
     // line silently starts bending normals.
     vNormal = mat3(uModel) * aNormal;

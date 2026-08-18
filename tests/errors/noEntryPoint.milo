@@ -1,0 +1,12 @@
+// @error: no entry point
+
+// A module with no main() is a library: it type-checks fine (`milo check` says ok),
+// but it cannot be built into an executable. The linker used to answer this with
+// `Undefined symbols: "_main"`, which names no Milo file and reads like a missing
+// extern. The errors lane runs `milo build`, so this fixture pins the driver's
+// diagnostic rather than the checker's.
+pub let GREETING: string = "hello"
+
+pub fn greet(): string {
+    return GREETING
+}

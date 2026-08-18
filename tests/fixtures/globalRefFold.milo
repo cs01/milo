@@ -1,0 +1,21 @@
+// @expect: 5.5
+// @expect: 12
+// A `let` global read by another global's initializer. The value is immutable, so
+// reading it is as constant as its own initializer was, and it must arrive whether
+// the reference is folded or filled in by the generated init routine.
+pub let HALF_WIDTH: f64 = 3.5
+
+pub let SHOULDER: f64 = 2.0
+
+pub let LANE: f64 = HALF_WIDTH + SHOULDER
+
+// A plain alias, with no arithmetic wrapped around it.
+pub let SEATS: i64 = 12
+
+pub let CAPACITY: i64 = SEATS
+
+pub fn main(): i32 {
+    print($"{LANE}")
+    print($"{CAPACITY}")
+    return 0
+}

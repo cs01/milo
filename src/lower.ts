@@ -189,7 +189,7 @@ class LowerCtx {
         }
       }
     }
-    return { structs, enums, functions, globals, dropImpls: this.c.dropImpls, itables, userFnNames: exported, opaqueTypes, cSigs, cValues, linkLibs };
+    return { structs, enums, functions, globals, dropImpls: this.c.dropImpls, itables, userFnNames: exported, opaqueTypes, cSigs, cValues, linkLibs, nonConstGlobals: this.c.nonConstGlobals };
   }
 
   private lowerParam(p: import("./ast").Param, sig: import("./checker").FnSig | undefined, i: number) {

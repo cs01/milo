@@ -197,11 +197,15 @@ function parseCheckProgram(src: string, target: TargetInfo, filePath: string, wa
 // `cGuards` is the `@cLayout`/`@cSig` verification TU (null when the program declares
 // neither) — see Codegen.cDeclGuards. It rides alongside the IR because only codegen
 // knows the field offsets and return widths it asserts.
-function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false): { ir: string; cGuards: string | null; linkLibs: string[] } {
+function compileWithGuards(source: string, target: TargetInfo, filePath?: string, warningConfig?: WarningConfig, trapOnOverflow = false, emitDebug = false, contractChecks = false, stripPanicLocations = false, sanitize = false): { ir: string; cGuards: string | null; linkLibs: string[]; hasMain: boolean; nonConstGlobals: string[] } {
   const hirModule = frontendToHIR(source, target, filePath, warningConfig);
   const cg = new Codegen(target, filePath, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize);
   const ir = cg.generate(hirModule);
-  return { ir, cGuards: cg.cDeclGuards(), linkLibs: hirModule.linkLibs ?? [] };
+  // Reported by the caller that is actually linking an executable, not here: emit-ir /
+  // emit-obj / emit-hir on a module with no main are all legitimate.
+  const hasMain = hirModule.functions.some(f => f.name === "main" && !f.isExtern);
+  return { ir, cGuards: cg.cDeclGuards(), linkLibs: hirModule.linkLibs ?? [], hasMain,
+           nonConstGlobals: hirModule.nonConstGlobals ?? [] };
 }
 
 // Compile the @cLayout/@cSig guard TU against the real system headers and fail the build
@@ -810,7 +814,20 @@ function compileToObj(sourcePath: string, outputPath: string | null, target: Tar
   const source = readFileSync(sourcePath, "utf-8");
   const trapOnOverflow = forceOverflowChecks ?? true;
   const contractChecks = forceContractChecks ?? (optFlag === "-O0");
-  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, false, contractChecks);
+  const { ir, cGuards, linkLibs, nonConstGlobals } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, false, contractChecks);
+  // `--no-entry` strips `@main`, and `@main` is the only caller of the generated
+  // `@__milo.global_init`. So in a --no-entry object every global whose initializer
+  // has to run stays whatever the static form was: "" / 0 / empty, forever, with no
+  // diagnostic. That is true whether or not the module HAS a main (the entry is
+  // renamed to `@_milo_unused_main`, which strands the init call in dead code), so
+  // the guard is on the flag alone. Reject before any object file is written.
+  if (noEntry && nonConstGlobals.length > 0) {
+    for (const name of nonConstGlobals) {
+      console.error(`error: global '${name}' needs an initializer that runs, and '--no-entry' produces an object with no entry point to run it`);
+    }
+    console.error(`hint: give it a constant initializer ('= ""', '= 0', '= []') and assign the real value from your own entry point, or drop '--no-entry' and build the module into a program with 'fn main()'`);
+    process.exit(1);
+  }
   verifyCDecls(cGuards, target, linkLibs);
 
   const base = basename(sourcePath).replace(/\.milo$/, "");
@@ -1080,7 +1097,16 @@ function compileToBinary(sourcePath: string, outputPath: string | null, target: 
   // DWARF is gated on -g alone (compose `-g --debug` for -O0 + line info). Keeping it
   // off --debug leaves the -O0 path — used by the runtime-error test harness — byte
   // -identical and free of per-build dsymutil / .dSYM litter.
-  const { ir, cGuards, linkLibs } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize);
+  const { ir, cGuards, linkLibs, hasMain } = compileWithGuards(source, target, sourcePath, warningConfig, trapOnOverflow, emitDebug, contractChecks, stripPanicLocations, sanitize);
+  // Every path through here links an executable, and an executable needs an entry
+  // point. Without this the linker answered for us, with `Undefined symbols: "_main"`
+  // and a stack of ld noise that names no Milo file: the same report you get for a
+  // missing extern, so a library built by mistake looked like a broken FFI decl.
+  if (!hasMain) {
+    console.error(`error: no entry point: '${sourcePath}' has no main()`);
+    console.error(`hint: a module without 'fn main()' is a library: import it from a program, or check it with 'milo check ${sourcePath}'`);
+    process.exit(1);
+  }
   verifyCDecls(cGuards, target, linkLibs);
   const base = basename(sourcePath).replace(/\.milo$/, "");
   const id = crypto.randomUUID().slice(0, 8);

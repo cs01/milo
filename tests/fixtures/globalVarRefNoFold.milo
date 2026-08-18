@@ -1,0 +1,15 @@
+// @expect: 7
+// @expect: 9
+// A `var` global never folds: its value at init time is not necessarily the one it
+// was declared with. The reference still has to work, which it does because the
+// generated init routine runs both assignments in dependency order before main.
+pub var COUNTER: i64 = 7
+
+pub let SNAPSHOT: i64 = COUNTER
+
+pub fn main(): i32 {
+    print($"{SNAPSHOT}")
+    COUNTER = 9
+    print($"{COUNTER}")
+    return 0
+}

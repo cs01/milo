@@ -34,21 +34,21 @@ from "./vec3" import {
 }
 
 // Metres behind the car at a standstill, and how much further at top speed.
-let DIST_BASE: f64 = 7.1
+let DIST_BASE: f64 = 4.2
 
-let DIST_SPEED: f64 = 2.6
+let DIST_SPEED: f64 = 1.0
 
-let HEIGHT_BASE: f64 = 2.55
+let HEIGHT_BASE: f64 = 2.42
 
 // Horizontal field of view in radians, parked and flat out. Horizontal rather
 // than vertical because what a player notices is how much of the road is in
 // view side to side, and a vertical fov looks right on one aspect ratio only.
-let FOV_BASE: f64 = 1.42
+let FOV_BASE: f64 = 1.05
 
-let FOV_SPEED: f64 = 0.30
+let FOV_SPEED: f64 = 0.14
 
 // The speed the two ends of every range above are measured against.
-let REF_SPEED: f64 = 82.0
+let REF_SPEED: f64 = 95.0
 
 pub struct Chase {
     // Smoothed, in world space. These are the state: everything else is derived
@@ -95,11 +95,11 @@ impl Chase {
         }
 
         let dist = DIST_BASE + DIST_SPEED * k
-        let height = HEIGHT_BASE - 0.45 * k
+        let height = HEIGHT_BASE - 0.30 * k
         let wantEye = car.pos - behind.scale(dist) + v3(0.0, height, 0.0)
         // Look ahead of the car, further ahead the faster it is going, so a
         // corner arrives on screen before it arrives under the wheels.
-        let wantTarget = car.pos + heading.scale(6.0 + 9.0 * k) + v3(0.0, 1.15, 0.0)
+        let wantTarget = car.pos + heading.scale(7.0 + 6.0 * k) + v3(0.0, 0.90, 0.0)
 
         if !self.started {
             self.eye = wantEye
@@ -110,8 +110,8 @@ impl Chase {
         // Exponential smoothing, framerate independent. The eye lags more than
         // the target does: a camera whose aim lags is a camera that appears to
         // be looking at nothing in particular.
-        let eyeRate = 1.0 - Math.exp(-(6.2 - 1.8 * k) * dt)
-        let aimRate = 1.0 - Math.exp(-9.0 * dt)
+        let eyeRate = 1.0 - Math.exp(-(11.5 - 2.5 * k) * dt)
+        let aimRate = 1.0 - Math.exp(-12.0 * dt)
         self.eye = self.eye + (wantEye - self.eye).scale(eyeRate)
         self.target = self.target + (wantTarget - self.target).scale(aimRate)
 
@@ -122,7 +122,11 @@ impl Chase {
             self.eye.y = 0.6
         }
 
-        self.fov = self.fov + (FOV_BASE + FOV_SPEED * k * k - self.fov) * (1.0 - Math.exp(-4.0 * dt))
+        // The boost widens the lens and drops the camera back. A turbo you can
+        // only read off a gauge is a number; a turbo that changes the shape of
+        // the frame is a turbo.
+        let want = FOV_BASE + FOV_SPEED * k * k + 0.11 * car.boost
+        self.fov = self.fov + (want - self.fov) * (1.0 - Math.exp(-6.0 * dt))
         self.shake = Math.maxF64(0.0, self.shake - dt * 2.4)
         self.shakeT = self.shakeT + dt
     }

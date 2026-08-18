@@ -176,6 +176,50 @@ impl Builder {
         }
     }
 
+    // The same tube with its axis along +X or +Z. A wheel's axle runs along X
+    // and an exhaust runs along Z, and rotating a Y cylinder into place through
+    // the transform means every caller carries a matrix it does not otherwise
+    // need.
+    fn cylinderX(self: &mut Self, base: &Vec3, radius: f64, length: f64, sides: i64, capped: bool) {
+        self.tube(base, v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, 1.0), radius, length, sides, capped)
+    }
+
+    fn cylinderZ(self: &mut Self, base: &Vec3, radius: f64, length: f64, sides: i64, capped: bool) {
+        self.tube(base, v3(0.0, 0.0, 1.0), v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), radius, length, sides, capped)
+    }
+
+    // A tube along `axis`, with `u` and `v` spanning its cross-section.
+    fn tube(self: &mut Self, base: &Vec3, axis: &Vec3, u: &Vec3, v: &Vec3, radius: f64, length: f64, sides: i64, capped: bool) {
+        let top = base + axis.scale(length)
+        for i in 0..sides {
+            let a0 = 2.0 * Math.pi() * (i as f64) / (sides as f64)
+            let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (sides as f64)
+            let d0 = u.scale(Math.cos(a0)) + v.scale(Math.sin(a0))
+            let d1 = u.scale(Math.cos(a1)) + v.scale(Math.sin(a1))
+            let p0 = base + d0.scale(radius)
+            let p1 = base + d1.scale(radius)
+            let q0 = top + d0.scale(radius)
+            let q1 = top + d1.scale(radius)
+            let t0 = radius * a0
+            let t1 = radius * a1
+            self.push(p0, d0, t0, 0.0)
+            self.push(p1, d1, t1, 0.0)
+            self.push(q1, d1, t1, length)
+            self.push(p0, d0, t0, 0.0)
+            self.push(q1, d1, t1, length)
+            self.push(q0, d0, t0, length)
+            if capped {
+                self.push(top, axis, 0.0, 0.0)
+                self.push(q0, axis, t0, radius)
+                self.push(q1, axis, t1, radius)
+                let back = axis.scale(-1.0)
+                self.push(base, back, 0.0, 0.0)
+                self.push(p1, back, t1, radius)
+                self.push(p0, back, t0, radius)
+            }
+        }
+    }
+
     // A latitude/longitude sphere. Coarse is fine: everything spherical here is
     // either small or far away.
     fn sphere(self: &mut Self, c: &Vec3, radius: f64, rings: i64, segs: i64) {

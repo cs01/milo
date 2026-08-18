@@ -52,6 +52,8 @@ pub let TEX_PAINT: i64 = 4
 
 pub let TEX_GLASS: i64 = 5
 
+pub let TEX_FACADE: i64 = 6
+
 pub struct TexData {
     // 0xAABBGGRR, straight sRGB, alpha 255. What Texture2D.rgba8 wants.
     albedo: Vec<u32>,
@@ -658,6 +660,92 @@ fn makeGlass(): TexData {
 }
 
 // ---------------------------------------------------------------------------
+// 6, building facade
+// ---------------------------------------------------------------------------
+
+// A city block's worth of wall in one tile: four floors tall and six bays wide,
+// with a spandrel band at every floor line, a mullion at every bay, and the
+// window openings themselves sunk and dark.
+//
+// The windows are in the *texture* even though the lit ones are also geometry.
+// A tower carries hundreds of openings and only some of them are lit; emitting
+// every dark one as a quad costs thousands of triangles per building for a
+// rectangle that is, by definition, not glowing. The lit ones stay geometry
+// because those have to actually throw light.
+fn makeFacade(): TexData {
+    var f = newField()
+    let floors = 4
+    let bays = 6
+    let fh = (TEX_SIZE as f64) / (floors as f64)
+    let bw = (TEX_SIZE as f64) / (bays as f64)
+    for y in 0..TEX_SIZE {
+        let v = ((y as f64) + 0.5) / (TEX_SIZE as f64)
+        // Where this texel sits inside its floor and inside its bay, 0 to 1.
+        let fy = Math.mod((y as f64) + 0.5, fh) / fh
+        for x in 0..TEX_SIZE {
+            let u = ((x as f64) + 0.5) / (TEX_SIZE as f64)
+            let bx = Math.mod((x as f64) + 0.5, bw) / bw
+            let i = y * TEX_SIZE + x
+            let grime = fbm(u, v, 6, 14, 3, 9101)
+            let grain = grainOf(x, y, 9102, 0.030, 0.018)
+            // Panel: warm precast, dirtier toward the bottom of each floor.
+            var lum = 0.300 + (grime - 0.5) * 0.070 + grain
+            var rr = lum * 1.06
+            var gg = lum * 0.99
+            var bb = lum * 0.88
+            var h = 0.55 + grain
+            var rough = 0.86
+
+            // The opening: a tall rectangle inside the bay, inset in height so
+            // there is a lintel above it and a sill below.
+            let inWin = bx > 0.18 && bx < 0.82 && fy > 0.16 && fy < 0.74
+            if inWin {
+                // Glass, dark and blue, with a smeared reflection of the sky in
+                // it. Smooth, so the sun actually flares off a tower.
+                let sheen = fbm(u, v, 3, 7, 2, 9103)
+                let gl = 0.055 + sheen * 0.075
+                rr = gl * 0.80
+                gg = gl * 0.92
+                bb = gl * 1.35
+                h = 0.10
+                rough = 0.16
+                // A transom bar across the top third of the opening.
+                if fy > 0.36 && fy < 0.40 {
+                    rr = lum * 0.55
+                    gg = lum * 0.52
+                    bb = lum * 0.50
+                    h = 0.62
+                    rough = 0.70
+                }
+            } else if fy > 0.80 || fy < 0.10 {
+                // The spandrel band at the floor line: lighter, and standing a
+                // little proud, which is what casts the shadow that makes a
+                // tower read as stacked floors from half a kilometre away.
+                let band = 0.360 + (grime - 0.5) * 0.05 + grain
+                rr = band * 1.08
+                gg = band * 1.00
+                bb = band * 0.86
+                h = 0.85
+                rough = 0.82
+            } else if bx < 0.13 || bx > 0.87 {
+                // The mullion between bays, slightly darker than the panel.
+                rr = lum * 0.86
+                gg = lum * 0.86
+                bb = lum * 0.88
+                h = 0.78
+                rough = 0.72
+            }
+            f.r[i] = rr
+            f.g[i] = gg
+            f.b[i] = bb
+            f.h[i] = h
+            f.a[i] = rough
+        }
+    }
+    return packField(f, 2.4)
+}
+
+// ---------------------------------------------------------------------------
 
 pub fn makeTextures(): Vec<TexData> {
     var out: Vec<TexData> = Vec.new()
@@ -667,5 +755,6 @@ pub fn makeTextures(): Vec<TexData> {
     out.push(makeSteel())
     out.push(makePaint())
     out.push(makeGlass())
+    out.push(makeFacade())
     return out
 }

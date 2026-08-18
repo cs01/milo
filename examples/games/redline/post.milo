@@ -74,6 +74,7 @@ uniform float uVignette;
 uniform float uGrain;
 uniform float uTime;
 uniform float uFlash;
+uniform float uSaturation;
 
 // Narkowicz's fit of the ACES curve.
 vec3 aces(vec3 x) {
@@ -126,6 +127,11 @@ void main() {
     col += vec3(1.0, 0.86, 0.66) * uFlash;
     col *= uExposure;
     col = aces(col);
+    // Saturation, after the tone map and before the transfer. ACES desaturates
+    // everything it rolls off, which is right for film and wrong for an arcade
+    // cabinet: the neon and the paint are the subject and both live in the part
+    // of the curve that gets pulled toward white.
+    col = clamp(mix(vec3(luma(col)), col, uSaturation), 0.0, 1.0);
     // sRGB transfer. The scene target is linear 16F and the window is not, so
     // skipping this is what makes a physically lit render look washed out.
     col = pow(col, vec3(1.0 / 2.2));

@@ -457,6 +457,50 @@ impl Hud {
         self.quad(x, y, w, h, c, c, c, c, r, g, b, a)
     }
 
+    // A quad from four arbitrary corners, so the HUD can draw something that is
+    // not axis aligned: a needle, a tick, a slash, a segment of a dial.
+    fn quadPts(self: &mut Self, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, r: f64, g: f64, b: f64, a: f64) {
+        let c = ((CELL / 2) as f64) / (ATLAS as f64)
+        self.corner(x0, y0, c, c, r, g, b, a)
+        self.corner(x1, y1, c, c, r, g, b, a)
+        self.corner(x2, y2, c, c, r, g, b, a)
+        self.corner(x0, y0, c, c, r, g, b, a)
+        self.corner(x2, y2, c, c, r, g, b, a)
+        self.corner(x3, y3, c, c, r, g, b, a)
+    }
+
+    // A band of an annulus, between two radii and two angles. Angles are in
+    // radians, measured clockwise from three o'clock, because the HUD's y axis
+    // points down and a gauge that runs anticlockwise on screen reads as a
+    // rev counter running backwards.
+    fn ring(self: &mut Self, cx: f64, cy: f64, r0: f64, r1: f64, a0: f64, a1: f64, segs: i64, r: f64, g: f64, b: f64, al: f64) {
+        for i in 0..segs {
+            let t0 = a0 + (a1 - a0) * (i as f64) / (segs as f64)
+            let t1 = a0 + (a1 - a0) * ((i + 1) as f64) / (segs as f64)
+            let c0 = Math.cos(t0)
+            let s0 = Math.sin(t0)
+            let c1 = Math.cos(t1)
+            let s1 = Math.sin(t1)
+            self.quadPts(cx + c0 * r0, cy + s0 * r0, cx + c1 * r0, cy + s1 * r0, cx + c1 * r1, cy + s1 * r1, cx + c0 * r1, cy + s0 * r1, r, g, b, al)
+        }
+    }
+
+    // A radial bar: one tick on a dial, or the needle itself.
+    fn spoke(self: &mut Self, cx: f64, cy: f64, r0: f64, r1: f64, ang: f64, half: f64, r: f64, g: f64, b: f64, a: f64) {
+        let c = Math.cos(ang)
+        let s = Math.sin(ang)
+        // Perpendicular, for the width.
+        let px = -s * half
+        let py = c * half
+        self.quadPts(cx + c * r0 - px, cy + s * r0 - py, cx + c * r0 + px, cy + s * r0 + py, cx + c * r1 + px, cy + s * r1 + py, cx + c * r1 - px, cy + s * r1 - py, r, g, b, a)
+    }
+
+    // A rectangle with the two ends sheared, which is the whole visual language
+    // of an arcade racer's panels.
+    fn slab(self: &mut Self, x: f64, y: f64, w: f64, h: f64, skew: f64, r: f64, g: f64, b: f64, a: f64) {
+        self.quadPts(x + skew, y, x + w + skew, y, x + w, y + h, x, y + h, r, g, b, a)
+    }
+
     // One glyph. `s` is the size of a design unit in pixels, so the cell is
     // 8 units square and a capital is 6.6 of them tall.
     fn glyph(self: &mut Self, code: i64, x: f64, y: f64, s: f64, r: f64, g: f64, b: f64, a: f64) {

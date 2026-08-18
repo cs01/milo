@@ -45,38 +45,45 @@ from "./vec3" import {
     Vec3, v3
 }
 
-// Metres. The shell is a wide low wedge on a 2.6 m wheelbase.
+// Metres. The shell is a wide, low supercar on a 2.62 m wheelbase.
 pub let WHEELBASE: f64 = 2.62
 
-pub let TRACK_WIDTH: f64 = 1.66
+// Wider than the sill, so the tyres stand proud of the bodywork under the
+// arches. A car whose wheels are inside its own silhouette reads as a slot car:
+// the gap between the tyre and the arch lip is most of what says "vehicle".
+pub let TRACK_WIDTH: f64 = 1.76
 
-pub let WHEEL_R: f64 = 0.36
+pub let WHEEL_R: f64 = 0.37
 
-let WHEEL_W: f64 = 0.32
+let WHEEL_W: f64 = 0.34
 
-// Flat-out on the long straight, in metres per second. 82 m/s is 183 mph, which
+// Flat-out on the long straight, in metres per second. 95 m/s is 212 mph, which
 // is where the speedometer in the reference sits with the needle buried.
-let TOP_SPEED: f64 = 82.0
+let TOP_SPEED: f64 = 95.0
 
 // Nitrous adds this fraction on top, and it is the only thing that does.
-let BOOST_GAIN: f64 = 0.26
+let BOOST_GAIN: f64 = 0.34
 
-let ENGINE: f64 = 27.0
+let BOOST_DRAIN: f64 = 0.29
 
-let BRAKE: f64 = 36.0
+let BOOST_REGEN: f64 = 0.092
+
+let ENGINE: f64 = 42.0
+
+let BRAKE: f64 = 44.0
 
 // Quadratic drag, tuned so coasting from top speed bleeds off believably rather
 // than stopping the car dead.
-let DRAG: f64 = 0.0021
+let DRAG: f64 = 0.0016
 
-let ROLL_RESIST: f64 = 0.42
+let ROLL_RESIST: f64 = 0.34
 
 // Radians of steering at the road wheel, before the speed falloff below.
-let STEER_MAX: f64 = 0.68
+let STEER_MAX: f64 = 0.70
 
 // How hard the tyres pull the velocity back in line with the heading, per
 // second. This one number is the whole difference between a kart and a boat.
-let GRIP_ROAD: f64 = 9.0
+let GRIP_ROAD: f64 = 9.4
 
 let GRIP_DIRT: f64 = 3.6
 
@@ -86,188 +93,488 @@ let GRIP_HANDBRAKE: f64 = 2.1
 // The shell
 // ---------------------------------------------------------------------------
 
-// A car is four meshes because it is four materials, not because it is four
-// objects. Splitting by material is what lets the glass be glass and the lamps
-// be emissive without a per-pixel branch in the shader.
+// A car is five meshes because it is five materials, not because it is five
+// objects. Splitting by material is what lets the glass be glass, the carbon be
+// carbon and the lamps be emissive without a per-pixel branch in the shader.
 pub struct CarModel {
     body: Mesh,
+    // The exhaust plume, built pointing down -Z from the origin and placed by
+    // the matrix at draw time. It is the only part of the car that is not there
+    // every frame.
+    flame: Mesh,
+    // Everything that is not painted the car's colour: splitter, skirts, wing,
+    // mirrors, vents, exhausts and the stripes over the roof. Its material has a
+    // white albedo and the colour is carried per vertex, so one draw paints
+    // carbon black and racing white at once.
+    trim: Mesh,
     glass: Mesh,
     wheel: Mesh,
-    // Head and tail lamps. Emissive, with the colour carried per vertex so one
-    // material paints white at the front and red at the back.
+    // Head and tail lamps, and the underglow. Emissive, with the colour carried
+    // per vertex so one material paints white at the front and red at the back.
     lamps: Mesh,
 }
 
-// A cross-section of the shell, at one station along the car. The loft between
-// consecutive stations is what gives the body its shape; changing the numbers
-// here is the only way the silhouette changes.
+// A cross-section of the shell, at one station along the car:
 //
 //   z   distance from the centre of the car, positive forward
-//   hw  half width at the waist
+//   hw  half width at the shoulder, the widest point of the section
 //   yb  floor
 //   yt  roof
-//   rw  half width at the roof, which is what makes it a wedge and not a box
+//   ys  shoulder height, where the section is at its widest
+//   rw  half width at the roof line
+//   bw  half width at the floor
+//
+// The loft between consecutive stations is the whole silhouette; these numbers
+// are the car. Read down the `hw` column and you can see the two arches bulge
+// out over the wheels and the waist pull in between them, which is what a mid
+// engined car actually does and what a box with a wedge on it never does.
 fn stations(): Vec<f64> {
     return [
-    // z,     hw,    yb,    yt,    rw
-    2.24, 0.70, 0.30, 0.54, 0.52, 1.86, 0.89, 0.26, 0.64, 0.72, 1.28, 0.98, 0.25, 0.74, 0.84, 0.68, 0.99, 0.26, 1.15, 0.64, -0.34, 0.99, 0.26, 1.17, 0.62, -1.12, 0.96, 0.27, 0.87, 0.79, -1.82, 0.90, 0.29, 0.79, 0.75, -2.24, 0.75, 0.34, 0.72, 0.63,]
+    // z,     hw,    yb,    yt,    ys,    rw,    bw
+    2.22, 0.66, 0.30, 0.44, 0.38, 0.52, 0.46, 2.10, 0.86, 0.24, 0.50, 0.38, 0.72, 0.56, 1.92, 1.00, 0.20, 0.55, 0.39, 0.86, 0.60, 1.66, 1.09, 0.18, 0.60, 0.40, 0.96, 0.62, 1.44, 1.14, 0.18, 0.64, 0.42, 1.02, 0.64, 1.31, 1.15, 0.18, 0.66, 0.43, 1.04, 0.64, 1.14, 1.13, 0.18, 0.70, 0.44, 1.02, 0.64, 0.94, 1.08, 0.19, 0.76, 0.45, 0.94, 0.66, 0.70, 1.02, 0.20, 0.92, 0.46, 0.80, 0.68, 0.36, 0.99, 0.21, 1.06, 0.48, 0.68, 0.69, 0.00, 0.99, 0.22, 1.10, 0.50, 0.66, 0.70, -0.40, 1.02, 0.22, 1.09, 0.51, 0.68, 0.71, -0.74, 1.07, 0.23, 1.00, 0.52, 0.82, 0.72, -1.02, 1.13, 0.23, 0.93, 0.53, 0.94, 0.72, -1.31, 1.16, 0.24, 0.90, 0.54, 1.00, 0.72, -1.60, 1.15, 0.25, 0.89, 0.54, 1.02, 0.71, -1.92, 1.11, 0.26, 0.88, 0.53, 1.00, 0.66, -2.14, 1.03, 0.29, 0.86, 0.52, 0.94, 0.58, -2.30, 0.92, 0.33, 0.82, 0.50, 0.84, 0.48, -2.38, 0.76, 0.38, 0.78, 0.48, 0.70, 0.40,]
 }
 
-let STATION_FLOATS: i64 = 5
+// The wheel well: how far up and along the flank the arch opening reaches, and
+// how far in the wall behind the tyre sits.
+let WELL_R: f64 = 0.60
 
-// The ring of points at one station, counter-clockwise seen from the front of
-// the car. Six points: the roof line, the shoulder either side, and the sill
-// either side. The bottom closes flat, which is never seen and costs two
-// triangles to keep the shell watertight for the shadow pass.
-fn ringAt(hw: f64, yb: f64, yt: f64, rw: f64, k: i64): Vec3 {
-    let shoulder = yb + (yt - yb) * 0.42
-    if k == 0 {
-        return v3(-hw, yb, 0.0)
+let WELL_X: f64 = 0.68
+
+let STATION_FLOATS: i64 = 7
+
+// Points around one cross-section. Enough that the shoulder line is a curve
+// rather than a chamfer: at eight the car is a gem, at twenty-eight it is a
+// body, and the whole shell is still under five thousand triangles.
+let RING: i64 = 28
+
+// How boxy a section is. 2 would be an ellipse and the car would read as a
+// lozenge; 3.4 keeps a flat roof, a flat floor and flanks that are nearly
+// vertical, with real radii at the shoulder and the sill.
+let SECTION_N: f64 = 4.4
+
+fn spow(x: f64, e: f64): f64 {
+    let a = Math.pow(Math.abs(x), e)
+    if x < 0.0 {
+        return -a
     }
-    if k == 1 {
-        return v3(-hw, shoulder, 0.0)
-    }
-    if k == 2 {
-        return v3(-rw, yt, 0.0)
-    }
-    if k == 3 {
-        return v3(rw, yt, 0.0)
-    }
-    if k == 4 {
-        return v3(hw, shoulder, 0.0)
-    }
-    return v3(hw, yb, 0.0)
+    return a
 }
 
-let RING: i64 = 6
+// One point on the outline of a section, `k` running counter-clockwise seen from
+// the front and starting at the right-hand shoulder. The section is a
+// superellipse whose half width is then pulled in toward the roof width above
+// the shoulder and toward the floor width below it, which is what gives a
+// tumblehome and a tucked sill out of one expression.
+fn ringAt(hw: f64, yb: f64, yt: f64, ys: f64, rw: f64, bw: f64, k: i64): Vec3 {
+    let a = 2.0 * Math.pi() * (k as f64) / (RING as f64)
+    let c = Math.cos(a)
+    let sn = Math.sin(a)
+    let e = 2.0 / SECTION_N
+    let up = sn >= 0.0
+    let h = if up {
+        yt - ys
+    } else {
+        ys - yb
+    }
+    let target = if up {
+        rw
+    } else {
+        bw
+    }
+    let t = Math.pow(Math.abs(spow(sn, e)), 1.35)
+    let width = hw + (target - hw) * t
+    return v3(spow(c, e) * width, ys + spow(sn, e) * h, 0.0)
+}
 
+// The lofted shell, with normals from the surface rather than from the winding.
+// Flat-shaded quads on a body this curved read as a faceted gem: the highlight
+// that runs down the flank of a car is a single continuous band, and it only
+// exists if the normals vary continuously along the section.
 fn bodyGeometry(b: &mut Builder) {
     let st = stations()
     let count = st.len / STATION_FLOATS
-    b.setUvScale(0.9)
-    b.setTint(1.0, 1.0, 1.0)
-    b.setAo(1.0)
 
+    // The whole grid first, because a normal needs its neighbours on both axes.
+    var pts: Vec<Vec3> = Vec.new()
+    for i in 0..count {
+        let o = i * STATION_FLOATS
+        for k in 0..RING {
+            var p = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], st[o + 5], st[o + 6], k)
+            p.z = st[o]
+            pts.push(p)
+        }
+    }
+    // Cut the wheel wells. Clamping the flank inward inside a circle around
+    // each axle turns the solid side into an opening with a wall behind it, and
+    // the loft's own edge along that circle IS the arch lip. Modelling the lip
+    // as a separate ring instead leaves the tyre standing in front of an unbroken
+    // flank, which is what makes a car read as a toy with wheels stuck on.
+    for i in 0..count {
+        for k in 0..RING {
+            let idx = i * RING + k
+            let p = pts[idx]
+            if Math.abs(p.x) <= WELL_X {
+                continue
+            }
+            var zw = WHEELBASE * 0.5
+            if p.z < 0.0 {
+                zw = -WHEELBASE * 0.5
+            }
+            let dz = p.z - zw
+            let dy = Math.maxF64(p.y - WHEEL_R, 0.0)
+            if Math.sqrt(dz * dz + dy * dy) >= WELL_R {
+                continue
+            }
+            let sign = if p.x > 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
+            pts[idx].x = sign * WELL_X
+        }
+    }
+
+    var nrm: Vec<Vec3> = Vec.new()
+    for i in 0..count {
+        for k in 0..RING {
+            let kp = (k + 1) % RING
+            let km = (k + RING - 1) % RING
+            let along = pts[i * RING + kp] - pts[i * RING + km]
+            let ia = Math.maxI64(0, i - 1)
+            let ib = Math.minI64(count - 1, i + 1)
+            let ahead = pts[ib * RING + k] - pts[ia * RING + k]
+            // Ring tangent crossed with the lengthwise tangent, which points out
+            // of the shell for a ring wound counter-clockwise from the front.
+            var n = along.cross(ahead)
+            if n.len2() < 1e-9 {
+                n = v3(pts[i * RING + k].x, 0.2, 0.0)
+            }
+            nrm.push(n.norm())
+        }
+    }
+
+    b.setUvScale(0.75)
+    b.setAo(1.0)
+    var i = 0
+    while i + 1 < count {
+        for k in 0..RING {
+            let k2 = (k + 1) % RING
+            let a = i * RING + k
+            let bIdx = i * RING + k2
+            let c = (i + 1) * RING + k2
+            let d = (i + 1) * RING + k
+            let u0 = (k as f64) / (RING as f64) * 3.0
+            let u1 = ((k + 1) as f64) / (RING as f64) * 3.0
+            let v0 = pts[a].z
+            let v1 = pts[d].z
+            b.push(pts[a], nrm[a], u0, v0)
+            b.push(pts[bIdx], nrm[bIdx], u1, v0)
+            b.push(pts[c], nrm[c], u1, v1)
+            b.push(pts[a], nrm[a], u0, v0)
+            b.push(pts[c], nrm[c], u1, v1)
+            b.push(pts[d], nrm[d], u0, v1)
+        }
+        i = i + 1
+    }
+
+    // Nose and tail caps, as fans onto the centre of the end section. They are
+    // nearly edge-on from the chase camera and exist mostly so the shell is
+    // watertight for the shadow pass.
+    capEnd(b, pts, 0, true)
+    capEnd(b, pts, count - 1, false)
+
+}
+
+// A flat cap across one end section, so the loft is closed.
+fn capEnd(b: &mut Builder, pts: &Vec<Vec3>, idx: i64, front: bool) {
+    let base = idx * RING
+    var centre = v3(0.0, 0.0, pts[base].z)
+    var sum = 0.0
+    for k in 0..RING {
+        sum = sum + pts[base + k].y
+    }
+    centre.y = sum / (RING as f64)
+    let n = if front {
+        v3(0.0, 0.0, 1.0)
+    } else {
+        v3(0.0, 0.0, -1.0)
+    }
+    for k in 0..RING {
+        let k2 = (k + 1) % RING
+        let pa = pts[base + k]
+        let pd = pts[base + k2]
+        if front {
+            b.push(centre, n, 0.5, 0.5)
+            b.push(pd, n, 1.0, 0.0)
+            b.push(pa, n, 0.0, 0.0)
+        } else {
+            b.push(centre, n, 0.5, 0.5)
+            b.push(pa, n, 0.0, 0.0)
+            b.push(pd, n, 1.0, 0.0)
+        }
+    }
+}
+
+// Everything that is not the paint. The tint carries the colour, so carbon,
+// polished metal and the racing stripes come out of one material and one draw.
+let CARBON_R: f64 = 0.055
+let CARBON_G: f64 = 0.055
+let CARBON_B: f64 = 0.065
+
+fn carbon(b: &mut Builder) {
+    b.setTint(CARBON_R, CARBON_G, CARBON_B)
+}
+
+fn trimGeometry(b: &mut Builder) {
+    b.setUvScale(1.2)
+    b.setAo(0.95)
+
+    // Front splitter, with two dive planes each side. The splitter is what puts
+    // the nose on the road; the planes are what say the car is not a road car.
+    carbon(b)
+    b.boxSpan(v3(-1.06, 0.13, 1.98), v3(1.06, 0.20, 2.40))
+    b.boxSpan(v3(-1.10, 0.26, 1.86), v3(-0.84, 0.30, 2.16))
+    b.boxSpan(v3(0.84, 0.26, 1.86), v3(1.10, 0.30, 2.16))
+
+    // Grille and the two brake ducts either side of it, sunk into the nose.
+    b.boxSpan(v3(-0.52, 0.30, 2.24), v3(0.52, 0.50, 2.32))
+    b.boxSpan(v3(-0.96, 0.28, 2.10), v3(-0.62, 0.48, 2.22))
+    b.boxSpan(v3(0.62, 0.28, 2.10), v3(0.96, 0.48, 2.22))
+
+    // A vent on each side of the bonnet, and the shut line down the middle of
+    // it: two thin dark strips are all it takes for the bonnet to read as a
+    // panel rather than as the top of a solid.
+    b.boxSpan(v3(-0.74, 0.62, 1.30), v3(-0.36, 0.66, 1.72))
+    b.boxSpan(v3(0.36, 0.62, 1.72), v3(0.74, 0.66, 1.30))
+
+    // Side skirts, tying the arches together down the flanks.
+    b.boxSpan(v3(-1.02, 0.14, -1.24), v3(-0.86, 0.30, 1.24))
+    b.boxSpan(v3(0.86, 0.14, -1.24), v3(1.02, 0.30, 1.24))
+
+    // The side intakes ahead of the rear wheels, which is where a mid-engined
+    // car breathes and the one detail that stops the flank being a slab.
+    b.boxSpan(v3(-1.05, 0.44, -1.06), v3(-0.94, 0.78, -0.30))
+    b.boxSpan(v3(0.94, 0.44, -1.06), v3(1.05, 0.78, -0.30))
+
+    // Mirrors, on stalks. Small, and worth their triangles: they break the
+    // shoulder line right where the eye goes.
+    var side = -1.0
+    while side < 2.0 {
+        let x = side * 1.00
+        b.boxSpan(v3(x - 0.04, 0.86, 0.66), v3(x + 0.16 * side + 0.04, 0.90, 0.78))
+        b.boxSpan(v3(x + 0.10 * side - 0.09, 0.86, 0.60), v3(x + 0.10 * side + 0.09, 1.00, 0.74))
+        side = side + 2.0
+    }
+
+    // Engine cover louvres: five slats over the deck behind the cabin.
+    for i in 0..5 {
+        let z = -1.02 - (i as f64) * 0.16
+        b.boxSpan(v3(-0.66, 1.02 - (i as f64) * 0.028, z), v3(0.66, 1.06 - (i as f64) * 0.028, z + 0.09))
+    }
+
+    // The rear wing, on two swan-neck stanchions, with endplates. A silhouette
+    // needs one thing above the deck from behind or every car in the pack reads
+    // as the same blob at a hundred metres.
+    b.boxSpan(v3(-0.60, 0.94, -1.98), v3(-0.50, 1.30, -1.86))
+    b.boxSpan(v3(0.50, 0.94, -1.98), v3(0.60, 1.30, -1.86))
+    b.boxSpan(v3(-0.98, 1.30, -2.10), v3(0.98, 1.37, -1.76))
+    b.boxSpan(v3(-1.02, 1.16, -2.14), v3(-0.94, 1.42, -1.72))
+    b.boxSpan(v3(0.94, 1.16, -2.14), v3(1.02, 1.42, -1.72))
+
+    // Diffuser: a floor under the tail with five vertical fins in it.
+    b.boxSpan(v3(-0.94, 0.20, -2.40), v3(0.94, 0.28, -1.90))
+    for i in 0..5 {
+        let x = -0.72 + (i as f64) * 0.36
+        b.boxSpan(v3(x - 0.035, 0.28, -2.40), v3(x + 0.035, 0.50, -2.02))
+    }
+
+    // Quad exhausts, polished, sitting between the fins.
+    b.setTint(0.72, 0.74, 0.80)
+    b.resetXform()
+    var e = 0
+    while e < 4 {
+        let x = -0.40 + (e as f64) * 0.265
+        b.cylinderZ(v3(x, 0.44, -2.52), 0.058, 0.16, 10, true)
+        e = e + 1
+    }
+
+    // Racing stripes over the nose, roof and deck. Drawn as their own strips a
+    // centimetre proud of the shell rather than painted into the albedo, because
+    // the albedo is one texture shared by every car in the field.
+    b.setTint(0.92, 0.92, 0.95)
+    stripe(b, 0.10, 0.30)
+    b.setTint(0.10, 0.11, 0.16)
+    stripe(b, 0.315, 0.36)
+    stripe(b, -0.315, -0.36)
+}
+
+// One stripe running the length of the shell, riding on top of the sections. It
+// is sampled from the same station table as the body, so it follows the crown of
+// the bonnet and the roof exactly instead of floating over them.
+fn stripe(b: &mut Builder, x0: f64, x1: f64) {
+    let st = stations()
+    let count = st.len / STATION_FLOATS
+    let up = v3(0.0, 1.0, 0.0)
+    let e = 0.014
     var i = 0
     while i + 1 < count {
         let o = i * STATION_FLOATS
         let p = (i + 1) * STATION_FLOATS
         let z0 = st[o]
         let z1 = st[p]
-        for k in 0..RING {
-            let k2 = (k + 1) % RING
-            let a0 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k)
-            let a1 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k2)
-            let b0 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], k)
-            let b1 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], k2)
-            // The roof panel between points 2 and 3 is the greenhouse, and the
-            // glass mesh covers it. Leaving it out of the body would make the
-            // cabin see-through from behind, so it is kept and the glass sits
-            // just proud of it.
-            let q0 = v3(a0.x, a0.y, z0)
-            let q1 = v3(a1.x, a1.y, z0)
-            let q2 = v3(b1.x, b1.y, z1)
-            let q3 = v3(b0.x, b0.y, z1)
-            b.quad(q0, q1, q2, q3, 1.0, 1.0)
+        // Only where the stripe is actually on the upper surface: at the ends
+        // the section is too narrow to carry it.
+        let w0 = st[o + 5]
+        let w1 = st[p + 5]
+        let lo = Math.minF64(Math.abs(x0), Math.abs(x1))
+        if w0 < lo + 0.04 || w1 < lo + 0.04 {
+            i = i + 1
+            continue
         }
-        // Close the underside so the shell is solid from below, which is what
-        // the shadow map sees.
-        let f0 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], 0)
-        let f5 = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], 5)
-        let g0 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], 0)
-        let g5 = ringAt(st[p + 1], st[p + 2], st[p + 3], st[p + 4], 5)
-        b.quad(v3(f5.x, f5.y, z0), v3(f0.x, f0.y, z0), v3(g0.x, g0.y, z1), v3(g5.x, g5.y, z1), 1.0, 1.0)
+        let y0 = topAt(st, o, x0)
+        let y1 = topAt(st, o, x1)
+        let y2 = topAt(st, p, x1)
+        let y3 = topAt(st, p, x0)
+        b.push(v3(x0, y0 + e, z0), up, 0.0, 0.0)
+        b.push(v3(x1, y1 + e, z0), up, 1.0, 0.0)
+        b.push(v3(x1, y2 + e, z1), up, 1.0, 1.0)
+        b.push(v3(x0, y0 + e, z0), up, 0.0, 0.0)
+        b.push(v3(x1, y2 + e, z1), up, 1.0, 1.0)
+        b.push(v3(x0, y3 + e, z1), up, 0.0, 1.0)
         i = i + 1
     }
-
-    // Nose and tail caps.
-    capEnd(b, st, 0, true)
-    capEnd(b, st, count - 1, false)
-
-    // Splitter and diffuser: dark, low, and wide. They read as the part of the
-    // car nearest the road, which is what sells the ride height.
-    b.setTint(0.16, 0.16, 0.19)
-    b.boxSpan(v3(-1.00, 0.16, 2.02), v3(1.00, 0.26, 2.34))
-    b.boxSpan(v3(-0.98, 0.16, -2.36), v3(0.98, 0.30, -2.00))
-    // Side sills, tying the wheels together down the flanks.
-    b.boxSpan(v3(-1.02, 0.20, -1.30), v3(-0.88, 0.40, 1.30))
-    b.boxSpan(v3(0.88, 0.20, -1.30), v3(1.02, 0.40, 1.30))
-
-    // The rear wing, on two stanchions. A silhouette needs one thing above the
-    // roofline from behind or every car in the pack reads as the same blob.
-    b.setTint(0.13, 0.13, 0.16)
-    b.boxSpan(v3(-0.62, 0.88, -1.98), v3(-0.52, 1.24, -1.86))
-    b.boxSpan(v3(0.52, 0.88, -1.98), v3(0.62, 1.24, -1.86))
-    b.setTint(1.0, 1.0, 1.0)
-    b.boxSpan(v3(-0.92, 1.24, -2.06), v3(0.92, 1.31, -1.74))
 }
 
-// A flat cap across one end station, so the loft is closed.
-fn capEnd(b: &mut Builder, st: &Vec<f64>, idx: i64, front: bool) {
-    let o = idx * STATION_FLOATS
-    let z = st[o]
-    let c = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], 0)
-    var centre = v3(0.0, 0.0, z)
-    var sum = 0.0
-    for k in 0..RING {
-        let p = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k)
-        sum = sum + p.y
-    }
-    centre.y = sum / (RING as f64)
-    let _ = c
-    for k in 0..RING {
-        let k2 = (k + 1) % RING
-        let a = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k)
-        let d = ringAt(st[o + 1], st[o + 2], st[o + 3], st[o + 4], k2)
-        let pa = v3(a.x, a.y, z)
-        let pd = v3(d.x, d.y, z)
-        // Wind the two ends opposite ways so both caps face outward.
-        if front {
-            b.tri(centre, pd, pa, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0)
-        } else {
-            b.tri(centre, pa, pd, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0)
+// The height of the shell directly above `x` at one station, from the same
+// superellipse the loft uses.
+fn topAt(st: &Vec<f64>, o: i64, x: f64): f64 {
+    let hw = st[o + 1]
+    let yt = st[o + 3]
+    let ys = st[o + 4]
+    let rw = st[o + 5]
+    // Invert the width blend numerically: cheap, exact enough, and it cannot
+    // drift out of step with `ringAt` the way a second closed form would.
+    var best = ys
+    var k = 0
+    while k <= 24 {
+        let t = (k as f64) / 24.0
+        let e = 2.0 / SECTION_N
+        let sn = Math.pow(t, 1.0)
+        let blend = Math.pow(Math.abs(spow(sn, e)), 1.35)
+        let width = hw + (rw - hw) * blend
+        if width >= Math.abs(x) {
+            best = ys + spow(sn, e) * (yt - ys)
         }
+        k = k + 1
     }
+    return best
 }
 
-// Windscreen, side glass and rear window, sitting a centimetre proud of the
-// shell so they never z-fight with the panel behind them.
+// Windscreen, side glass and rear window, sitting proud of the shell so they
+// never z-fight with the panel behind them.
 fn glassGeometry(b: &mut Builder) {
     b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(0.6)
-    let e = 0.012
-    // Windscreen: from the cowl at station z = 1.28 up to the roof at z = 0.68.
-    b.quad(v3(-0.84 - e, 0.74 + e, 1.28), v3(0.84 + e, 0.74 + e, 1.28), v3(0.64 + e, 1.15 + e, 0.68), v3(-0.64 - e, 1.15 + e, 0.68), 1.0, 1.0)
-    // Rear window.
-    b.quad(v3(-0.62 - e, 1.17 + e, -0.34), v3(0.62 + e, 1.17 + e, -0.34), v3(0.79 + e, 0.87 + e, -1.12), v3(-0.79 - e, 0.87 + e, -1.12), 1.0, 1.0)
-    // Side glass, both flanks.
-    b.quad(v3(-0.93, 0.82, 0.66), v3(-0.93, 1.13, 0.64), v3(-0.93, 1.15, -0.32), v3(-0.93, 0.84, -0.30), 1.0, 1.0)
-    b.quad(v3(0.93, 0.84, -0.30), v3(0.93, 1.15, -0.32), v3(0.93, 1.13, 0.64), v3(0.93, 0.82, 0.66), 1.0, 1.0)
+    let e = 0.016
+    // Windscreen: from the cowl forward of the cabin up to the roof.
+    b.quad(v3(-0.82 - e, 0.90 + e, 0.72), v3(0.82 + e, 0.90 + e, 0.72), v3(0.64 + e, 1.10 + e, 0.10), v3(-0.64 - e, 1.10 + e, 0.10), 1.0, 1.0)
+    // Rear window, over the engine bay.
+    b.quad(v3(-0.64 - e, 1.09 + e, -0.38), v3(0.64 + e, 1.09 + e, -0.38), v3(0.84 + e, 0.97 + e, -0.86), v3(-0.84 - e, 0.97 + e, -0.86), 1.0, 1.0)
+    // Side glass, both flanks, following the roof line.
+    b.quad(v3(-0.96, 0.88, 0.56), v3(-0.92, 1.06, 0.16), v3(-0.95, 1.06, -0.40), v3(-1.00, 0.90, -0.60), 1.0, 1.0)
+    b.quad(v3(1.00, 0.90, -0.60), v3(0.95, 1.06, -0.40), v3(0.92, 1.06, 0.16), v3(0.96, 0.88, 0.56), 1.0, 1.0)
 }
 
-// The lamps. Tint carries the colour because one emissive material paints all
-// four: white at the nose, red at the tail.
+// The lamps. Tint carries the colour because one emissive material paints all of
+// them: white at the nose, red at the tail, and cold blue under the sills.
 fn lampGeometry(b: &mut Builder) {
     b.setUvScale(1.0)
     b.setAo(1.0)
-    // Headlights, a slim bar each side of the nose.
-    b.setTint(6.0, 5.8, 5.2)
-    b.boxSpan(v3(-0.66, 0.42, 2.20), v3(-0.26, 0.52, 2.28))
-    b.boxSpan(v3(0.26, 0.42, 2.20), v3(0.66, 0.52, 2.28))
+    // Headlights: a wide blade each side with two projector pods sunk into it.
+    b.setTint(2.6, 2.5, 2.2)
+    b.boxSpan(v3(-0.86, 0.50, 2.16), v3(-0.30, 0.60, 2.26))
+    b.boxSpan(v3(0.30, 0.50, 2.16), v3(0.86, 0.60, 2.26))
+    b.setTint(5.0, 4.8, 4.2)
+    b.boxSpan(v3(-0.78, 0.52, 2.24), v3(-0.62, 0.58, 2.30))
+    b.boxSpan(v3(-0.56, 0.52, 2.24), v3(-0.40, 0.58, 2.30))
+    b.boxSpan(v3(0.40, 0.52, 2.24), v3(0.56, 0.58, 2.30))
+    b.boxSpan(v3(0.62, 0.52, 2.24), v3(0.78, 0.58, 2.30))
+    // Daytime strips down the outer edge of the nose, cold white.
+    b.setTint(1.6, 1.9, 3.0)
+    b.boxSpan(v3(-0.94, 0.34, 2.06), v3(-0.86, 0.52, 2.16))
+    b.boxSpan(v3(0.86, 0.34, 2.06), v3(0.94, 0.52, 2.16))
+
     // Tail: one bar across the whole width, which is the shape you actually see
-    // of the car in front of you for most of a race.
-    b.setTint(4.2, 0.18, 0.10)
-    b.boxSpan(v3(-0.80, 0.58, -2.30), v3(0.80, 0.68, -2.24))
-    // Brake-light blades higher up, so a car braking in front of you changes
-    // shape as well as brightness.
-    b.setTint(3.4, 0.22, 0.12)
-    b.boxSpan(v3(-0.50, 0.72, -2.26), v3(0.50, 0.78, -2.22))
+    // of the car in front of you for most of a race, with two blocks either side
+    // of it standing out of the panel.
+    b.setTint(3.4, 0.14, 0.07)
+    b.boxSpan(v3(-0.82, 0.62, -2.36), v3(0.82, 0.74, -2.28))
+    b.setTint(4.6, 0.18, 0.08)
+    b.boxSpan(v3(-0.86, 0.58, -2.34), v3(-0.60, 0.80, -2.24))
+    b.boxSpan(v3(0.60, 0.58, -2.34), v3(0.86, 0.80, -2.24))
+    // A brake blade higher up, so a car braking in front of you changes shape as
+    // well as brightness.
+    b.setTint(4.0, 0.22, 0.12)
+    b.boxSpan(v3(-0.46, 0.86, -2.28), v3(0.46, 0.92, -2.22))
+
+    // Underglow. Nothing on a real car does this and every car in an arcade
+    // racer does: it is what puts the machine on the road at night, and it is
+    // the cheapest reflection in the game.
+    b.setTint(0.30, 1.90, 2.60)
+    b.boxSpan(v3(-0.92, 0.11, -1.60), v3(-0.80, 0.15, 1.60))
+    b.boxSpan(v3(0.80, 0.11, -1.60), v3(0.92, 0.15, 1.60))
+    b.boxSpan(v3(-0.80, 0.11, -1.72), v3(0.80, 0.15, -1.60))
+    b.boxSpan(v3(-0.80, 0.11, 1.60), v3(0.80, 0.15, 1.72))
 }
 
-// One wheel, axle along X, centred on the origin. Tyre dark, rim bright, both
-// in one mesh: the tint does the work, so a wheel is one draw and not two.
+// The exhaust plume: four nested cones per pipe, hottest and thinnest in the
+// middle. Built around the origin pointing down -Z so the frame loop can stretch
+// it with a scale on one axis and leave the pipes where they are.
+fn flameGeometry(b: &mut Builder) {
+    b.setUvScale(1.0)
+    b.setAo(1.0)
+    var e = 0
+    while e < 4 {
+        let x = -0.40 + (e as f64) * 0.265
+        // Core, mid and outer: three cones, each longer and dimmer than the one
+        // inside it. A single cone reads as a traffic cone; the nesting is what
+        // makes it read as combustion.
+        cone(b, x, 0.055, 0.55, 9.0, 8.4, 6.0)
+        cone(b, x, 0.085, 1.00, 7.0, 2.60, 0.45)
+        cone(b, x, 0.115, 1.55, 3.4, 0.55, 0.12)
+        e = e + 1
+    }
+}
+
+fn cone(b: &mut Builder, x: f64, radius: f64, length: f64, r: f64, g: f64, bl: f64) {
+    b.setTint(r, g, bl)
+    let segs = 10
+    let tip = v3(x, 0.0, -length)
+    for i in 0..segs {
+        let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
+        let a1 = 2.0 * Math.pi() * ((i + 1) as f64) / (segs as f64)
+        let p0 = v3(x + Math.cos(a0) * radius, Math.sin(a0) * radius, 0.0)
+        let p1 = v3(x + Math.cos(a1) * radius, Math.sin(a1) * radius, 0.0)
+        let n0 = v3(Math.cos(a0), Math.sin(a0), 0.0)
+        let n1 = v3(Math.cos(a1), Math.sin(a1), 0.0)
+        b.push(p0, n0, 0.0, 0.0)
+        b.push(p1, n1, 1.0, 0.0)
+        b.push(tip, n0, 0.5, 1.0)
+        // Both windings, so the plume is solid seen from any side with back-face
+        // culling on.
+        b.push(p1, n1, 1.0, 0.0)
+        b.push(p0, n0, 0.0, 0.0)
+        b.push(tip, n1, 0.5, 1.0)
+    }
+}
+
+// One wheel, axle along X, centred on the origin. Tyre, dished rim with five
+// spokes, a drilled disc behind it and a caliper over that, all in one mesh: the
+// tint does the work, so a wheel is one draw and not four.
 fn wheelGeometry(b: &mut Builder) {
-    let segs = 18
+    let segs = 26
+    let hw = WHEEL_W * 0.5
+    let rimR = WHEEL_R * 0.66
     b.setUvScale(1.0)
     for i in 0..segs {
         let a0 = 2.0 * Math.pi() * (i as f64) / (segs as f64)
@@ -276,27 +583,102 @@ fn wheelGeometry(b: &mut Builder) {
         let s0 = Math.sin(a0)
         let c1 = Math.cos(a1)
         let s1 = Math.sin(a1)
-        let hw = WHEEL_W * 0.5
-        // Tread band.
-        b.setTint(0.13, 0.13, 0.15)
-        let p0 = v3(-hw, c0 * WHEEL_R, s0 * WHEEL_R)
-        let p1 = v3(-hw, c1 * WHEEL_R, s1 * WHEEL_R)
-        let p2 = v3(hw, c1 * WHEEL_R, s1 * WHEEL_R)
-        let p3 = v3(hw, c0 * WHEEL_R, s0 * WHEEL_R)
-        b.quad(p0, p1, p2, p3, 0.6, 0.3)
-        // Sidewalls, dark, then the rim face inside them.
-        let r0 = v3(-hw, c0 * WHEEL_R * 0.62, s0 * WHEEL_R * 0.62)
-        let r1 = v3(-hw, c1 * WHEEL_R * 0.62, s1 * WHEEL_R * 0.62)
-        b.quad(p1, p0, r0, r1, 0.4, 0.4)
-        let q0 = v3(hw, c0 * WHEEL_R * 0.62, s0 * WHEEL_R * 0.62)
-        let q1 = v3(hw, c1 * WHEEL_R * 0.62, s1 * WHEEL_R * 0.62)
-        b.quad(p3, p2, q1, q0, 0.4, 0.4)
-        // Rim, inset a little so the tyre has a visible lip.
-        b.setTint(0.86, 0.88, 0.95)
-        let ri = hw * 0.72
-        b.quad(r1, r0, v3(-ri, 0.0, 0.0), v3(-ri, 0.0, 0.0), 0.4, 0.4)
-        b.quad(q0, q1, v3(ri, 0.0, 0.0), v3(ri, 0.0, 0.0), 0.4, 0.4)
+        // Tread band, with a shoulder radius either side so the tyre is round in
+        // section and not a cylinder with square edges.
+        b.setTint(0.085, 0.085, 0.095)
+        let sh = 0.055
+        let rSh = WHEEL_R - 0.035
+        let p0 = v3(-hw + sh, c0 * WHEEL_R, s0 * WHEEL_R)
+        let p1 = v3(-hw + sh, c1 * WHEEL_R, s1 * WHEEL_R)
+        let p2 = v3(hw - sh, c1 * WHEEL_R, s1 * WHEEL_R)
+        let p3 = v3(hw - sh, c0 * WHEEL_R, s0 * WHEEL_R)
+        b.push(p0, v3(0.0, c0, s0), 0.0, 0.0)
+        b.push(p1, v3(0.0, c1, s1), 0.6, 0.0)
+        b.push(p2, v3(0.0, c1, s1), 0.6, 0.4)
+        b.push(p0, v3(0.0, c0, s0), 0.0, 0.0)
+        b.push(p2, v3(0.0, c1, s1), 0.6, 0.4)
+        b.push(p3, v3(0.0, c0, s0), 0.0, 0.4)
+        // Shoulders.
+        let q0 = v3(-hw, c0 * rSh, s0 * rSh)
+        let q1 = v3(-hw, c1 * rSh, s1 * rSh)
+        let n0 = v3(-0.6, c0 * 0.8, s0 * 0.8).norm()
+        let n1 = v3(-0.6, c1 * 0.8, s1 * 0.8).norm()
+        b.push(p0, n0, 0.0, 0.0)
+        b.push(q0, n0, 0.2, 0.0)
+        b.push(q1, n1, 0.2, 0.2)
+        b.push(p0, n0, 0.0, 0.0)
+        b.push(q1, n1, 0.2, 0.2)
+        b.push(p1, n1, 0.0, 0.2)
+        let r0 = v3(hw, c0 * rSh, s0 * rSh)
+        let r1 = v3(hw, c1 * rSh, s1 * rSh)
+        let m0 = v3(0.6, c0 * 0.8, s0 * 0.8).norm()
+        let m1 = v3(0.6, c1 * 0.8, s1 * 0.8).norm()
+        b.push(p3, m0, 0.0, 0.0)
+        b.push(r1, m1, 0.2, 0.2)
+        b.push(r0, m0, 0.2, 0.0)
+        b.push(p3, m0, 0.0, 0.0)
+        b.push(p2, m1, 0.0, 0.2)
+        b.push(r1, m1, 0.2, 0.2)
+        // Sidewalls, in to the rim lip.
+        b.setTint(0.11, 0.11, 0.12)
+        let w0 = v3(-hw + 0.02, c0 * rimR, s0 * rimR)
+        let w1 = v3(-hw + 0.02, c1 * rimR, s1 * rimR)
+        let outN = v3(-1.0, 0.0, 0.0)
+        b.push(q1, outN, 0.0, 0.0)
+        b.push(q0, outN, 0.4, 0.0)
+        b.push(w0, outN, 0.4, 0.4)
+        b.push(q1, outN, 0.0, 0.0)
+        b.push(w0, outN, 0.4, 0.4)
+        b.push(w1, outN, 0.0, 0.4)
+        let x0 = v3(hw - 0.02, c0 * rimR, s0 * rimR)
+        let x1 = v3(hw - 0.02, c1 * rimR, s1 * rimR)
+        let inN = v3(1.0, 0.0, 0.0)
+        b.push(r0, inN, 0.0, 0.0)
+        b.push(r1, inN, 0.4, 0.0)
+        b.push(x1, inN, 0.4, 0.4)
+        b.push(r0, inN, 0.0, 0.0)
+        b.push(x1, inN, 0.4, 0.4)
+        b.push(x0, inN, 0.0, 0.4)
+        // Rim barrel, bright.
+        b.setTint(0.80, 0.83, 0.90)
+        b.push(w0, v3(0.0, c0, s0), 0.0, 0.0)
+        b.push(x0, v3(0.0, c0, s0), 0.3, 0.0)
+        b.push(x1, v3(0.0, c1, s1), 0.3, 0.3)
+        b.push(w0, v3(0.0, c0, s0), 0.0, 0.0)
+        b.push(x1, v3(0.0, c1, s1), 0.3, 0.3)
+        b.push(w1, v3(0.0, c1, s1), 0.0, 0.3)
     }
+
+    // Five spokes and a hub on the outer face. The wheel is the part of the car
+    // nearest the camera in every cornering shot, and a flat disc there is the
+    // single most obvious piece of missing modelling on a car.
+    let face = -WHEEL_W * 0.5 + 0.01
+    let outN = v3(-1.0, 0.0, 0.0)
+    for i in 0..5 {
+        let a = 2.0 * Math.pi() * (i as f64) / 5.0
+        let ca = Math.cos(a)
+        let sa = Math.sin(a)
+        let pa = Math.cos(a + 0.30)
+        let sb = Math.sin(a + 0.30)
+        let pb = Math.cos(a - 0.30)
+        let sc = Math.sin(a - 0.30)
+        b.setTint(0.74, 0.77, 0.86)
+        // A tapered spoke: wide at the rim, narrow at the hub.
+        b.push(v3(face, ca * 0.09, sa * 0.09), outN, 0.5, 0.5)
+        b.push(v3(face, pa * rimR * 0.96, sb * rimR * 0.96), outN, 1.0, 0.0)
+        b.push(v3(face, pb * rimR * 0.96, sc * rimR * 0.96), outN, 0.0, 0.0)
+    }
+    b.setTint(0.55, 0.57, 0.64)
+    b.resetXform()
+    b.cylinderX(v3(face - 0.02, 0.0, 0.0), 0.075, 0.05, 12, true)
+
+    // The disc behind the spokes, and a caliper over it. Both are only ever seen
+    // through the gaps, which is exactly why they have to be there.
+    b.setTint(0.22, 0.23, 0.26)
+    b.resetXform()
+    b.cylinderX(v3(-0.02, 0.0, 0.0), WHEEL_R * 0.60, 0.04, 20, true)
+    b.setTint(1.20, 0.20, 0.10)
+    b.boxSpan(v3(-0.05, 0.10, -WHEEL_R * 0.62), v3(0.06, WHEEL_R * 0.62, -WHEEL_R * 0.30))
 }
 
 pub fn buildCarModel(gl: &mut GlContext): CarModel {
@@ -304,6 +686,11 @@ pub fn buildCarModel(gl: &mut GlContext): CarModel {
     bodyGeometry(bb)
     var body = Mesh.new(gl, sceneAttrs())
     body.upload(bb.data.clone())
+
+    var tb = builder()
+    trimGeometry(tb)
+    var trim = Mesh.new(gl, sceneAttrs())
+    trim.upload(tb.data.clone())
 
     var gb = builder()
     glassGeometry(gb)
@@ -315,19 +702,26 @@ pub fn buildCarModel(gl: &mut GlContext): CarModel {
     var wheel = Mesh.new(gl, sceneAttrs())
     wheel.upload(wb.data.clone())
 
+    var fb = builder()
+    flameGeometry(fb)
+    var flame = Mesh.new(gl, sceneAttrs())
+    flame.upload(fb.data.clone())
+
     var lb = builder()
     lampGeometry(lb)
     var lamps = Mesh.new(gl, sceneAttrs())
     lamps.upload(lb.data.clone())
 
     return CarModel {
-        body: body, glass: glass, wheel: wheel, lamps: lamps,
+        body: body, flame: flame, trim: trim, glass: glass, wheel: wheel, lamps: lamps,
     }
 }
 
 impl CarModel {
     fn free(self: Self, gl: &mut GlContext) {
         self.body.free(gl)
+        self.flame.free(gl)
+        self.trim.free(gl)
         self.glass.free(gl)
         self.wheel.free(gl)
         self.lamps.free(gl)
@@ -335,27 +729,46 @@ impl CarModel {
 }
 
 // Paint for one car. Only the albedo differs between the ten, which is the
-// whole reason there is one body mesh.
+// whole reason there is one body mesh. Low roughness and a little metalness is
+// clearcoat: it is what makes the sunset run down the flank as a band rather
+// than sit on it as a wash.
 pub fn paintMaterial(r: f64, g: f64, b: f64): Material {
-    var m = material(TEX_PAINT, r, g, b, 0.20, 0.55)
-    m.normalStrength = 0.5
+    var m = material(TEX_PAINT, r, g, b, 0.22, 0.10)
+    m.normalStrength = 0.4
+    return m
+}
+
+// The trim: white albedo, colour from the vertex tint, so carbon and polished
+// metal and a racing stripe are one draw.
+pub fn trimMaterial(): Material {
+    var m = material(TEX_PAINT, 1.0, 1.0, 1.0, 0.34, 0.55)
+    m.normalStrength = 0.6
     return m
 }
 
 pub fn glassMaterial(): Material {
-    var m = material(TEX_GLASS, 0.04, 0.05, 0.07, 0.06, 0.30)
+    var m = material(TEX_GLASS, 0.04, 0.05, 0.07, 0.05, 0.35)
     m.normalStrength = 0.3
     return m
 }
 
 pub fn wheelMaterial(): Material {
-    var m = material(TEX_STEEL, 0.30, 0.31, 0.34, 0.44, 0.35)
+    var m = material(TEX_STEEL, 1.0, 1.0, 1.0, 0.38, 0.55)
     m.normalStrength = 0.8
     return m
 }
 
 // Emissive white, masked by nothing: the tint in the mesh is what colours each
 // lamp, so the head lamps and the tail lamps come out of one draw.
+// The plume. Emissive like the lamps, and the one material in the game whose
+// emissive is changed per frame: the flame flickers by brightness rather than by
+// rebuilding its geometry.
+pub fn flameMaterial(k: f64): Material {
+    var m = material(TEX_PAINT, 0.0, 0.0, 0.0, 0.5, 0.0)
+    m.emissive = v3(k, k, k)
+    return m
+}
+
 pub fn lampMaterial(): Material {
     var m = material(TEX_PAINT, 0.02, 0.02, 0.02, 0.35, 0.0)
     m.emissive = v3(1.0, 1.0, 1.0)
@@ -394,7 +807,12 @@ pub struct Car {
     offTrack: bool,
     // Set for the frame the car is put back by the barrier.
     scraping: bool,
+    // How much of the bottle is lit right now, 0 to 1, and how much is left in
+    // it. Two numbers rather than one: the gauge has to fall while the boost is
+    // held and refill while it is not, and the thrust has to ramp in and out
+    // faster than either of those.
     boost: f64,
+    tank: f64,
     colour: Vec3,
 }
 
@@ -415,6 +833,7 @@ pub fn newCar(colour: Vec3): Car {
         offTrack: false,
         scraping: false,
         boost: 0.0,
+        tank: 1.0,
         colour: colour,
     }
 }
@@ -463,10 +882,19 @@ impl Car {
         var vf = self.vel.dot(fwd)
         var vr = self.vel.dot(rgt)
 
-        self.boost = if nitro {
-            Math.minF64(1.0, self.boost + dt * 4.0)
+        // The bottle. It empties in about three and a half seconds held down and
+        // takes about eleven to come back, which is what makes it a decision
+        // rather than a second accelerator.
+        let lit = nitro && self.tank > 0.015
+        if lit {
+            self.tank = Math.maxF64(0.0, self.tank - dt * BOOST_DRAIN)
         } else {
-            Math.maxF64(0.0, self.boost - dt * 2.0)
+            self.tank = Math.minF64(1.0, self.tank + dt * BOOST_REGEN)
+        }
+        self.boost = if lit {
+            Math.minF64(1.0, self.boost + dt * 5.0)
+        } else {
+            Math.maxF64(0.0, self.boost - dt * 2.4)
         }
 
         // Engine. The falloff toward the top speed is what makes the last twenty
@@ -476,6 +904,10 @@ impl Car {
             let head = 1.0 - Math.clampF64(vf / top, 0.0, 1.0)
             vf = vf + ENGINE * throttle * head * dt
         }
+        // The boost pushes on its own, so pressing it at speed is felt as a
+        // shove rather than only as a slightly higher ceiling that takes the
+        // length of a straight to reach.
+        vf = vf + 26.0 * self.boost * dt
         // Brakes stop the car and then reverse it, slowly. A racer with no
         // reverse is a racer where facing the wrong way ends the run.
         if brake > 0.0 {

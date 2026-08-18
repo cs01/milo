@@ -1,16 +1,26 @@
 # REDLINE
 
-A night street race through a neon city. One closed circuit, 2.8 km, three lanes
+A street race through a city at sunset. One closed circuit, 2.8 km, three lanes
 wide, walled on both sides by a continuous bar of light that follows every
-corner. You drive a wedge with the arrow keys and the whole game is how late you
-can leave the braking.
+corner. You drive a supercar with the arrow keys, hold the turbo down the
+straights, and the whole game is how late you can leave the braking.
 
 ```bash
 milo run examples/games/redline/main.milo --release
 ```
 
-Arrows or `WASD` drive, `SHIFT` is nitrous, `SPACE` is the handbrake, `F` is
+Arrows or `WASD` drive, `SPACE` is the turbo, `SHIFT` is the handbrake, `F` is
 fullscreen and `ESC` quits.
+
+## The turbo
+
+One bottle, five segments on the gauge, about three and a half seconds of it
+held flat and eleven to fill back up. It does not simply raise the top speed:
+it pushes, on top of the engine, so using it at 150 is felt as a shove rather
+than as a number that slowly climbs. The lens widens with it, the exhausts light
+up, and the air starts streaking past the edge of the frame. A boost you can
+only read off a gauge is a stat; a boost that changes the shape of the frame is
+a boost.
 
 ## The circuit
 
@@ -42,7 +52,7 @@ back with a spring oscillates, which reads as the game fighting you.
 
 ## Handling
 
-Arcade, deliberately. The velocity is split into forward and lateral in the car's
+Arcade, deliberately. Top speed is 95 m/s, a shade over 210 mph. The velocity is split into forward and lateral in the car's
 own frame: the engine pushes forward, the tyres eat lateral, and steering turns
 the *heading* while the velocity follows it at a rate set by grip. Drop the grip
 and the velocity lags the heading, and that is a drift, out of the same three
@@ -54,12 +64,56 @@ The car never leaves the ground. The pitch and roll the body shows are cosmetic.
 
 ## How it looks
 
-Nothing loads from disk. The asphalt, the concrete, the steel, the paint and the
-glass are procedural, and so is every building, every window and every metre of
-neon. It renders on the GPU through the `gl` package and needs an OpenGL 3.3 core
-context: a night sky integrated once at startup into a lat-long radiance table, a
-depth+normal prepass feeding screen-space ambient occlusion, shadow maps, GGX
-with sky irradiance for ambient, bloom and an ACES tone map.
+Nothing loads from disk. The asphalt, the concrete, the steel, the paint, the
+glass and the building facades are procedural, and so is every window and every
+metre of neon. It renders on the GPU through the `gl` package and needs an
+OpenGL 3.3 core context: a sunset sky integrated once at startup into a lat-long
+radiance table, a depth+normal prepass feeding screen-space ambient occlusion,
+shadow maps, GGX with sky irradiance for ambient, bloom and an ACES tone map.
+
+The sky is bright and saturated on purpose. The neon keeps its job by being
+*coloured* rather than by being the only thing on screen with any light in it,
+and every emissive tint in the game is above the bloom threshold, so the tubes
+still glow against a lit sky. ACES desaturates whatever it rolls off, which is
+right for film and wrong for a cabinet, so the composite pushes saturation back
+up after the tone map and before the transfer.
+
+## The car
+
+A lofted shell: twenty cross-sections, twenty-eight points around each, with
+normals taken from the surface rather than from the winding, because the
+highlight that runs down the flank of a car is one continuous band and it only
+exists if the normals vary continuously. Read down the `hw` column of the station
+table and you can watch the two arches bulge over the wheels and the waist pull
+in between them.
+
+The wheel wells are *cut* into that loft: inside a circle around each axle the
+flank is clamped inward, which turns the solid side into an opening with a wall
+behind it, and the loft's own edge along that circle is the arch lip. Ringing the
+wheel with a separate flare instead leaves the tyre standing in front of an
+unbroken flank, which is what makes a car read as a toy with wheels stuck on.
+
+Five meshes, because five materials: paint (one draw, one uniform colour, so the
+whole field can share the shell), trim (white albedo with the colour in the
+vertex tint, so carbon, polished exhaust tip and racing stripe come out of one
+draw), glass, wheels, and the emissive lamps. The exhaust plume is a sixth,
+drawn only when the bottle is lit and stretched along its own axis by a scale in
+the matrix rather than by rebuilding its geometry.
+
+## The city
+
+Every building is a plinth, a shaft that steps back once or twice as it rises, a
+cornice at each step, a parapet, and whatever machinery the roof carries: plant
+rooms, a water tank on legs, a mast with the red light every tall building in the
+world has on it. The stepping is the difference between a city and a row of
+boxes: a single extruded rectangle has the same silhouette from every angle and
+no scale cues at all.
+
+Unlit windows are in the facade texture and lit ones are geometry. A tower
+carries hundreds of openings and only some are lit; emitting every dark one as a
+quad costs thousands of triangles for a rectangle that by definition does not
+glow, and the lit ones have to be geometry because they have to actually throw
+light on the street.
 
 Three things carry the look:
 

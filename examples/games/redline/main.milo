@@ -48,20 +48,20 @@ from "./camera" import {
     Chase, newChase
 }
 from "./car" import {
-    Car, buildCarModel, glassMaterial, lampMaterial, newCar, paintMaterial,
-    wheelMaterial
+    Car, buildCarModel, flameMaterial, glassMaterial, lampMaterial, newCar,
+    paintMaterial, trimMaterial, wheelMaterial
 }
 from "./hud" import {
     ATLAS, Hud, buildAtlas, newHud
 }
 from "./mat4" import {
-    identity, invertViewProj
+    identity, invertViewProj, multiply, scaleXyz, translation
 }
 from "./render" import {
     newGfx, sceneAttrs
 }
 from "./sky" import {
-    buildNight
+    buildSky
 }
 from "./textures" import {
     TEX_SIZE, makeTextures
@@ -185,7 +185,7 @@ pub fn main(): i32 {
     }
 
     var gl = GlContext.new()
-    let sky = buildNight(skyLight)
+    let sky = buildSky(skyLight)
     var gfx = match newGfx(gl, rw, rh, sky, buildAtlas(), ATLAS) {
         Result.Ok(g) => g
         Result.Err(e) => {
@@ -223,6 +223,7 @@ pub fn main(): i32 {
 
     var world = buildWorld(gl, track)
     let carModel = buildCarModel(gl)
+    let trimMat = trimMaterial()
     let glassMat = glassMaterial()
     let wheelMat = wheelMaterial()
     let lampMat = lampMaterial()
@@ -249,6 +250,14 @@ pub fn main(): i32 {
     var fullscreen = false
     var raceTime = 0.0
     var warmup = argValue("--warmup", "0").parseInt() ?? 0
+    let poseBoost = argPresent("--boost")
+    let orbitDeg = argValue("--orbit", "-999").parseF64() ?? -999.0
+    let orbitElev = argValue("--elev", "12").parseF64() ?? 12.0
+    let orbitDist = argValue("--dist", "6.5").parseF64() ?? 6.5
+    // Which parts of the car to draw, as a bit mask: 1 body, 2 trim, 4 glass,
+    // 8 wheels, 16 lamps. Only ever used from a capture, and the only way to
+    // tell a badly shaped shell from a shell hidden behind its own trim.
+    let parts = argValue("--parts", "31").parseInt() ?? 31
 
     while !quit {
         let now = SDL_GetTicks()
@@ -302,8 +311,10 @@ pub fn main(): i32 {
                 if keys[SC_RIGHT] != 0 || keys[SC_D] != 0 {
                     steer = steer + 1.0
                 }
-                nitro = keys[SC_LSHIFT] != 0
-                handbrake = keys[SC_SPACE] != 0
+                // Space is the turbo, because it is the button a player's thumb
+                // is already on, and the one they will hit in a panic.
+                nitro = keys[SC_SPACE] != 0
+                handbrake = keys[SC_LSHIFT] != 0
             }
         } else {
             // A capture of a parked car on an empty grid is a capture of a car
@@ -312,6 +323,7 @@ pub fn main(): i32 {
             // turns the way the arrow key asked and leans out of the corner.
             throttle = 1.0
             steer = poseSteer
+            nitro = poseBoost
         }
 
         // ── simulate ──────────────────────────────────────────────────────────
@@ -323,6 +335,16 @@ pub fn main(): i32 {
             cam.kick(dt * 1.4)
         }
         cam.follow(player, dt)
+        // A capture-only orbit, for looking at the car itself rather than at the
+        // race: the chase camera is the wrong tool for judging bodywork.
+        if orbitDeg > -900.0 {
+            let a = orbitDeg * Math.pi() / 180.0
+            let el = orbitElev * Math.pi() / 180.0
+            let d = orbitDist
+            cam.eye = player.pos + v3(Math.sin(a) * Math.cos(el) * d, Math.sin(el) * d + 0.7, Math.cos(a) * Math.cos(el) * d)
+            cam.target = player.pos + v3(0.0, 0.62, 0.0)
+            cam.shake = 0.0
+        }
 
         // ── draw ──────────────────────────────────────────────────────────────
         unsafe {
@@ -343,6 +365,9 @@ pub fn main(): i32 {
         // The player's own lamps, which are the only lights that move.
         gfx.addLight(player.nose(), 5.5, 5.2, 4.4, 26.0)
         gfx.addLight(player.tail(), 3.4, 0.30, 0.18, 9.0)
+        if player.boost > 0.02 {
+            gfx.addLight(player.tail(), 9.0 * player.boost, 3.4 * player.boost, 0.7 * player.boost, 16.0)
+        }
 
         let aspect = (rw as f64) / (rh as f64)
         // The circuit is already in world space. Handing it the car's matrix is
@@ -360,6 +385,7 @@ pub fn main(): i32 {
             gfx.prepassDraw(world.meshes[i], worldModel)
         }
         gfx.prepassDraw(carModel.body, model)
+        gfx.prepassDraw(carModel.trim, model)
         gfx.prepassDraw(carModel.glass, model)
         for w in 0..4 {
             gfx.prepassDraw(carModel.wheel, player.wheelMatrix(w))
@@ -376,6 +402,7 @@ pub fn main(): i32 {
             gfx.shadowDraw(world.meshes[i], worldModel)
         }
         gfx.shadowDraw(carModel.body, model)
+        gfx.shadowDraw(carModel.trim, model)
         for w in 0..4 {
             gfx.shadowDraw(carModel.wheel, player.wheelMatrix(w))
         }
@@ -389,17 +416,36 @@ pub fn main(): i32 {
             }
             gfx.sceneDraw(world.meshes[i], worldModel, world.mats[i])
         }
-        gfx.sceneDraw(carModel.body, model, playerPaint)
-        gfx.sceneDraw(carModel.lamps, model, lampMat)
-        gfx.sceneDraw(carModel.glass, model, glassMat)
-        for w in 0..4 {
-            gfx.sceneDraw(carModel.wheel, player.wheelMatrix(w), wheelMat)
+        if (parts & 1) != 0 {
+            gfx.sceneDraw(carModel.body, model, playerPaint)
+        }
+        if (parts & 2) != 0 {
+            gfx.sceneDraw(carModel.trim, model, trimMat)
+        }
+        if (parts & 16) != 0 {
+            gfx.sceneDraw(carModel.lamps, model, lampMat)
+        }
+        if (parts & 4) != 0 {
+            gfx.sceneDraw(carModel.glass, model, glassMat)
+        }
+        if (parts & 8) != 0 {
+            for w in 0..4 {
+                gfx.sceneDraw(carModel.wheel, player.wheelMatrix(w), wheelMat)
+            }
+        }
+        // The plume. Stretched along its own axis by the boost and flickered by
+        // brightness, which is cheaper and steadier than rebuilding it.
+        if player.boost > 0.02 {
+            let flick = 0.80 + 0.20 * Math.sin(gfx.time * 47.0) + 0.12 * Math.sin(gfx.time * 111.0)
+            let len = (0.45 + 0.95 * player.boost) * flick
+            let flameM = multiply(model, multiply(translation(v3(0.0, 0.44, -2.44)), scaleXyz(1.0, 1.0, len)))
+            gfx.sceneDraw(carModel.flame, flameM, flameMaterial(player.boost * flick))
         }
 
         gfx.present(dw as i64, dh as i64)
 
         hud.clear()
-        drawHud(hud, dw as f64, dh as f64, player, raceTime, track.length)
+        drawHud(hud, dw as f64, dh as f64, player, raceTime, track.length, 0.5 + 0.5 * Math.sin(gfx.time * 6.0))
         gfx.drawHud(hud.verts, dw as i64, dh as i64)
 
         if headless && warmup > 0 {
@@ -440,47 +486,187 @@ pub fn main(): i32 {
     return 0
 }
 
-// A plaque behind a number, because white text over a lit road is only readable
-// by accident.
-fn plate(hud: &mut Hud, x: f64, y: f64, w: f64, h: f64, r: f64, g: f64, b: f64) {
-    hud.rect(x, y, w, h, r * 0.14, g * 0.14, b * 0.20, 0.90)
-    hud.rect(x, y, w, 2.0, r, g, b, 0.85)
+// Two digits, zero padded. A clock that reads 0:5.7 is a clock nobody can read
+// at a glance, and at 180 mph a glance is all it gets.
+fn pad2(n: i64): string {
+    if n < 10 {
+        return $"0{n}"
+    }
+    return $"{n}"
 }
 
-fn drawHud(hud: &mut Hud, dw: f64, dh: f64, car: &Car, raceTime: f64, lapLength: f64) {
+// The dial sweeps from lower left, over the top, to lower right: 240 degrees
+// with the gap at the bottom, which is where every rev counter has put it since
+// they were mechanical.
+let DIAL_A0: f64 = 2.6179938779914944
+
+let DIAL_SWEEP: f64 = 4.188790204786391
+
+fn drawHud(hud: &mut Hud, dw: f64, dh: f64, car: &Car, raceTime: f64, lapLength: f64, boostFlash: f64) {
     let s = Math.maxF64(dh / 900.0, 0.6)
-
-    // Speed, bottom right, the biggest number on the screen. It is the only
-    // reading a driver actually uses moment to moment.
     let speed = mph(car.forwardSpeed())
-    let bw = 250.0 * s
-    let bx = dw - bw - 34.0 * s
-    let by = dh - 128.0 * s
-    plate(hud, bx, by, bw, 96.0 * s, 0.95, 0.30, 0.20)
-    hud.textCentred($"{speed}", bx + bw * 0.5, by + 16.0 * s, 5.6 * s, 1.0, 0.95, 0.72, 1.0)
-    hud.textCentred("MPH", bx + bw * 0.5, by + 72.0 * s, 1.6 * s, 0.85, 0.70, 0.60, 0.85)
 
-    // Lap and clock, top left.
+    // ── the dial, bottom right ────────────────────────────────────────────────
+    //
+    // The speed is the only reading a driver uses moment to moment, so it is the
+    // biggest number on the screen and it sits inside a gauge rather than in a
+    // box: an arc that fills is readable out of the corner of an eye at a
+    // hundred and eighty, and four digits of text are not.
+    let rad = 118.0 * s
+    let cx = dw - rad - 108.0 * s
+    let cy = dh - rad - 34.0 * s
+    let frac = Math.clampF64((speed as f64) / 220.0, 0.0, 1.0)
+
+    // Body, bezel, and the dark channel the arc runs in.
+    hud.ring(cx, cy, 0.0, rad, 0.0, 2.0 * Math.pi(), 44, 0.05, 0.05, 0.09, 0.88)
+    hud.ring(cx, cy, rad - 7.0 * s, rad, 0.0, 2.0 * Math.pi(), 44, 0.55, 0.57, 0.66, 0.95)
+    hud.ring(cx, cy, rad - 30.0 * s, rad - 9.0 * s, DIAL_A0, DIAL_A0 + DIAL_SWEEP, 40, 0.10, 0.10, 0.16, 0.95)
+
+    // The arc itself, coloured along its length: blue at the bottom of the
+    // range, magenta through the middle, red at the top. Drawn segment by
+    // segment because the colour has to be a function of the reading, not of
+    // the fill.
+    let segs = 40
+    for i in 0..segs {
+        let t0 = (i as f64) / (segs as f64)
+        if t0 > frac {
+            continue
+        }
+        let a0 = DIAL_A0 + DIAL_SWEEP * t0
+        let a1 = DIAL_A0 + DIAL_SWEEP * ((i + 1) as f64) / (segs as f64)
+        var r = 0.30 + 1.30 * t0
+        var g = 0.55 - 0.45 * t0
+        var b = 1.30 - 0.55 * t0
+        if t0 > 0.82 {
+            r = 1.60
+            g = 0.16
+            b = 0.14
+        }
+        hud.ring(cx, cy, rad - 29.0 * s, rad - 10.0 * s, a0, a1, 2, r, g, b, 0.98)
+    }
+
+    // Ticks. Every eighth is long, the rest short, and the last three are red:
+    // a gauge with no marks on it is a progress bar.
+    for i in 0..25 {
+        let t = (i as f64) / 24.0
+        let a = DIAL_A0 + DIAL_SWEEP * t
+        let major = i % 3 == 0
+        let len = if major {
+            17.0 * s
+        } else {
+            9.0 * s
+        }
+        var r = 0.92
+        var g = 0.94
+        var b = 1.0
+        if t > 0.86 {
+            r = 1.0
+            g = 0.30
+            b = 0.24
+        }
+        hud.spoke(cx, cy, rad - 30.0 * s - len, rad - 32.0 * s, a, if major {
+            2.4 * s
+        } else {
+            1.4 * s
+        }
+        , r, g, b, 0.85)
+    }
+
+    // The needle, and the hub it turns on.
+    let na = DIAL_A0 + DIAL_SWEEP * frac
+    hud.spoke(cx, cy, -10.0 * s, rad - 34.0 * s, na, 3.4 * s, 1.0, 0.22, 0.16, 0.95)
+    hud.ring(cx, cy, 0.0, 8.0 * s, 0.0, 2.0 * Math.pi(), 14, 0.85, 0.87, 0.94, 1.0)
+
+    // The reading, in the middle, in the yellow every arcade cabinet has used
+    // for the number that matters.
+    hud.textCentred($"{speed}", cx, cy - 46.0 * s, 5.0 * s, 1.0, 0.86, 0.22, 1.0)
+    hud.textCentred("MPH", cx, cy + 20.0 * s, 1.7 * s, 0.86, 0.88, 0.95, 0.9)
+
+    // The gear, in its own box on the outside of the dial. Six speeds spread
+    // over the range, so the box changes often enough to be worth looking at.
+    let gear = Math.clampI64(1 + ((frac * 6.4) as i64), 1, 6)
+    let gx = cx + rad - 26.0 * s
+    let gy = cy - 8.0 * s
+    hud.slab(gx, gy, 62.0 * s, 62.0 * s, 8.0 * s, 0.06, 0.06, 0.10, 0.92)
+    hud.slab(gx, gy, 62.0 * s, 5.0 * s, 8.0 * s, 0.95, 0.24, 0.18, 0.95)
+    hud.textCentred($"{gear}", gx + 33.0 * s, gy + 12.0 * s, 3.4 * s, 1.0, 1.0, 1.0, 1.0)
+
+    // ── the bottle, bottom left ───────────────────────────────────────────────
+    //
+    // Five segments rather than a smooth bar: what a player needs to know is how
+    // many more shots are in it, and a continuous bar answers a question nobody
+    // is asking.
+    let bw = 62.0 * s
+    let bh = 168.0 * s
+    let bx = 44.0 * s
+    let by = dh - bh - 46.0 * s
+    hud.rect(bx - 5.0 * s, by - 22.0 * s, bw + 10.0 * s, bh + 30.0 * s, 0.05, 0.05, 0.09, 0.86)
+    // The cap and neck, so it reads as a bottle and not as a battery.
+    hud.rect(bx + bw * 0.30, by - 20.0 * s, bw * 0.40, 12.0 * s, 0.55, 0.58, 0.66, 0.95)
+    let cells = 5
+    for i in 0..cells {
+        let t0 = (i as f64) / (cells as f64)
+        let y = by + bh - (t0 + 1.0 / (cells as f64)) * bh + 3.0 * s
+        let h = bh / (cells as f64) - 6.0 * s
+        let full = car.tank > t0 + 0.02
+        if full {
+            // Lit segments run cyan to white as the bottle fills, and the top
+            // one pulses when it is ready, which is the whole notification.
+            let k = 0.55 + 0.45 * t0
+            var r = 0.30 * k
+            var g = 1.5 * k
+            var bl = 1.9 * k
+            if car.tank > 0.985 {
+                r = r + 0.5 * boostFlash
+                g = g + 0.5 * boostFlash
+                bl = bl + 0.4 * boostFlash
+            }
+            hud.rect(bx, y, bw, h, r, g, bl, 0.97)
+        } else {
+            hud.rect(bx, y, bw, h, 0.12, 0.14, 0.20, 0.80)
+        }
+    }
+    hud.textCentred("TURBO", bx + bw * 0.5, dh - 40.0 * s, 1.5 * s, 0.60, 0.92, 1.0, 0.9)
+    hud.textCentred("SPACE", bx + bw * 0.5, dh - 22.0 * s, 1.2 * s, 0.70, 0.75, 0.85, 0.7)
+
+    // ── the clock, top right ──────────────────────────────────────────────────
     let secs = raceTime as i64
     let cs = ((raceTime - (secs as f64)) * 100.0) as i64
-    plate(hud, 34.0 * s, 30.0 * s, 250.0 * s, 68.0 * s, 0.30, 0.70, 1.0)
-    let _ = hud.text("LAP TIME", 46.0 * s, 36.0 * s, 1.5 * s, 0.60, 0.85, 1.0, 0.85)
-    let _ = hud.text($"{secs / 60}:{(secs % 60)}.{cs}", 46.0 * s, 54.0 * s, 3.2 * s, 1.0, 0.95, 0.75, 1.0)
+    let tw = 250.0 * s
+    let tx = dw - tw - 34.0 * s
+    hud.slab(tx, 26.0 * s, tw, 34.0 * s, 10.0 * s, 0.72, 0.10, 0.10, 0.92)
+    hud.slab(tx, 60.0 * s, tw, 52.0 * s, 6.0 * s, 0.05, 0.05, 0.09, 0.90)
+    let _ = hud.text("TIME", tx + 22.0 * s, 32.0 * s, 1.7 * s, 1.0, 0.94, 0.90, 0.95)
+    hud.textCentred($"{secs / 60}:{pad2(secs % 60)}.{pad2(cs)}", tx + tw * 0.5, 68.0 * s, 2.9 * s, 1.0, 0.96, 0.80, 1.0)
+    // The three slashes an arcade racer always puts beside its clock.
+    for i in 0..3 {
+        hud.slab(tx - 22.0 * s + (i as f64) * 9.0 * s, 26.0 * s, 5.0 * s, 34.0 * s, 10.0 * s, 0.95, 0.20, 0.16, 0.95)
+    }
 
-    // How far round the lap, as a bar. Standing in for a minimap until there is
-    // a field of cars to put on one.
-    let pw = 320.0 * s
-    let px = dw * 0.5 - pw * 0.5
-    hud.rect(px, 34.0 * s, pw, 8.0 * s, 0.06, 0.05, 0.10, 0.85)
-    let frac = Math.clampF64(car.s / lapLength, 0.0, 1.0)
-    hud.rect(px, 34.0 * s, pw * frac, 8.0 * s, 0.95, 0.35, 0.85, 0.95)
-    hud.textCentred($"LAP {car.lap + 1}", dw * 0.5, 48.0 * s, 1.8 * s, 0.90, 0.92, 1.0, 0.9)
+    // ── the lap, top left ─────────────────────────────────────────────────────
+    hud.slab(34.0 * s, 26.0 * s, 210.0 * s, 30.0 * s, 8.0 * s, 0.05, 0.05, 0.09, 0.90)
+    let _ = hud.text($"LAP {car.lap + 1}", 52.0 * s, 30.0 * s, 2.0 * s, 1.0, 0.90, 0.30, 1.0)
+    // How far round the lap, as a bar under it. Standing in for a minimap until
+    // there is a field of cars to put on one.
+    let pw = 210.0 * s
+    hud.rect(34.0 * s, 66.0 * s, pw, 9.0 * s, 0.06, 0.05, 0.10, 0.85)
+    let lapFrac = Math.clampF64(car.s / lapLength, 0.0, 1.0)
+    hud.rect(34.0 * s, 66.0 * s, pw * lapFrac, 9.0 * s, 0.95, 0.35, 0.85, 0.95)
 
-    // The nitrous bottle, bottom left, which is the only resource in the game.
-    if car.boost > 0.01 {
-        let nw = 200.0 * s
-        hud.rect(34.0 * s, dh - 62.0 * s, nw, 14.0 * s, 0.06, 0.05, 0.10, 0.85)
-        hud.rect(34.0 * s, dh - 62.0 * s, nw * car.boost, 14.0 * s, 0.35, 0.90, 1.0, 0.95)
+    // Speed lines, on the boost only. They are drawn from the middle of the
+    // screen outward and start well outside the car, so they read as air going
+    // past rather than as scratches on the lens.
+    if car.boost > 0.05 {
+        let mx = dw * 0.5
+        let my = dh * 0.52
+        let diag = Math.sqrt(dw * dw + dh * dh) * 0.5
+        for i in 0..26 {
+            let a = 2.0 * Math.pi() * (((i * 37) % 26) as f64) / 26.0 + boostFlash * 0.2
+            let jitter = 0.66 + 0.30 * Math.abs(Math.sin((i as f64) * 12.9898))
+            let r0 = diag * jitter
+            let r1 = r0 + diag * (0.05 + 0.09 * car.boost)
+            hud.spoke(mx, my, r0, r1, a, 1.6 * s, 1.0, 0.95, 0.88, 0.20 * car.boost)
+        }
     }
 
     // Off the road, say so. The grip change is felt but a driver at speed needs

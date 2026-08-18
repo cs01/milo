@@ -35,6 +35,7 @@ from "./rng" import {
     Rand, rand
 }
 from "./textures" import {
+    TEX_FACADE,
     TEX_ASPHALT, TEX_CONCRETE, TEX_GLASS, TEX_PAINT, TEX_STEEL
 }
 from "./track" import {
@@ -442,60 +443,289 @@ fn addStartLine(mark: &mut Builder, steel: &mut Builder, neon: &mut Builder, tra
 // Every candidate is then checked back against the whole track: the loop passes
 // near itself in two places, and a tower placed forty metres off one straight
 // can land squarely on another.
-fn addCity(city: &mut Builder, neon: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
+fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
     var rg = rand(0x5eed1234)
     var s = 0.0
     while s < track.length {
         var side = -1.0
         while side < 2.0 {
-            if rg.f() < 0.22 {
+            if rg.f() < 0.14 {
                 side = side + 2.0
                 continue
             }
-            let halfX = rg.range(7.0, 17.0)
-            let halfZ = rg.range(7.0, 17.0)
-            let height = rg.range(16.0, 120.0)
-            let off = (WALL + 4.0 + rg.range(2.0, 46.0) + Math.maxF64(halfX, halfZ)) * side
+            let halfX = rg.range(8.0, 17.0)
+            let halfZ = rg.range(8.0, 17.0)
+            // Three kinds of building, because a skyline of one kind is a bar
+            // chart. The near ones are low so the street has a wall, the far
+            // ones are towers so the skyline has a shape.
+            let near = rg.f()
+            var height = rg.range(14.0, 30.0)
+            if near > 0.45 {
+                height = rg.range(34.0, 74.0)
+            }
+            if near > 0.80 {
+                height = rg.range(80.0, 155.0)
+            }
+            let off = (WALL + 3.0 + rg.range(1.5, 44.0) + Math.maxF64(halfX, halfZ)) * side
             let c = track.pointAt(s + rg.jitter(9.0), off)
 
             // Reject anything that lands on any part of the lap, not just this
             // part. `locate` with a cold hint scans the whole table, which is
             // exactly what is wanted here and costs nothing at build time.
             let probe = track.locate(c.x, c.z, 0)
-            if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 3.0 {
+            if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 2.5 {
                 side = side + 2.0
                 continue
             }
 
-            city.setUvScale(0.22)
-            city.setTint(rg.range(0.30, 0.60), rg.range(0.30, 0.58), rg.range(0.38, 0.70))
-            city.setAo(0.75)
-            city.resetXform()
-            city.box(v3(c.x, height * 0.5, c.z), halfX, height * 0.5, halfZ)
-
-            addWindows(neon, c, halfX, halfZ, height, rg)
-
-            // A roof light on the taller ones, which is what gives the skyline
-            // its depth once they are too far away to show windows.
-            if height > 60.0 {
-                neon.setTint(1.8, 0.22, 0.22)
-                neon.setAo(1.0)
-                neon.box(v3(c.x, height + 0.6, c.z), 0.5, 0.5, 0.5)
-                pushLight(pool, v3(c.x, height + 1.2, c.z), 2.2, 0.3, 0.3, 30.0)
-            }
+            addBuilding(city, neon, steel, pool, c, halfX, halfZ, height, rg)
             side = side + 2.0
         }
-        s = s + 34.0
+        s = s + 30.0
     }
 }
 
-// A grid of lit windows on all four faces. Windows are emissive quads rather
-// than a texture because there is no window texture in this game: a lit window
-// has to actually glow, or the buildings go black the moment the bloom pass
-// stops finding anything bright in them.
-fn addWindows(neon: &mut Builder, c: &Vec3, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
-    let floors = Math.maxI64(3, (height / 4.2) as i64)
-    let e = 0.06
+// One building: a plinth, a shaft that steps back as it rises, a cornice at
+// every step, a parapet on top and whatever machinery the roof carries.
+//
+// The stepping is the whole difference between a city and a row of boxes. A
+// single extruded rectangle has one silhouette from every angle and no scale
+// cues at all; a tower that loses a few metres of plan at two heights reads as
+// having floors, and the cornice line that comes with each step is what catches
+// the sun.
+fn addBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
+    // Warm masonry, cool masonry, or a dark curtain-wall tower.
+    let hue = rg.f()
+    var tr = 0.62
+    var tg = 0.50
+    var tb = 0.40
+    if hue > 0.72 {
+        tr = 0.34
+        tg = 0.38
+        tb = 0.46
+    } else if hue > 0.44 {
+        tr = 0.60
+        tg = 0.58
+        tb = 0.52
+    } else if hue > 0.22 {
+        tr = 0.66
+        tg = 0.42
+        tb = 0.33
+    }
+    city.setUvScale(1.0 / 12.0)
+    city.setAo(0.80)
+    city.resetXform()
+
+    // The plinth: two storeys, a little wider than the shaft, darker. It is what
+    // the street actually sees.
+    let plinthH = Math.minF64(7.0, height * 0.35)
+    city.setTint(tr * 0.80, tg * 0.80, tb * 0.82)
+    city.box(v3(c.x, plinthH * 0.5, c.z), halfX + 0.45, plinthH * 0.5, halfZ + 0.45)
+    // Its cornice, standing proud all the way round.
+    city.setTint(tr * 1.10, tg * 1.10, tb * 1.10)
+    city.box(v3(c.x, plinthH + 0.22, c.z), halfX + 0.80, 0.22, halfZ + 0.80)
+
+    // The shaft, in up to three setbacks.
+    var y = plinthH + 0.44
+    var hx = halfX
+    var hz = halfZ
+    var tier = 0
+    while tier < 3 && y < height - 1.0 {
+        // Each tier takes a share of what is left, so a tall building steps
+        // several times and a low one does not step at all.
+        var top = height
+        if tier < 2 && height - y > 22.0 {
+            top = y + (height - y) * rg.range(0.45, 0.72)
+        }
+        let h = top - y
+        if h < 2.0 {
+            tier = 3
+            continue
+        }
+        city.setTint(tr, tg, tb)
+        city.box(v3(c.x, y + h * 0.5, c.z), hx, h * 0.5, hz)
+        // Pilasters: thin fins up the corners of the tier. Two per corner, so
+        // the edge of the building is a line of light and shadow rather than a
+        // hard join between two flat greys.
+        city.setTint(tr * 1.14, tg * 1.14, tb * 1.14)
+        var sx = -1.0
+        while sx < 2.0 {
+            var sz = -1.0
+            while sz < 2.0 {
+                city.box(v3(c.x + sx * hx, y + h * 0.5, c.z + sz * (hz - 0.9)), 0.22, h * 0.5, 0.32)
+                city.box(v3(c.x + sx * (hx - 0.9), y + h * 0.5, c.z + sz * hz), 0.32, h * 0.5, 0.22)
+                sz = sz + 2.0
+            }
+            sx = sx + 2.0
+        }
+        addWindows(neon, c, hx, hz, y, top, rg)
+        // The cornice that caps this tier.
+        city.setTint(tr * 1.12, tg * 1.12, tb * 1.12)
+        city.box(v3(c.x, top + 0.20, c.z), hx + 0.55, 0.20, hz + 0.55)
+        y = top + 0.40
+        hx = hx * rg.range(0.72, 0.88)
+        hz = hz * rg.range(0.72, 0.88)
+        tier = tier + 1
+    }
+
+    // Parapet: a low wall round the roof, so the top of the building is an edge
+    // and not a lid.
+    city.setTint(tr * 0.92, tg * 0.92, tb * 0.92)
+    let rh = y
+    city.box(v3(c.x, rh + 0.55, c.z - hz), hx, 0.55, 0.18)
+    city.box(v3(c.x, rh + 0.55, c.z + hz), hx, 0.55, 0.18)
+    city.box(v3(c.x - hx, rh + 0.55, c.z), 0.18, 0.55, hz)
+    city.box(v3(c.x + hx, rh + 0.55, c.z), 0.18, 0.55, hz)
+
+    addRoofKit(city, steel, neon, pool, c, hx, hz, rh, rg)
+
+    // Signage. Every third building carries a lit sign on one face, and it is
+    // the single cheapest thing in this game that says "city": a coloured
+    // rectangle of light at forty metres up, reflected in the road.
+    if rg.f() < 0.34 {
+        let sr = rg.f()
+        var r = 2.6
+        var g = 0.5
+        var b = 1.9
+        if sr > 0.66 {
+            r = 0.4
+            g = 2.2
+            b = 2.6
+        } else if sr > 0.33 {
+            r = 2.8
+            g = 1.5
+            b = 0.3
+        }
+        let sy = Math.minF64(rh - 3.0, plinthH + 6.0 + rg.range(2.0, 26.0))
+        if sy > plinthH + 2.0 {
+            let along = rg.f() < 0.5
+            let w = rg.range(2.6, 5.2)
+            neon.setUvScale(1.0)
+            neon.setAo(1.0)
+            neon.setTint(r, g, b)
+            city.setTint(0.10, 0.10, 0.12)
+            if along {
+                neon.box(v3(c.x, sy, c.z + halfZ + 0.36), w, w * 0.62, 0.10)
+                city.box(v3(c.x, sy, c.z + halfZ + 0.20), w + 0.30, w * 0.62 + 0.30, 0.16)
+            } else {
+                neon.box(v3(c.x + halfX + 0.36, sy, c.z), 0.10, w * 0.62, w)
+                city.box(v3(c.x + halfX + 0.20, sy, c.z), 0.16, w * 0.62 + 0.30, w + 0.30)
+            }
+            pushLight(pool, v3(c.x, sy, c.z), r * 0.9, g * 0.9, b * 0.9, 26.0)
+        }
+    }
+
+    // The shopfront band at street level, which is the only part of a building
+    // anybody driving past actually reads.
+    neon.setUvScale(1.0)
+    neon.setAo(1.0)
+    var face = 0
+    while face < 4 {
+        if rg.f() < 0.45 {
+            face = face + 1
+            continue
+        }
+        let warm = rg.f()
+        var r = 2.1
+        var g = 1.5
+        var b = 0.8
+        if warm > 0.7 {
+            r = 0.6
+            g = 1.9
+            b = 2.3
+        } else if warm > 0.45 {
+            r = 2.4
+            g = 0.7
+            b = 1.6
+        }
+        neon.setTint(r, g, b)
+        let alongX = face < 2
+        let dir = if face % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+        if alongX {
+            neon.box(v3(c.x, 3.4, c.z + dir * (halfZ + 0.55)), halfX * 0.72, 0.34, 0.08)
+            // The awning over it, in the dark trim colour.
+            city.setTint(0.16, 0.14, 0.16)
+            city.box(v3(c.x, 4.05, c.z + dir * (halfZ + 0.95)), halfX * 0.78, 0.10, 0.55)
+            pushLight(pool, v3(c.x, 3.2, c.z + dir * (halfZ + 1.6)), r, g, b, 16.0)
+        } else {
+            neon.box(v3(c.x + dir * (halfX + 0.55), 3.4, c.z), 0.08, 0.34, halfZ * 0.72)
+            city.setTint(0.16, 0.14, 0.16)
+            city.box(v3(c.x + dir * (halfX + 0.95), 4.05, c.z), 0.55, 0.10, halfZ * 0.78)
+            pushLight(pool, v3(c.x + dir * (halfX + 1.6), 3.2, c.z), r, g, b, 16.0)
+        }
+        face = face + 1
+    }
+}
+
+// Water tanks, plant rooms, a mast and an aircraft beacon. A flat roof with
+// nothing on it is the tell that a building is scenery: everything real up there
+// exists because the building needs it, and the silhouette it makes is what a
+// skyline actually is.
+fn addRoofKit(city: &mut Builder, steel: &mut Builder, neon: &mut Builder, pool: &mut Vec<f64>, c: &Vec3, hx: f64, hz: f64, rh: f64, rg: &mut Rand) {
+    steel.setUvScale(0.9)
+    steel.setAo(0.8)
+    steel.resetXform()
+    // Plant rooms: two or three low boxes, off centre.
+    let boxes = 2 + ((rg.f() * 2.0) as i64)
+    for i in 0..boxes {
+        let bx = c.x + rg.jitter(hx * 0.55)
+        let bz = c.z + rg.jitter(hz * 0.55)
+        let bh = rg.range(1.2, 2.6)
+        steel.setTint(0.34, 0.35, 0.40)
+        steel.box(v3(bx, rh + bh * 0.5, bz), rg.range(0.9, 2.2), bh * 0.5, rg.range(0.9, 2.2))
+        let _ = i
+    }
+    // A water tank on legs, on the taller ones.
+    if hx > 6.0 && rg.f() < 0.55 {
+        let tx = c.x + rg.jitter(hx * 0.4)
+        let tz = c.z + rg.jitter(hz * 0.4)
+        steel.setTint(0.30, 0.26, 0.24)
+        var leg = 0
+        while leg < 4 {
+            let lx = if leg % 2 == 0 {
+                -1.0
+            } else {
+                1.0
+            }
+            let lz = if leg < 2 {
+                -1.0
+            } else {
+                1.0
+            }
+            steel.cylinder(v3(tx + lx * 1.0, rh, tz + lz * 1.0), 0.11, 2.2, 6, false)
+            leg = leg + 1
+        }
+        steel.setTint(0.40, 0.31, 0.26)
+        steel.cylinder(v3(tx, rh + 2.2, tz), 1.45, 3.0, 12, true)
+    }
+    // The mast, and the red light on it that every tall building in the world
+    // carries.
+    if rh > 45.0 {
+        let mh = rg.range(6.0, 16.0)
+        steel.setTint(0.28, 0.29, 0.34)
+        steel.cylinder(v3(c.x, rh, c.z), 0.14, mh, 6, false)
+        neon.setUvScale(1.0)
+        neon.setAo(1.0)
+        neon.setTint(3.4, 0.16, 0.10)
+        neon.box(v3(c.x, rh + mh + 0.3, c.z), 0.34, 0.34, 0.34)
+        pushLight(pool, v3(c.x, rh + mh + 0.3, c.z), 2.6, 0.2, 0.15, 30.0)
+    }
+}
+
+// The lit windows on one tier. Everything unlit is in the facade texture; these
+// are only the rooms with somebody in them, and they are geometry because they
+// have to actually glow and light the street.
+//
+// The grid matches the texture: four floors and six bays to a twelve-metre
+// repeat, so a lit pane lands exactly in an opening rather than across a mullion.
+fn addWindows(neon: &mut Builder, c: &Vec3, halfX: f64, halfZ: f64, y0: f64, y1: f64, rg: &mut Rand) {
+    let floorH = 3.0
+    let bayW = 2.0
+    let e = 0.10
     var face = 0
     while face < 4 {
         let alongX = face < 2
@@ -514,60 +744,58 @@ fn addWindows(neon: &mut Builder, c: &Vec3, halfX: f64, halfZ: f64, height: f64,
         } else {
             halfX
         }
-        let cols = Math.maxI64(2, (span / 2.6) as i64)
+        let cols = Math.maxI64(1, ((2.0 * span - 1.2) / bayW) as i64)
+        let floors = Math.maxI64(1, ((y1 - y0 - 1.0) / floorH) as i64)
         for fl in 0..floors {
-            let y = 3.0 + (fl as f64) * 4.2
-            if y > height - 2.0 {
+            let yb = y0 + 0.9 + (fl as f64) * floorH
+            if yb + 1.7 > y1 {
                 continue
             }
             for col in 0..cols {
-                // A third of the building is asleep. A tower with every window
-                // lit reads as a light box, not as a building.
-                if rg.f() < 0.34 {
+                // Two thirds of the building is asleep. A tower with every
+                // window lit reads as a light box, not as a building.
+                if rg.f() < 0.62 {
                     continue
                 }
-                let t0 = -span + 2.0 * span * ((col as f64) + 0.28) / (cols as f64)
-                let t1 = -span + 2.0 * span * ((col as f64) + 0.72) / (cols as f64)
+                let t0 = -span + 0.6 + (col as f64) * bayW + 0.36
+                let t1 = t0 + bayW * 0.64
                 let warm = rg.f()
-                var r = 0.95
-                var g = 0.78
-                var b = 0.52
-                if warm > 0.72 {
-                    r = 0.30
-                    g = 0.92
-                    b = 1.20
-                } else if warm > 0.52 {
-                    r = 1.10
-                    g = 0.42
-                    b = 0.92
+                var r = 1.35
+                var g = 1.05
+                var b = 0.66
+                if warm > 0.80 {
+                    r = 0.42
+                    g = 1.20
+                    b = 1.55
+                } else if warm > 0.64 {
+                    r = 1.45
+                    g = 0.55
+                    b = 1.10
                 }
-                // A window is a lit room seen through glass, not a lamp. At the
-                // brightness a neon tube wants, a tower of them is a slab of
-                // white and the bloom pass eats the whole skyline.
-                let k = rg.range(0.35, 1.0)
+                let k = rg.range(0.40, 1.0)
                 neon.setTint(r * k, g * k, b * k)
                 neon.setUvScale(1.0)
                 neon.setAo(1.0)
-                let y0 = y
-                let y1 = y + 1.9
+                let ya = yb
+                let yc = yb + 1.7
                 if alongX {
                     let z = c.z + dir * (depth + e)
                     let nrm = v3(0.0, 0.0, dir)
-                    neon.push(v3(c.x + t0, y0, z), nrm, 0.0, 0.0)
-                    neon.push(v3(c.x + t1, y0, z), nrm, 1.0, 0.0)
-                    neon.push(v3(c.x + t1, y1, z), nrm, 1.0, 1.0)
-                    neon.push(v3(c.x + t0, y0, z), nrm, 0.0, 0.0)
-                    neon.push(v3(c.x + t1, y1, z), nrm, 1.0, 1.0)
-                    neon.push(v3(c.x + t0, y1, z), nrm, 0.0, 1.0)
+                    neon.push(v3(c.x + t0, ya, z), nrm, 0.0, 0.0)
+                    neon.push(v3(c.x + t1, ya, z), nrm, 1.0, 0.0)
+                    neon.push(v3(c.x + t1, yc, z), nrm, 1.0, 1.0)
+                    neon.push(v3(c.x + t0, ya, z), nrm, 0.0, 0.0)
+                    neon.push(v3(c.x + t1, yc, z), nrm, 1.0, 1.0)
+                    neon.push(v3(c.x + t0, yc, z), nrm, 0.0, 1.0)
                 } else {
                     let x = c.x + dir * (depth + e)
                     let nrm = v3(dir, 0.0, 0.0)
-                    neon.push(v3(x, y0, c.z + t0), nrm, 0.0, 0.0)
-                    neon.push(v3(x, y0, c.z + t1), nrm, 1.0, 0.0)
-                    neon.push(v3(x, y1, c.z + t1), nrm, 1.0, 1.0)
-                    neon.push(v3(x, y0, c.z + t0), nrm, 0.0, 0.0)
-                    neon.push(v3(x, y1, c.z + t1), nrm, 1.0, 1.0)
-                    neon.push(v3(x, y1, c.z + t0), nrm, 0.0, 1.0)
+                    neon.push(v3(x, ya, c.z + t0), nrm, 0.0, 0.0)
+                    neon.push(v3(x, ya, c.z + t1), nrm, 1.0, 0.0)
+                    neon.push(v3(x, yc, c.z + t1), nrm, 1.0, 1.0)
+                    neon.push(v3(x, ya, c.z + t0), nrm, 0.0, 0.0)
+                    neon.push(v3(x, yc, c.z + t1), nrm, 1.0, 1.0)
+                    neon.push(v3(x, yc, c.z + t0), nrm, 0.0, 1.0)
                 }
             }
         }
@@ -617,7 +845,7 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
     addBarriers(builders[B_WALL], builders[B_NEON], track, pool)
     addFurniture(builders[B_STEEL], builders[B_NEON], track, pool)
     addStartLine(builders[B_MARK], builders[B_STEEL], builders[B_NEON], track, pool)
-    addCity(builders[B_CITY], builders[B_NEON], track, pool)
+    addCity(builders[B_CITY], builders[B_NEON], builders[B_STEEL], track, pool)
     addGround(builders[B_GROUND], track)
 
     var meshes: Vec<Mesh> = Vec.new()
@@ -631,7 +859,7 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
 
     // Road. Dark, rough, and barely metallic: the wet look comes from the
     // roughness variation baked into the surface map, not from metalness.
-    var road = material(TEX_ASPHALT, 0.62, 0.63, 0.70, 0.55, 0.02)
+    var road = material(TEX_ASPHALT, 0.34, 0.34, 0.40, 0.74, 0.02)
     road.normalStrength = 0.7
     // A second copy of the aggregate at a quarter the size. The road runs from
     // under the bumper to four hundred metres away and one texture scale cannot
@@ -666,14 +894,17 @@ pub fn buildWorld(gl: &mut GlContext, track: &Track): World {
     neon.emissive = v3(1.0, 1.0, 1.0)
     mats.push(neon)
 
-    var cityM = material(TEX_CONCRETE, 0.40, 0.41, 0.50, 0.85, 0.05)
-    cityM.normalStrength = 0.9
+    // The facade texture carries the floor lines, the mullions and every unlit
+    // window, so the albedo here is white and the tint on each building is what
+    // colours it.
+    var cityM = material(TEX_FACADE, 1.0, 1.0, 1.0, 0.80, 0.04)
+    cityM.normalStrength = 1.0
     mats.push(cityM)
 
     var glassM = material(TEX_GLASS, 0.05, 0.06, 0.09, 0.10, 0.40)
     mats.push(glassM)
 
-    var ground = material(TEX_ASPHALT, 0.18, 0.17, 0.24, 0.92, 0.0)
+    var ground = material(TEX_ASPHALT, 0.14, 0.13, 0.19, 0.94, 0.0)
     ground.normalStrength = 0.5
     mats.push(ground)
 

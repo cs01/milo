@@ -407,12 +407,14 @@ void main() {
     // printed number on a target face glows and the disc around it does not.
     vec3 col = direct + amb + uEmissive * vTint * mix(vec3(1.0), baseAlbedo, uEmissiveMap);
 
-    // Haze, towards the room's own radiance in the view direction rather than
-    // towards a grey. A hall thirty metres deep with this much light in the air
-    // is what puts the far end of the vault behind the near end.
+    // Haze, towards the sky's own radiance in the view direction rather than
+    // towards a grey, so the far end of the circuit sits in the sunset instead
+    // of in front of it. Thin: at arcade speeds the road four hundred metres
+    // ahead is the road you are about to be on, and fogging it out is how a
+    // bright scene turns back into a grey one.
     float dist = length(uCam - vWorld);
-    float ext = 1.0 - exp(-dist * 0.012);
-    col = mix(col, skyLookup(-v, 2.0), ext * 0.55);
+    float ext = 1.0 - exp(-dist * 0.0026);
+    col = mix(col, skyLookup(-v, 2.0), ext * 0.48);
 
     fragColor = vec4(col, uAlpha);
     // --debug 3 shows the occlusion buffer on its own, which is the only way to

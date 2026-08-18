@@ -353,10 +353,15 @@ pub fn main(): i32 {
             }
             if Math.abs(ds) < world.pads[pi + 2] && Math.abs(player.lateral - world.pads[pi + 1]) < world.pads[pi + 3] {
                 if padCooldown <= 0.0 {
+                    // No screen flash. A white frame is the arcade reflex and it
+                    // is the wrong tool here: it says "something happened" for
+                    // one sixtieth of a second and then the road looks exactly
+                    // as it did before. What the pad is worth has to be visible
+                    // for as long as the pad is worth it, which is what the
+                    // streak and the lens do below.
                     player.padSurge()
-                    cam.kick(0.42)
-                    gfx.flash = Math.minF64(0.34, gfx.flash + 0.26)
-                    padCooldown = 0.45
+                    cam.kick(0.30)
+                    padCooldown = 0.40
                 }
             }
             pi = pi + PAD_FLOATS
@@ -366,11 +371,6 @@ pub fn main(): i32 {
         // The pads pulse. One sine on the material's emissive is the whole
         // animation: the geometry is static and the tint in it already carries
         // the per-chevron brightness ramp.
-        // The pad flash has to be decayed here: nothing in the renderer does it,
-        // and left alone it pins a constant additive white over the whole frame
-        // from the first pad to the end of the race.
-        gfx.flash = Math.maxF64(0.0, gfx.flash - dt * 1.9)
-
         let pulse = 0.72 + 0.46 * Math.sin(gfx.time * 7.0)
         world.mats[B_PAD].emissive = v3(pulse, pulse, pulse)
 
@@ -380,7 +380,7 @@ pub fn main(): i32 {
         // effect has to be absent for most of the speed range and arrive
         // suddenly near the top of it. The bottle then doubles it.
         let sp01 = Math.clampF64(Math.abs(player.forwardSpeed()) / 95.0, 0.0, 1.4)
-        let rushWant = Math.maxF64(0.0, (sp01 - 0.62) / 0.38) + 1.15 * player.boost
+        let rushWant = Math.maxF64(0.0, (sp01 - 0.62) / 0.38) + 1.15 * player.boost + 0.85 * player.padLevel()
         gfx.rush = gfx.rush + (Math.minF64(rushWant, 1.7) - gfx.rush) * (1.0 - Math.exp(-7.0 * dt))
         // A capture-only orbit, for looking at the car itself rather than at the
         // race: the chase camera is the wrong tool for judging bodywork.

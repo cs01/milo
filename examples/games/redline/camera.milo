@@ -146,12 +146,12 @@ impl Chase {
         // The boost widens the lens and drops the camera back. A turbo you can
         // only read off a gauge is a number; a turbo that changes the shape of
         // the frame is a turbo.
-        let want = FOV_BASE + FOV_SPEED * k * k + 0.30 * car.boost
+        let want = FOV_BASE + FOV_SPEED * k * k + 0.30 * car.boost + 0.20 * car.padLevel()
         self.fov = self.fov + (want - self.fov) * (1.0 - Math.exp(-6.0 * dt))
         // A constant tremble that only exists at the top of the speed range, so
         // the car is visibly working for the last thirty miles an hour rather
         // than gliding.
-        let rumble = Math.maxF64(0.0, k - 0.66) * 0.62 + 0.30 * car.boost
+        let rumble = Math.maxF64(0.0, k - 0.66) * 0.62 + 0.30 * car.boost + 0.22 * car.padLevel()
         self.shake = Math.maxF64(rumble, self.shake - dt * 2.4)
         self.shakeT = self.shakeT + dt
     }

@@ -456,45 +456,59 @@ fn addStartLine(mark: &mut Builder, steel: &mut Builder, neon: &mut Builder, tra
 // can land squarely on another.
 fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &Track, pool: &mut Vec<f64>) {
     var rg = rand(0x5eed1234)
-    // Two rows, not one scatter. A single random offset produces a city with an
-    // average distance from the road and no street: what makes a street race
-    // read as a street is that one row of facades stands ON the kerb, tall
-    // enough to leave the top of the frame, and everything else is skyline
-    // behind it. Scattering over the same range gives every building a
-    // one-in-N chance of being that wall and so builds it nowhere.
-    var s = 0.0
-    while s < track.length {
-        var side = -1.0
-        while side < 2.0 {
-            // The front row: shallow blocks shoulder to shoulder along the
-            // pavement, stepped along the road so the facade line is not one
-            // extruded slab.
-            if rg.f() > 0.12 {
-                let halfZ = rg.range(7.0, 13.0)
-                let halfX = rg.range(5.0, 9.0)
-                var height = rg.range(26.0, 52.0)
-                if rg.f() > 0.72 {
-                    height = rg.range(58.0, 96.0)
-                }
-                let off = (WALL + 1.4 + rg.range(0.0, 2.2) + halfX) * side
-                tryBuilding(city, neon, steel, pool, track, rg.f(), off, s + rg.jitter(3.0), halfX, halfZ, height, rg)
+
+    // The front row is a CONTINUOUS wall, walked separately per side and stepped
+    // by each block's own length so the next one starts where the last one
+    // ended. Placing it on the same fixed grid the towers use leaves a gap
+    // wherever a block is narrower than the step, and one gap in a street wall
+    // is worth more than all the buildings around it: the eye goes straight to
+    // the hole and reads the whole row as scenery standing in a field.
+    //
+    // Consecutive blocks are deliberately overlapped a little. On a curve the
+    // road turns between one block and the next while the boxes stay
+    // world-axis-aligned, so two that merely touch on the straight open a wedge
+    // of daylight between them on the corner.
+    var side = -1.0
+    while side < 2.0 {
+        var s = 0.0
+        while s < track.length {
+            let halfZ = rg.range(6.5, 11.0)
+            let halfX = rg.range(5.0, 9.0)
+            // Height is the only thing left to vary, and it carries the whole
+            // silhouette now that the plan is a solid run.
+            var height = rg.range(24.0, 48.0)
+            let tall = rg.f()
+            if tall > 0.80 {
+                height = rg.range(80.0, 135.0)
+            } else if tall > 0.52 {
+                height = rg.range(52.0, 78.0)
             }
-            // The back row: towers, far enough behind the front row that the
-            // gaps between the near blocks look into a city rather than into
-            // the ground plane.
-            if rg.f() > 0.42 {
+            let off = (WALL + 1.3 + halfX) * side
+            tryBuilding(city, neon, steel, pool, track, off, s + halfZ, halfX, halfZ, height, rg)
+            s = s + halfZ * 1.62
+        }
+        side = side + 2.0
+    }
+
+    // The back row: towers, far enough behind the front wall that anything seen
+    // over the top of it is a city rather than the ground plane.
+    var t = 0.0
+    while t < track.length {
+        var bside = -1.0
+        while bside < 2.0 {
+            if rg.f() > 0.34 {
                 let halfX = rg.range(9.0, 18.0)
                 let halfZ = rg.range(9.0, 18.0)
-                var height = rg.range(60.0, 120.0)
-                if rg.f() > 0.62 {
-                    height = rg.range(125.0, 200.0)
+                var height = rg.range(70.0, 130.0)
+                if rg.f() > 0.60 {
+                    height = rg.range(135.0, 210.0)
                 }
-                let off = (WALL + 26.0 + rg.range(0.0, 46.0) + Math.maxF64(halfX, halfZ)) * side
-                tryBuilding(city, neon, steel, pool, track, rg.f(), off, s + rg.jitter(14.0), halfX, halfZ, height, rg)
+                let off = (WALL + 24.0 + rg.range(0.0, 44.0) + Math.maxF64(halfX, halfZ)) * bside
+                tryBuilding(city, neon, steel, pool, track, off, t + rg.jitter(12.0), halfX, halfZ, height, rg)
             }
-            side = side + 2.0
+            bside = bside + 2.0
         }
-        s = s + 17.0
+        t = t + 26.0
     }
 }
 
@@ -502,7 +516,7 @@ fn addCity(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, track: &
 // itself in two places, so a block placed off one straight can land squarely on
 // another: `locate` with a cold hint scans the whole table, which is exactly
 // what is wanted at build time and costs nothing there.
-fn tryBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, track: &Track, _u: f64, off: f64, s: f64, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
+fn tryBuilding(city: &mut Builder, neon: &mut Builder, steel: &mut Builder, pool: &mut Vec<f64>, track: &Track, off: f64, s: f64, halfX: f64, halfZ: f64, height: f64, rg: &mut Rand) {
     let c = track.pointAt(s, off)
     let probe = track.locate(c.x, c.z, 0)
     if Math.abs(probe.lateral) < WALL + Math.maxF64(halfX, halfZ) + 1.0 {

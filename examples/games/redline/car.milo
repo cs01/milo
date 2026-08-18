@@ -71,8 +71,21 @@ let WHEEL_W: f64 = 0.36
 // below went up much further than this did.
 let TOP_SPEED: f64 = 108.0
 
-// Nitrous adds this fraction on top, and it is the only thing that does.
+// Nitrous adds this fraction on top.
 let BOOST_GAIN: f64 = 0.52
+
+// A boost pad, and how long it lasts. Three and a half seconds at 100 m/s is
+// three hundred and fifty metres, better than a tenth of the lap: long enough
+// that the car is visibly travelling faster down a stretch of road rather than
+// jumping and settling.
+let PAD_TIME: f64 = 3.5
+
+let PAD_GAIN: f64 = 0.40
+
+// Thrust the pad adds on top of the engine, in m/s^2. Bigger than the bottle's:
+// the bottle is a resource you spend and the pad is a reward you drove over, so
+// the pad has to be the one you can feel arrive.
+let PAD_PUSH: f64 = 34.0
 
 let BOOST_DRAIN: f64 = 0.26
 
@@ -857,6 +870,12 @@ pub struct Car {
     // faster than either of those.
     boost: f64,
     tank: f64,
+    // Seconds of boost-pad thrust left. A pad is a sustained push, not an
+    // impulse: adding the speed in one frame is over before the eye can read it
+    // and the drag has eaten it back within a second, so what the player gets is
+    // a bang and no journey. Held open instead, the pad is a stretch of road you
+    // are visibly travelling faster down.
+    pad: f64,
     colour: Vec3,
 }
 
@@ -878,6 +897,7 @@ pub fn newCar(colour: Vec3): Car {
         scraping: false,
         boost: 0.0,
         tank: 1.0,
+        pad: 0.0,
         colour: colour,
     }
 }
@@ -905,16 +925,21 @@ impl Car {
     // ramp. It also part-fills the tank, which is what stops a lap being one
     // long straight with the turbo empty.
     fn padSurge(self: &mut Self) {
-        let f = self.forward()
-        let sp = self.vel.dot(f)
-        // Bounded: over the pad-rich part of the lap these would otherwise stack
-        // into an unsteerable car. The cap is above top speed on purpose so a
-        // pad taken flat out is still worth something.
-        let want = Math.minF64(sp + 24.0, TOP_SPEED * 1.16)
-        if want > sp {
-            self.vel = self.vel + f.scale(want - sp)
+        // Open the window rather than adding speed here. Overlapping pads
+        // refresh it instead of stacking, so a run of them is one long push and
+        // not an unsteerable car.
+        self.pad = Math.maxF64(self.pad, PAD_TIME)
+        self.tank = Math.minF64(1.0, self.tank + 0.22)
+    }
+
+    // 0 to 1 over the life of a pad push, for anything cosmetic that wants to
+    // ramp with it. Full for most of the window and easing out at the end, so
+    // the car does not fall off the boost in one frame.
+    fn padLevel(self: &Self): f64 {
+        if self.pad <= 0.0 {
+            return 0.0
         }
-        self.tank = Math.minF64(1.0, self.tank + 0.30)
+        return Math.minF64(1.0, self.pad / 0.55)
     }
 
     fn forwardSpeed(self: &Self): f64 {
@@ -961,7 +986,11 @@ impl Car {
 
         // Engine. The falloff toward the top speed is what makes the last twenty
         // mph take the length of a straight to find.
-        let top = TOP_SPEED * (1.0 + BOOST_GAIN * self.boost)
+        // The pad window runs down whatever else is happening: it is a stretch
+        // of road, not a button.
+        self.pad = Math.maxF64(0.0, self.pad - dt)
+        let pk = self.padLevel()
+        let top = TOP_SPEED * (1.0 + BOOST_GAIN * self.boost + PAD_GAIN * pk)
         if throttle > 0.0 {
             let head = 1.0 - Math.clampF64(vf / top, 0.0, 1.0)
             vf = vf + ENGINE * throttle * head * dt
@@ -970,6 +999,9 @@ impl Car {
         // shove rather than only as a slightly higher ceiling that takes the
         // length of a straight to reach.
         vf = vf + 26.0 * self.boost * dt
+        // The pad pushes the same way the bottle does, and harder, so hitting
+        // one at speed is felt rather than read off the gauge.
+        vf = vf + PAD_PUSH * pk * dt
         // Brakes stop the car and then reverse it, slowly. A racer with no
         // reverse is a racer where facing the wrong way ends the run.
         if brake > 0.0 {

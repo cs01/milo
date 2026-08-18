@@ -39,7 +39,7 @@ from "./signs" import {
     FACE_COLS, MEGA_BONUS
 }
 from "./world" import {
-    DECK_Y
+    DECK_Y, DROP_COUNT
 }
 
 // How far above the hinge pin the middle of the disc sits, per kind.
@@ -84,7 +84,10 @@ pub fn valueOf(kind: i64): i64 {
     if kind == KIND_5000 {
         return 5000
     }
-    return MEGA_BONUS
+    // The marquee quotes what the whole rack is worth; one disc is a share of
+    // it. Clearing the drop before it expires is the only way to be paid the
+    // number on the sign.
+    return MEGA_BONUS / DROP_COUNT
 }
 
 // How hard the face glows on its own. The two at the back of the ladder are lit
@@ -604,33 +607,51 @@ impl Targets {
         self.stepShards(dt)
     }
 
-    // Put the gold target on whichever rig is nearest to (x, z) and free to
-    // take it. Returns where it landed, or -1 — the drone flies over the aisle
-    // as well as over the stage, and dropping a bonus onto nothing is better
-    // than teleporting one to the far end of the room.
-    fn dropBonus(self: &mut Self, x: f64, z: f64, hold: f64): i64 {
-        var best = -1
-        var bestD = 5.0
-        for i in 0..self.rigs.len {
-            if !self.eligible[i] || self.rigs[i].state != ST_DOWN || self.rigs[i].cooldown > 0.0 {
-                continue
+    // A pop of light at a point, borrowing the impact burst. The drone uses it
+    // to announce a drop: four targets appearing in silence is a thing you find
+    // out about afterwards.
+    fn flash(self: &mut Self, at: Vec3, colour: Vec3) {
+        self.burstT = 0.16
+        self.burstPos = at
+        self.burstColor = colour
+    }
+
+    // Empty the drone's rack onto the rigs nearest to (x, z).
+    //
+    // Nearest-first, one at a time, rather than "every rig within a radius":
+    // the drone flies over the aisle as well as over the stage, and a radius
+    // either drops nothing out there or drops the whole rack on two rigs when
+    // it is over the middle. Returns how many actually landed, which is what
+    // decides whether the marquee lights.
+    fn dropBonus(self: &mut Self, x: f64, z: f64, hold: f64, count: i64): i64 {
+        var placed = 0
+        for _n in 0..count {
+            var best = -1
+            var bestD = 7.0
+            for i in 0..self.rigs.len {
+                if !self.eligible[i] || self.rigs[i].state != ST_DOWN || self.rigs[i].cooldown > 0.0 {
+                    continue
+                }
+                let dx = self.rigs[i].pos.x - x
+                let dz = self.rigs[i].pos.z - z
+                let d = Math.sqrt(dx * dx + dz * dz)
+                if d < bestD {
+                    bestD = d
+                    best = i
+                }
             }
-            let dx = self.rigs[i].pos.x - x
-            let dz = self.rigs[i].pos.z - z
-            let d = Math.sqrt(dx * dx + dz * dz)
-            if d < bestD {
-                bestD = d
-                best = i
+            if best < 0 {
+                break
             }
+            self.rigs[best].kind = KIND_BONUS
+            self.rigs[best].hitRadius = radiusOf(KIND_BONUS) + 0.06
+            // Each one held a little longer than the last, so the rack does not
+            // expire as a block and there is a reason to take them in order.
+            self.raise(best, hold + 0.35 * (placed as f64))
+            self.rigs[best].cooldown = 1.0
+            placed = placed + 1
         }
-        if best < 0 {
-            return -1
-        }
-        self.rigs[best].kind = KIND_BONUS
-        self.rigs[best].hitRadius = radiusOf(KIND_BONUS) + 0.06
-        self.raise(best, hold)
-        self.rigs[best].cooldown = 1.0
-        return best
+        return placed
     }
 
     // A hitscan ray against every standing target. Returns the nearest.
@@ -817,7 +838,7 @@ impl Targets {
         if self.burstT > 0.0 {
             // A sphere that grows and dims over a tenth of a second, far above
             // the bloom threshold, so what you see is the flare not the ball.
-            let k = self.burstT / 0.11
+            let k = Math.minF64(self.burstT / 0.11, 1.0)
             let r = 0.05 + 0.20 * (1.0 - k)
             var m = self.burstMat
             m.emissive = v3(10.0 * k + self.burstColor.x * 4.0 * k, 9.0 * k + self.burstColor.y * 4.0 * k, 7.0 * k + self.burstColor.z * 4.0 * k)

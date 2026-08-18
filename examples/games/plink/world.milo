@@ -23,7 +23,7 @@ from "gl" import {
     GlContext, Mesh
 }
 from "./mat4" import {
-    identity, multiply, rotationY, rotationZ, translation
+    identity, multiply, rotationX, rotationY, rotationZ, translation
 }
 from "./mesh" import {
     Builder, builder
@@ -96,6 +96,7 @@ pub struct World {
     // separate meshes because the rings spin and the body does not.
     droneMesh: Mesh,
     rotorMesh: Mesh,
+    payloadMesh: Mesh,
     droneMat: Material,
     rotorMat: Material,
 }
@@ -465,15 +466,15 @@ fn addGantry(chrome: &mut Builder, dark: &mut Builder, neon: &mut Builder, glass
 // a point above the back of the stage: the effect a spinning gobo gives, without
 // a volumetric pass to give it.
 fn addRays(neon: &mut Builder) {
-    let o = v3(0.0, 6.6, 21.5)
+    let o = v3(0.0, 7.0, 21.5)
     for k in 0..14 {
         let a = 2.0 * Math.pi() * (k as f64) / 14.0 + 0.11
         let d = v3(Math.cos(a), Math.sin(a), 0.0)
         let s = v3(-Math.sin(a), Math.cos(a), 0.0)
         let tip = o + d.scale(6.0)
-        let w0 = 0.05
-        let w1 = 0.15
-        neon.setTint(0.26, 0.32, 0.52)
+        let w0 = 0.025
+        let w1 = 0.075
+        neon.setTint(1.05, 1.30, 2.30)
         neon.quad(o + s.scale(-w0), tip + s.scale(-w1), tip + s.scale(w1), o + s.scale(w0), 1.0, 1.0)
         neon.quad(o + s.scale(w0), tip + s.scale(w1), tip + s.scale(-w1), o + s.scale(-w0), 1.0, 1.0)
         neon.setTint(1.0, 1.0, 1.0)
@@ -629,8 +630,8 @@ fn addMarquee(sign: &mut Builder, chrome: &mut Builder, neon: &mut Builder, dark
     let z = 19.5
     let x0 = -4.1
     let x1 = 4.1
-    let y0 = 5.95
-    let y1 = 7.55
+    let y0 = 6.35
+    let y1 = 7.85
 
     dark.setTint(0.35, 0.36, 0.45)
     dark.boxSpan(v3(x0 - 0.22, y0 - 0.22, z), v3(x1 + 0.22, y1 + 0.22, z + 0.30))
@@ -776,21 +777,34 @@ fn addSpeakers(dark: &mut Builder, chrome: &mut Builder, neon: &mut Builder, sid
 
 pub let DRONE_ARM: f64 = 1.45
 
-// The drone's patrol. Two incommensurate periods on x and z, so it never
-// repeats a pass and the player cannot learn where the next bonus lands; the
-// height wobble is what stops it reading as a decal slid across the picture.
+// How many gold targets it carries, and therefore how many it drops at once.
+pub let DROP_COUNT: i64 = 4
+
+// The drone's patrol: a figure eight, x at one frequency and z at twice it.
+//
+// The old path used two incommensurate frequencies so it would never repeat a
+// pass, and that is exactly what made it look drunk — a Lissajous with unrelated
+// periods brings the velocity to a near stop every so often, and a heading taken
+// from a velocity that is about to vanish swings through a hundred and eighty
+// degrees on its way out. A figure eight never stops: the two components hit
+// zero a quarter period apart, by construction, so there is always a direction
+// to point at and the heading is smooth all the way round.
 pub fn dronePos(time: f64): Vec3 {
-    return v3(Math.sin(time * 0.29) * 5.6, 3.70 + Math.sin(time * 0.61) * 0.16, 12.4 + Math.sin(time * 0.17) * 4.2)
+    let w = time * 0.30
+    return v3(Math.sin(w) * 5.4, 3.62 + Math.sin(w * 3.0) * 0.12, 9.0 + Math.sin(w * 2.0) * 2.0)
+}
+
+// The velocity, in closed form. Differentiating the path rather than sampling it
+// twice is what keeps the heading clean at the crossover, where a finite
+// difference over a fifth of a second is averaging across the turn.
+pub fn droneVel(time: f64): Vec3 {
+    let w = time * 0.30
+    return v3(Math.cos(w) * 5.4, Math.cos(w * 3.0) * 0.36, Math.cos(w * 2.0) * 4.0)
 }
 
 // Which way it is travelling, so it banks and turns into its own path.
 pub fn droneYaw(time: f64): f64 {
-    let a = dronePos(time)
-    let b = dronePos(time + 0.25)
-    let d = b - a
-    if d.len() < 1.0e-5 {
-        return 0.0
-    }
+    let d = droneVel(time)
     return Math.atan2(d.x, d.z)
 }
 
@@ -819,11 +833,32 @@ fn droneGeometry(b: &mut Builder) {
         b.setTint(0.20, 1.40, 0.45)
         ring(b, p, v3(0.0, 1.0, 0.0), 0.52, 0.030, 18)
     }
-    // A lamp underneath, aimed at the stage.
+    // The rack the payload hangs off, and the lamp that lights it.
+    b.setTint(0.16, 0.70, 0.28)
+    bar(b, v3(-0.70, -0.30, 0.0), v3(0.70, -0.30, 0.0), 0.045, 6)
     b.setTint(2.60, 2.40, 1.10)
-    b.sphere(v3(0.0, -0.22, 0.0), 0.16, 6, 10)
+    b.sphere(v3(0.0, -0.20, 0.0), 0.13, 6, 10)
     b.setTint(1.0, 1.0, 1.0)
     b.setUvScale(1.0)
+}
+
+// The payload itself: four gold discs slung under the rack. Drawn as its own
+// mesh so it can be left out for the seconds after a drop — the drone visibly
+// carries the bonus, visibly lets go of it, and comes back round loaded again.
+// A machine that hands out a prize with nothing in its hands is a machine the
+// player has no reason to watch.
+fn payloadGeometry(b: &mut Builder) {
+    for i in 0..DROP_COUNT {
+        let x = -0.525 + 0.35 * (i as f64)
+        b.setTint(0.55, 0.58, 0.68)
+        bar(b, v3(x, -0.30, 0.0), v3(x, -0.46, 0.0), 0.022, 5)
+        // Edge on to the player, the way a coin sits in a rack.
+        b.setTint(2.60, 1.90, 0.45)
+        ring(b, v3(x, -0.62, 0.0), v3(0.0, 0.0, 1.0), 0.155, 0.030, 14)
+        b.setTint(1.80, 1.25, 0.22)
+        ring(b, v3(x, -0.62, 0.0), v3(0.0, 0.0, 1.0), 0.095, 0.024, 12)
+        b.setTint(1.0, 1.0, 1.0)
+    }
 }
 
 // One rotor, at the origin in its own frame. Drawn six times with a spin.
@@ -914,6 +949,10 @@ pub fn buildWorld(gl: &mut GlContext, marqueeTex: i64, flatTex: i64, bannerTex: 
     rotorGeometry(rb)
     var rotorMesh = Mesh.new(gl, sceneAttrs())
     rotorMesh.upload(rb.data.clone())
+    var pb = builder()
+    payloadGeometry(pb)
+    var payloadMesh = Mesh.new(gl, sceneAttrs())
+    payloadMesh.upload(pb.data.clone())
 
     var mats: Vec<Material> = Vec.new()
 
@@ -981,6 +1020,7 @@ pub fn buildWorld(gl: &mut GlContext, marqueeTex: i64, flatTex: i64, bannerTex: 
         mats: mats,
         droneMesh: droneMesh,
         rotorMesh: rotorMesh,
+        payloadMesh: payloadMesh,
         droneMat: droneMat,
         rotorMat: rotorMat,
     }
@@ -992,11 +1032,26 @@ impl World {
     // follows between waves.
     fn droneMatrix(self: &Self, time: f64): Vec<f32> {
         let p = dronePos(time)
-        // Banked into the turn. The roll is taken from how fast the yaw is
-        // changing, which is one finite difference and reads as flying rather
-        // than as sliding.
-        let bank = (droneYaw(time + 0.2) - droneYaw(time)) * 1.6
-        return multiply(translation(p), multiply(rotationY(droneYaw(time)), rotationZ(Math.clampF64(bank, -0.45, 0.45))))
+        // Banked into the turn, from how fast the heading is changing. The
+        // difference is taken over a twentieth of a second and the two samples
+        // are unwrapped against each other first: without that, one sample
+        // either side of the +/-pi seam reports a turn rate of sixty radians a
+        // second and the drone snaps onto its back for a frame. The clamp is
+        // deliberately shallow: the body is a flat hexagon and past about
+        // fifteen degrees it stops reading as a bank and starts reading as a
+        // dropped plate.
+        let y0 = droneYaw(time)
+        var y1 = droneYaw(time + 0.05)
+        while y1 - y0 > Math.pi() {
+            y1 = y1 - 2.0 * Math.pi()
+        }
+        while y1 - y0 < -Math.pi() {
+            y1 = y1 + 2.0 * Math.pi()
+        }
+        let bank = Math.clampF64((y1 - y0) * 7.0, -0.26, 0.26)
+        // and a touch of nose-down when it is climbing away from the stage
+        let pitch = Math.clampF64(-droneVel(time).y * 0.10, -0.10, 0.10)
+        return multiply(translation(p), multiply(rotationY(y0), multiply(rotationX(pitch), rotationZ(bank))))
     }
 
     fn rotorMatrix(self: &Self, time: f64, i: i64): Vec<f32> {
@@ -1012,6 +1067,7 @@ impl World {
     fn free(self: Self, gl: &mut GlContext) {
         self.droneMesh.free(gl)
         self.rotorMesh.free(gl)
+        self.payloadMesh.free(gl)
         var meshes = self.meshes
         while meshes.len > 0 {
             let m = meshes.pop()!

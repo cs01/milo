@@ -35,10 +35,18 @@ Consecutive hits build a multiplier to 6x, and the machine pushes harder as the
 clock runs down: more discs up at once, less time on each. A round is 60 seconds.
 
 **The mega bonus** is the number on the marquee, and the drone is how you get it.
-It patrols the hall on two incommensurate periods so it never repeats a pass, and
-every thirteen seconds it drops a gold `BONUS` target onto whichever rig it
-happens to be over. The bar lights up when one is out. It holds for under four
-seconds.
+Look under it: four gold discs hang off its rack, and every thirteen seconds it
+dumps all four onto the rigs nearest to wherever it happens to be, with a flash
+to say so. The bar lights up while they are out, each holds a third of a second
+longer than the last, and each pays a quarter of the marquee — so the number on
+the sign is what a *clean* rack is worth. Then it flies a lap with an empty rack
+and comes back loaded.
+
+It flies a figure eight rather than a wander: x at one frequency and z at twice
+it. Two unrelated frequencies never repeat a pass, which sounds better and looks
+drunk, because such a path brings the velocity to a near stop and a heading taken
+from a vanishing velocity swings through a hundred and eighty degrees on the way
+out.
 
 Nothing in this room that looks like a target is unshootable. There is no
 decoration shaped like a disc: a thing you cannot shoot that looks exactly like a

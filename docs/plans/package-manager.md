@@ -195,7 +195,10 @@ Should packages be able to declare a public surface (only listed names importabl
 
   // advisory only — never affects linking, @link is the source of truth.
   // Used solely to turn "library not found: SDL2" into an install instruction.
-  "nativeHints": { "SDL2": { "brew": "sdl2", "apt": "libsdl2-dev" } }
+  "nativeHints": { "SDL2": { "brew": "sdl2", "apt": "libsdl2-dev" } },
+
+  // project-wide warning levels, the manifest form of `--deny=` / `--allow=`
+  "lints": { "deny": ["single-variant-match"], "allow": ["index-clone"] }
 }
 ```
 
@@ -255,6 +258,13 @@ than guessed at.
 `lib` resolution keeps today's fallback chain (`lib.milo`, then `<pkgname>.milo`) so existing cache layouts still resolve.
 
 **`milo` version constraint earns its place.** The language moves fast. A package written against 0.3 syntax must fail with `http2 needs milo >=0.4, you have 0.3.2` — not a parse error 40 lines into someone else's file.
+
+**`lints` is how a project-wide lint level reaches the editor.** `--deny=` only exists on a
+command line, and the LSP has none, so before this an opt-in lint could be enforced in CI and
+be invisible in the editor where the code is written. The compiler and the LSP read the same
+nearest-`milo.json`, and a command-line flag still wins over it, so a one-off build never
+requires editing the project file. Names are validated at parse time: an unknown warning is an
+error, on the same reasoning as `--deny=unused-varibale` being one.
 
 **`nativeHints` is advisory by construction.** It cannot drift into being wrong-but-relied-upon, because nothing reads it during linking. `main.ts:671` already prints a note naming the `@link` that requested a missing lib; this upgrades that note to name the install command.
 

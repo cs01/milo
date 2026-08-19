@@ -2,6 +2,7 @@
 // the surface described in src/cli-help.ts.
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync, statSync } from "fs";
 import { WARNING_NAMES } from "./warnings";
+import { projectLints } from "./pkg";
 import { execSync, spawnSync, spawn } from "child_process";
 import { guardedRun, monitorPidTree, DEFAULT_MEM_MB } from "../scripts/guard";
 import { fileURLToPath } from "url";
@@ -1588,6 +1589,15 @@ function parseArgs(args: string[]): { output: string | null; source: string | nu
         + (near.length ? `\n  did you mean: ${near.join(", ")}?` : `\n  known warnings: ${WARNING_NAMES.join(", ")}`));
       process.exit(1);
     }
+  }
+  // A milo.json above the source can set lint levels for the whole project, which is how
+  // the LSP learns them too (see lsp.ts). Flags win: an explicit `--allow=x` on the command
+  // line has to be able to silence a lint the manifest denies, or a one-off build cannot be
+  // done without editing the project file.
+  if (source) {
+    const project = projectLints(dirname(resolve(source)));
+    for (const n of project.denied) if (!allowed.has(n) && !expected.has(n)) denied.add(n);
+    for (const n of project.allowed) if (!denied.has(n)) allowed.add(n);
   }
   return { output, source, rest, optFlag, warningConfig: { denied, allowed, expected, maxStackArrayBytes }, noEntry, safetyLevel, sanitize, targetName, emitHeader, emitDebug, heapSize, overflowChecks, contractChecks, staticDeps, emitAll, emitSpans, stripPanicLocations };
 }

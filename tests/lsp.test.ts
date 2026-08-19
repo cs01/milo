@@ -8,6 +8,8 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { spawn, type Subprocess } from "bun";
 import { join } from "path";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 
 const COMPILER = join(import.meta.dir, "..", "src", "main.ts");
 
@@ -238,6 +240,22 @@ pub fn main(): i32 {
 `;
 const KEYWORD_URI = "file:///tmp/milo-lsp-keyword.milo";
 
+// An off-by-default lint reaches the editor only through the project's milo.json, so this
+// needs a real directory on disk rather than the in-memory /tmp URIs the other docs use.
+const LINTS_DIR = mkdtempSync(join(tmpdir(), "milo-lsp-lints-"));
+writeFileSync(join(LINTS_DIR, "milo.json"), `{ "name": "lspdemo", "version": "0.1.0", "lints": { "deny": ["single-variant-match"] } }\n`);
+const LINTS_URI = `file://${join(LINTS_DIR, "main.milo")}`;
+const LINTS_SRC = `fn sink(x: i64) { print(x.toString()) }
+
+fn main() {
+    let o = Option.Some(3)
+    match o {
+        Option.Some(s) => { sink(s) }
+        Option.None => {}
+    }
+}
+`;
+
 let proc: Subprocess<"pipe", "pipe", "inherit">;
 let buf = new Uint8Array(0);
 const pending = new Map<number, (v: any) => void>();
@@ -291,7 +309,7 @@ beforeAll(async () => {
   })();
   await req(1, "initialize", { capabilities: {} });
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
-  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC]] as const) {
+  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC], [LINTS_URI, LINTS_SRC]] as const) {
     await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "milo", version: 1, text } } });
   }
 });
@@ -341,6 +359,24 @@ test("shadowing a stdlib fn with a different signature is a squiggled diagnostic
   // Squiggled on the fn name (`strIndexOf` starts at line 0, char 3), not floating at file top.
   expect(shadow.range.start.line).toBe(0);
   expect(shadow.range.start.character).toBe(3);
+});
+
+test("a lint denied in milo.json is published, squiggled on the match keyword", async () => {
+  const deadline = Date.now() + 4000;
+  let diags: any[] | undefined;
+  while (Date.now() < deadline) {
+    diags = diagnosticsByUri.get(LINTS_URI);
+    if (diags && diags.length) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  const d = diags?.find((x: any) => /only acts on one variant/.test(x.message));
+  expect(d).toBeTruthy();
+  // `match` is on 0-based line 4, column 4, and the range covers the keyword, not the
+  // whole-file fallback a span-less diagnostic collapses to (line 0, chars 0..1).
+  expect(d.range.start).toEqual({ line: 4, character: 4 });
+  expect(d.range.end).toEqual({ line: 4, character: 9 });
+  expect(d.severity).toBe(1); // denied, so an error
+  expect(d.message).toContain("if let Option.Some(s) = o");
 });
 
 test("hover on builtin Vec instance methods (.push / .pop) shows a specialized sig", async () => {

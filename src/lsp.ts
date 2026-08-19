@@ -11,6 +11,7 @@ import { TypeChecker, type CheckResult } from "./checker";
 import { BUILTIN_MEMBERS, memberDetail, type BuiltinMember, type BuiltinReceiver } from "./builtin-members";
 import { resolveImports } from "./resolver";
 import { ParseError, type Diagnostic } from "./diagnostics";
+import { projectLints } from "./pkg";
 import type { Program, Function, Stmt, Expr, Span } from "./ast";
 import { declaredType } from "./ast";
 import { typeName as formatTypeName } from "./types";
@@ -302,7 +303,10 @@ function validateDocument(uri: string) {
     const parsed = new Parser(tokens, source, docPath).parse();
     const sourceDir = uri.startsWith("file://") ? dirname(fileURLToPath(uri)) : ".";
     const program = resolveImports(parsed, sourceDir, hostTarget, docPath);
-    diagnostics = new TypeChecker().check(program).diagnostics
+    // Lint levels come from the project's milo.json, since an editor has no command line
+    // to type `--deny=` on. Without this an off-by-default lint can only ever be seen in a
+    // terminal, which is the wrong half of the tooling to put a style rule in.
+    diagnostics = new TypeChecker({ ...projectLints(sourceDir), expected: new Set<string>() }).check(program).diagnostics
       .map(d => hoistIfImported(d, docPath));
     buildSymbolIndex(uri, program);
   } catch (e: any) {

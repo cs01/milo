@@ -25,6 +25,7 @@ export const WARNINGS: WarningInfo[] = [
   { name: "missing-interpolation" },
   { name: "nan-comparison" },
   { name: "shadows-stdlib-override" },
+  { name: "single-variant-match", offByDefault: true },
   { name: "unused-import", offByDefault: true },
   { name: "unused-move", offByDefault: true },
   { name: "unused-result" },

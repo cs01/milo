@@ -494,6 +494,11 @@ export class TypeChecker {
     // that work fine), so warning by default would nag every graphics program. The
     // always-on hover note already surfaces the size; projects opt into the hard lint.
     if (!config.denied.has("large-stack-array") && !config.expected?.has("large-stack-array")) config.allowed.add("large-stack-array");
+    // single-variant-match is OFF while the tree is still being swept. The rewrite it asks
+    // for is always an improvement, but the shape is everywhere: 304 sites in src-milo, 110
+    // in milojs, 55 in examples/ at the census that shipped it. Default-on before the sweep
+    // would bury every real warning under it. Flip it on once those reach zero.
+    if (!config.denied.has("single-variant-match") && !config.expected?.has("single-variant-match")) config.allowed.add("single-variant-match");
     // index-clone is ON by default. It was off on the theory that most hits are working
     // code paying a cost the author accepted, but the lint does not fire on the cases
     // where that is true: `isCopy` skips register copies, so a `Vec<Pod>` bind is silent
@@ -4944,12 +4949,12 @@ export class TypeChecker {
         break;
       }
       case "MatchStmt": {
-        this.checkMatchLike(stmt.subject, stmt.arms, sp, fnRetType);
+        this.checkMatchLike(stmt.subject, stmt.arms, sp, fnRetType, true);
         break;
       }
       case "IfLetStmt": {
         const rawSubjType = this.checkExpr(stmt.subject);
-        const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.subject, rawSubjType);
+        const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.subject, rawSubjType, [stmt.pattern]);
         this.bindElidedPattern(stmt.pattern, subjType);
         if (subjType.tag !== "enum" && subjType.tag !== "unknown") {
           this.error(`if let subject must be an enum, got ${typeName(subjType)}`, sp);
@@ -5011,7 +5016,7 @@ export class TypeChecker {
       }
       case "LetElseStmt": {
         const rawSubjType = this.checkExpr(stmt.value);
-        const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.value, rawSubjType);
+        const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.value, rawSubjType, [stmt.pattern]);
         this.bindElidedPattern(stmt.pattern, subjType);
         if (subjType.tag !== "enum" && subjType.tag !== "unknown") {
           this.error(`let-else value must be an enum (Option/Result/…), got ${typeName(subjType)}`, sp);
@@ -9434,12 +9439,33 @@ export class TypeChecker {
     return this.setType(expr, result);
   }
 
+  // An OWNED enum in a local, inspected by patterns that bind nothing but `_` and Copy
+  // payloads, is read rather than consumed: nothing escapes the arm, so the subject is
+  // still usable afterwards. checkMatchLike has always applied this; if-let and let-else
+  // did not, which made `if let A(n) = v { }` MOVE `v` where the identical `match` left it
+  // alone. The two spellings have to agree, or the lint that rewrites one into the other
+  // (single-variant-match) turns compiling code into a use-after-move error.
+  private ownedInspectOnly(subject: Expr, subjType: TypeKind, patterns: (Pattern | undefined)[]): boolean {
+    // ident-ok: the rule is about a NAMED owned local, not any expression of enum type
+    if (subject.kind !== "Ident" || subjType.tag !== "enum") return false;
+    const einfo = this.enums.get(subjType.name);
+    if (!einfo) return false;
+    return patterns.every(pattern => {
+      if (!pattern || pattern.kind !== "EnumPattern") return true;
+      const v = einfo.variants.get(pattern.variant);
+      if (!v) return true;
+      return pattern.bindings.every((b, i) =>
+        b === "_" || i >= v.fields.length ||
+        isCopy(v.fields[i], (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n)));
+    });
+  }
+
   // Borrow-detection for if-let/let-else subjects, mirroring checkMatchLike: a
   // `&enum` or an enum place (s.field, v[i], *h) is read without being consumed,
   // so its non-Copy payload must bind as a borrow, not a move. Resolves the enum
   // type behind the ref and registers the subject in matchSubjectRef when it
   // borrows (lower reads that to emit subjectIsRef).
-  private enumSubjectBorrow(subject: Expr, rawSubjType: TypeKind): { subjType: TypeKind; subjBorrows: boolean } {
+  private enumSubjectBorrow(subject: Expr, rawSubjType: TypeKind, patterns: (Pattern | undefined)[] = []): { subjType: TypeKind; subjBorrows: boolean } {
     let subjIsRef = rawSubjType.tag === "ref" && rawSubjType.inner.tag === "enum";
     let subjType: TypeKind = subjIsRef && rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
     // ident-ok: asks whether the subject BINDING was declared `&E`, a property of the declaration
@@ -9450,7 +9476,8 @@ export class TypeChecker {
     const subjIsPlace = !subjIsRef && subjType.tag === "enum" &&
       (subject.kind === "FieldAccess" || subject.kind === "IndexAccess" ||
        (subject.kind === "UnaryOp" && subject.op === "*"));
-    const subjBorrows = subjIsRef || subjIsPlace;
+    const subjBorrows = subjIsRef || subjIsPlace ||
+      (!subjIsRef && this.ownedInspectOnly(subject, subjType, patterns));
     if (subjBorrows) this.matchSubjectRef.add(subject);
     return { subjType, subjBorrows };
   }
@@ -9590,12 +9617,45 @@ export class TypeChecker {
         : "write '<option> ?? <default>' instead");
   }
 
-  private checkMatchLike(subject: Expr, arms: MatchArm[], sp: Span | undefined, fnRetType: TypeKind): TypeKind[] {
+  // `match x { A(v) => { … } B => {} }` is `if let A(v) = x { … }`. Every arm but one is
+  // empty, so the match exists only to name the variant it cares about, and the other arms
+  // are there to satisfy exhaustiveness rather than to do anything.
+  //
+  // Safe as a mechanical rewrite because if-let is not a separate rule: `IfLetStmt` runs the
+  // same `enumSubjectBorrow` / `payloadBindType` / `armConsumesSubject` path as a match arm,
+  // so the payload binds by borrow or by value identically and the subject is consumed at
+  // the same point. Statement position only, since a match in value position cannot have an
+  // empty arm and still type-check, so the shape never appears there.
+  private lintSingleVariantMatch(subject: Expr, arms: MatchArm[], subjType: TypeKind, sp: Span | undefined): void {
+    if (arms.length < 2) return;
+    const base = subjType.tag === "ref" ? subjType.inner : subjType;
+    if (base.tag !== "enum") return;
+    const live = arms.filter(a => a.body.length > 0);
+    if (live.length !== 1) return;
+    const kept = live[0]!;
+    // A wildcard arm is the one that would become the `else`, and `if let A(..) = x {} else`
+    // with an empty then-branch is worse than the match it replaces.
+    if (kept.pattern.kind !== "EnumPattern") return;
+    const pat = kept.pattern;
+    const name = pat.enumName ? `${pat.enumName}.${pat.variant}` : pat.variant;
+    const spelled = pat.bindings.length > 0 ? `${name}(${pat.bindings.join(", ")})` : name;
+    // `describeExpr` only spells places; for a call subject it returns `<expr>`, and an
+    // ellipsis reads as "your subject here" where a literal `<expr>` reads like a type.
+    const subjText = this.describeExpr(subject);
+    this.warn("single-variant-match",
+      `this match only acts on one variant; the other ${arms.length === 2 ? "arm is" : "arms are"} empty`,
+      sp,
+      `write 'if let ${spelled} = ${subjText === "<expr>" ? "…" : subjText} { … }' instead`,
+      "match".length);
+  }
+
+  private checkMatchLike(subject: Expr, arms: MatchArm[], sp: Span | undefined, fnRetType: TypeKind, isStmt = false): TypeKind[] {
     const armTypes: TypeKind[] = [];
     const rawSubjType = this.checkExpr(subject);
     if (rawSubjType.tag !== "ref" && subject.kind !== "FieldAccess" && subject.kind !== "IndexAccess") {
       this.lintManualOptionDefault(subject, arms, rawSubjType, sp);
     }
+    if (isStmt) this.lintSingleVariantMatch(subject, arms, rawSubjType, sp);
     {
       const t = rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
       for (const arm of arms) this.bindElidedPattern(arm.pattern, t);
@@ -9629,18 +9689,8 @@ export class TypeChecker {
     // case — Copy bindings stay by-value either way), so a match that legitimately
     // destructures owned data still consumes exactly as before.
     let subjIsOwnedInspect = false;
-    if (!subjIsRef && !subjIsPlace && subjType.tag === "enum" && subject.kind === "Ident") {
-      const einfo = this.enums.get(subjType.name);
-      if (einfo) {
-        subjIsOwnedInspect = arms.every(arm => {
-          if (arm.pattern.kind !== "EnumPattern") return true;
-          const v = einfo.variants.get(arm.pattern.variant);
-          if (!v) return true;
-          return arm.pattern.bindings.every((b, i) =>
-            b === "_" || i >= v.fields.length ||
-            isCopy(v.fields[i], (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n)));
-        });
-      }
+    if (!subjIsRef && !subjIsPlace) {
+      subjIsOwnedInspect = this.ownedInspectOnly(subject, subjType, arms.map(a => a.pattern));
     }
     const subjBorrows = subjIsRef || subjIsPlace || subjIsOwnedInspect;
     if (subjBorrows) this.matchSubjectRef.add(subject);

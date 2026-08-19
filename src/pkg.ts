@@ -15,6 +15,7 @@ import { resolve, join, relative, sep, dirname } from "path";
 import { homedir, tmpdir } from "os";
 import { createHash, randomUUID } from "crypto";
 import { spawnSync } from "child_process";
+import { WARNING_NAMES } from "./warnings";
 
 // ── Manifest ────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,10 @@ export interface Manifest {
   exclude?: string[];
   // advisory only — never affects linking; @link is the source of truth.
   nativeHints?: Record<string, Record<string, string>>;
+  // Project-wide warning levels, the manifest form of `--deny=` / `--allow=`. This is the
+  // only way an off-by-default lint reaches the EDITOR: the LSP has no command line, so
+  // without it `--deny=single-variant-match` is a thing you can only see in a terminal.
+  lints?: { deny?: string[]; allow?: string[] };
 }
 
 export function parseManifest(text: string): Manifest {
@@ -58,6 +63,7 @@ export function parseManifest(text: string): Manifest {
   setOpt(m, "targets", optStringArray(o, "targets", ctx));
   setOpt(m, "exclude", optStringArray(o, "exclude", ctx));
   setOpt(m, "nativeHints", optNestedRecord(o, "nativeHints", ctx));
+  setOpt(m, "lints", optLints(o, ctx));
 
   // A publishable package must expose a lib and/or bins; a root application
   // manifest legitimately has neither, so this is not enforced at parse time.
@@ -86,6 +92,7 @@ export function stringifyManifest(m: Manifest): string {
   if (m.targets !== undefined) o.targets = m.targets;
   if (m.exclude !== undefined) o.exclude = m.exclude;
   if (m.nativeHints !== undefined) o.nativeHints = sortedNestedRecord(m.nativeHints);
+  if (m.lints !== undefined) o.lints = m.lints;
   return JSON.stringify(o, null, 2) + "\n";
 }
 
@@ -687,6 +694,55 @@ function requireString(o: Record<string, unknown>, key: string, ctx: string): st
     throw new Error(`${ctx}: '${key}' must be a non-empty string`);
   }
   return v;
+}
+
+function optLints(o: Record<string, unknown>, ctx: string): Manifest["lints"] | undefined {
+  const v = o["lints"];
+  if (v === undefined) return undefined;
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error(`${ctx}: 'lints' must be an object`);
+  const l = v as Record<string, unknown>;
+  for (const k of Object.keys(l)) {
+    if (k !== "deny" && k !== "allow") throw new Error(`${ctx}: 'lints.${k}' is not a known key (expected 'deny' or 'allow')`);
+  }
+  const out: { deny?: string[]; allow?: string[] } = {};
+  const deny = optStringArray(l, "deny", `${ctx} lints`);
+  const allow = optStringArray(l, "allow", `${ctx} lints`);
+  // A misspelled name here fails the same way a misspelled `--deny=` does: a manifest that
+  // looks like it enforces a lint and enforces nothing is the failure this surface cannot
+  // afford. `*` is accepted as the deny-all spelling, matching `--deny-all`.
+  for (const [key, names] of [["deny", deny], ["allow", allow]] as const) {
+    for (const n of names ?? []) {
+      if (n === "*" || WARNING_NAMES.includes(n)) continue;
+      throw new Error(`${ctx}: unknown warning '${n}' in lints.${key}\n  known warnings: ${WARNING_NAMES.join(", ")}`);
+    }
+  }
+  if (deny !== undefined) out.deny = deny;
+  if (allow !== undefined) out.allow = allow;
+  return out;
+}
+
+// Warning levels from the nearest milo.json at or above `startDir`. Returns empty sets
+// when there is no manifest, which is the common case for a loose .milo file.
+export function projectLints(startDir: string): { denied: Set<string>; allowed: Set<string> } {
+  const denied = new Set<string>(), allowed = new Set<string>();
+  let dir = resolve(startDir);
+  for (;;) {
+    const candidate = join(dir, "milo.json");
+    if (existsSync(candidate)) {
+      try {
+        const m = parseManifest(readFileSync(candidate, "utf8"));
+        for (const n of m.lints?.deny ?? []) denied.add(n);
+        for (const n of m.lints?.allow ?? []) allowed.add(n);
+      } catch {
+        // A broken manifest is reported by the commands that need it; lint levels are not
+        // worth failing a build or an editor session over.
+      }
+      return { denied, allowed };
+    }
+    const up = dirname(dir);
+    if (up === dir) return { denied, allowed };
+    dir = up;
+  }
 }
 
 function optString(o: Record<string, unknown>, key: string, ctx: string): string | undefined {

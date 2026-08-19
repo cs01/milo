@@ -1168,6 +1168,11 @@ if let Option.Some(val) = x {
 }
 ```
 
+Prefer it over a `match` whose other arms are empty. `--deny=single-variant-match`
+finds that shape and prints the `if let` to replace it with; the two forms bind the
+payload identically (by borrow or by value, same rule as a match arm), so the rewrite
+is mechanical. The lint is opt-in.
+
 ### while let
 
 Loop as long as the subject matches the pattern, binding the payload each iteration:

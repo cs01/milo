@@ -1,0 +1,57 @@
+// An owned enum inspected through Copy-only bindings is READ, not consumed: the rule
+// `match` has always applied, now applied by `if let` and `let ... else` too. Before this
+// the same program written with `if let` failed with "use of moved variable", so the
+// single-variant-match lint's own advice could turn compiling code into an error.
+enum V {
+    Func(i64, i64), Num(f64), Nil
+}
+
+fn tag(v: &V): i64 {
+    match v {
+        V.Func(a, b) => {
+            return a + b
+        }
+        V.Num(n) => {
+            return n as i64
+        }
+        V.Nil => {
+            return 0
+        }
+    }
+}
+
+fn main() {
+    let base = V.Func(2, 3)
+    var env: i64 = -1
+    if let V.Func(_f, e) = base {
+        env = e
+    }
+    print(env.toString())
+    // @expect: 3
+    print(tag(base).toString())
+    // @expect: 5
+
+    // The same subject, still owned, read a second time through let-else.
+    let n = V.Num(7.0)
+    let V.Num(x) = n else {
+        print("unreachable")
+        return
+    }
+    print((x as i64).toString())
+    // @expect: 7
+    print(tag(n).toString())
+    // @expect: 7
+
+    // A non-Copy payload still moves: the match spelling behaves the same way.
+    let s = V.Func(1, 1)
+    match s {
+        V.Func(a, _b) => {
+            print(a.toString())
+        }
+        // @expect: 1
+        _ => {
+        }
+    }
+    print(tag(s).toString())
+    // @expect: 2
+}

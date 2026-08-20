@@ -12203,6 +12203,66 @@ export class Codegen {
   }
 
   // x.checkedAdd(y) — returns Option<T>, None on overflow
+  // The Option<T> tail every checked-arithmetic op ends with: branch on `flag`, build
+  // Some(val) on the safe path and a zeroed None on the other, phi them together. It was
+  // two 30-line copies (genCheckedArith and genCheckedDivRem) that differed only in how
+  // `flag` was computed — a layout or memset change would have landed in one of them.
+  // `emitVal` is the one real hole: div/rem must emit the operation inside the ok block.
+  private emitCheckedOptionTail(
+    lines: string[],
+    optionEnumName: string,
+    flag: string,
+    lt: string,
+    emitVal: () => string,
+  ): Gen {
+    const optionTy = `%${optionEnumName}`;
+    const optionLayout = this.enumLayouts.get(optionEnumName);
+    if (!optionLayout) throw new Error(`Option enum '${optionEnumName}' not found`);
+    const someTag = must(optionLayout.variants, "Some", "variants").tag;
+    const noneTag = must(optionLayout.variants, "None", "variants").tag;
+
+    const okLabel = this.nextLabel("checked.ok");
+    const overflowLabel = this.nextLabel("checked.overflow");
+    const doneLabel = this.nextLabel("checked.done");
+
+    lines.push(`  br i1 ${flag}, label %${overflowLabel}, label %${okLabel}`);
+
+    lines.push(`${okLabel}:`);
+    const val = emitVal();
+    const someAlloca = this.nextTemp();
+    lines.push(`  ${someAlloca} = alloca ${optionTy}`);
+    const someTagPtr = this.nextTemp();
+    lines.push(`  ${someTagPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 0`);
+    lines.push(`  store i32 ${someTag}, ptr ${someTagPtr}`);
+    const somePayloadPtr = this.nextTemp();
+    lines.push(`  ${somePayloadPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 1`);
+    lines.push(`  store ${lt} ${val}, ptr ${somePayloadPtr}`);
+    const someVal = this.nextTemp();
+    lines.push(`  ${someVal} = load ${optionTy}, ptr ${someAlloca}`);
+    lines.push(`  br label %${doneLabel}`);
+
+    lines.push(`${overflowLabel}:`);
+    const noneAlloca = this.nextTemp();
+    lines.push(`  ${noneAlloca} = alloca ${optionTy}`);
+    this.needsMemset = true;
+    const optSize = this.nextTemp();
+    lines.push(`  ${optSize} = getelementptr ${optionTy}, ptr null, i32 1`);
+    const optSizeI = this.nextTemp();
+    lines.push(`  ${optSizeI} = ptrtoint ptr ${optSize} to i64`);
+    lines.push(`  call ptr @memset(ptr ${noneAlloca}, i32 0, i64 ${optSizeI})`);
+    const noneTagPtr = this.nextTemp();
+    lines.push(`  ${noneTagPtr} = getelementptr ${optionTy}, ptr ${noneAlloca}, i32 0, i32 0`);
+    lines.push(`  store i32 ${noneTag}, ptr ${noneTagPtr}`);
+    const noneVal = this.nextTemp();
+    lines.push(`  ${noneVal} = load ${optionTy}, ptr ${noneAlloca}`);
+    lines.push(`  br label %${doneLabel}`);
+
+    lines.push(`${doneLabel}:`);
+    const result = this.nextTemp();
+    lines.push(`  ${result} = phi ${optionTy} [ ${someVal}, %${okLabel} ], [ ${noneVal}, %${overflowLabel} ]`);
+    return [lines, result, optionTy];
+  }
+
   private genCheckedArith(expr: HIRExpr & { kind: "CheckedArith" }, lines: string[]): Gen {
     // div/rem have no *.with.overflow intrinsic — the failure modes are divisor==0
     // and (signed) INT_MIN/-1, and the division itself traps on those, so it must be
@@ -12223,55 +12283,8 @@ export class Codegen {
     lines.push(`  ${val} = extractvalue {${lt}, i1} ${callResult}, 0`);
     lines.push(`  ${flag} = extractvalue {${lt}, i1} ${callResult}, 1`);
 
-    const optionTy = `%${expr.optionEnumName}`;
-    const optionLayout = this.enumLayouts.get(expr.optionEnumName);
-    if (!optionLayout) throw new Error(`Option enum '${expr.optionEnumName}' not found`);
-    const someTag = must(optionLayout.variants, "Some", "variants").tag;
-    const noneTag = must(optionLayout.variants, "None", "variants").tag;
-
-    const okLabel = this.nextLabel("checked.ok");
-    const overflowLabel = this.nextLabel("checked.overflow");
-    const doneLabel = this.nextLabel("checked.done");
-
-    lines.push(`  br i1 ${flag}, label %${overflowLabel}, label %${okLabel}`);
-
-    // no overflow → Some(val)
-    lines.push(`${okLabel}:`);
-    const someAlloca = this.nextTemp();
-    lines.push(`  ${someAlloca} = alloca ${optionTy}`);
-    const someTagPtr = this.nextTemp();
-    lines.push(`  ${someTagPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 0`);
-    lines.push(`  store i32 ${someTag}, ptr ${someTagPtr}`);
-    const somePayloadPtr = this.nextTemp();
-    lines.push(`  ${somePayloadPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 1`);
-    lines.push(`  store ${lt} ${val}, ptr ${somePayloadPtr}`);
-    const someVal = this.nextTemp();
-    lines.push(`  ${someVal} = load ${optionTy}, ptr ${someAlloca}`);
-    lines.push(`  br label %${doneLabel}`);
-
-    // overflow → None
-    lines.push(`${overflowLabel}:`);
-    const noneAlloca = this.nextTemp();
-    lines.push(`  ${noneAlloca} = alloca ${optionTy}`);
-    this.needsMemset = true;
-    const optSize = this.nextTemp();
-    lines.push(`  ${optSize} = getelementptr ${optionTy}, ptr null, i32 1`);
-    const optSizeI = this.nextTemp();
-    lines.push(`  ${optSizeI} = ptrtoint ptr ${optSize} to i64`);
-    lines.push(`  call ptr @memset(ptr ${noneAlloca}, i32 0, i64 ${optSizeI})`);
-    const noneTagPtr = this.nextTemp();
-    lines.push(`  ${noneTagPtr} = getelementptr ${optionTy}, ptr ${noneAlloca}, i32 0, i32 0`);
-    lines.push(`  store i32 ${noneTag}, ptr ${noneTagPtr}`);
-    const noneVal = this.nextTemp();
-    lines.push(`  ${noneVal} = load ${optionTy}, ptr ${noneAlloca}`);
-    lines.push(`  br label %${doneLabel}`);
-
-    // phi
-    lines.push(`${doneLabel}:`);
-    const result = this.nextTemp();
-    lines.push(`  ${result} = phi ${optionTy} [ ${someVal}, %${okLabel} ], [ ${noneVal}, %${overflowLabel} ]`);
-
-    return [lines, result, optionTy];
+    // The Option-building tail is identical for every checked op; only `flag` differs.
+    return this.emitCheckedOptionTail(lines, expr.optionEnumName, flag, lt, () => val);
   }
 
   // x.checkedDiv(y) / x.checkedRem(y) — Option<T>, None on divide-by-zero or
@@ -12283,12 +12296,6 @@ export class Codegen {
     lines.push(...ll, ...rl);
     const signed = expr.left.type.tag === "int" && expr.left.type.signed;
     const bits = expr.left.type.tag === "int" ? expr.left.type.bits : 32;
-
-    const optionTy = `%${expr.optionEnumName}`;
-    const optionLayout = this.enumLayouts.get(expr.optionEnumName);
-    if (!optionLayout) throw new Error(`Option enum '${expr.optionEnumName}' not found`);
-    const someTag = must(optionLayout.variants, "Some", "variants").tag;
-    const noneTag = must(optionLayout.variants, "None", "variants").tag;
 
     const zeroCmp = this.nextTemp();
     lines.push(`  ${zeroCmp} = icmp eq ${lt} ${rv}, 0`);
@@ -12307,50 +12314,14 @@ export class Codegen {
       flag = combined;
     }
 
-    const okLabel = this.nextLabel("checked.ok");
-    const overflowLabel = this.nextLabel("checked.overflow");
-    const doneLabel = this.nextLabel("checked.done");
-
-    lines.push(`  br i1 ${flag}, label %${overflowLabel}, label %${okLabel}`);
-
-    // safe → divide (divisor non-zero, no signed overflow) → Some(val)
-    lines.push(`${okLabel}:`);
-    const llvmOp = (signed ? "s" : "u") + expr.op; // sdiv/udiv/srem/urem
-    const val = this.nextTemp();
-    lines.push(`  ${val} = ${llvmOp} ${lt} ${lv}, ${rv}`);
-    const someAlloca = this.nextTemp();
-    lines.push(`  ${someAlloca} = alloca ${optionTy}`);
-    const someTagPtr = this.nextTemp();
-    lines.push(`  ${someTagPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 0`);
-    lines.push(`  store i32 ${someTag}, ptr ${someTagPtr}`);
-    const somePayloadPtr = this.nextTemp();
-    lines.push(`  ${somePayloadPtr} = getelementptr ${optionTy}, ptr ${someAlloca}, i32 0, i32 1`);
-    lines.push(`  store ${lt} ${val}, ptr ${somePayloadPtr}`);
-    const someVal = this.nextTemp();
-    lines.push(`  ${someVal} = load ${optionTy}, ptr ${someAlloca}`);
-    lines.push(`  br label %${doneLabel}`);
-
-    // unsafe → None
-    lines.push(`${overflowLabel}:`);
-    const noneAlloca = this.nextTemp();
-    lines.push(`  ${noneAlloca} = alloca ${optionTy}`);
-    this.needsMemset = true;
-    const optSize = this.nextTemp();
-    lines.push(`  ${optSize} = getelementptr ${optionTy}, ptr null, i32 1`);
-    const optSizeI = this.nextTemp();
-    lines.push(`  ${optSizeI} = ptrtoint ptr ${optSize} to i64`);
-    lines.push(`  call ptr @memset(ptr ${noneAlloca}, i32 0, i64 ${optSizeI})`);
-    const noneTagPtr = this.nextTemp();
-    lines.push(`  ${noneTagPtr} = getelementptr ${optionTy}, ptr ${noneAlloca}, i32 0, i32 0`);
-    lines.push(`  store i32 ${noneTag}, ptr ${noneTagPtr}`);
-    const noneVal = this.nextTemp();
-    lines.push(`  ${noneVal} = load ${optionTy}, ptr ${noneAlloca}`);
-    lines.push(`  br label %${doneLabel}`);
-
-    lines.push(`${doneLabel}:`);
-    const result = this.nextTemp();
-    lines.push(`  ${result} = phi ${optionTy} [ ${someVal}, %${okLabel} ], [ ${noneVal}, %${overflowLabel} ]`);
-    return [lines, result, optionTy];
+    // sdiv/udiv trap on a zero divisor, so unlike every other checked op the operation
+    // itself is emitted inside the ok block rather than before the branch.
+    return this.emitCheckedOptionTail(lines, expr.optionEnumName, flag, lt, () => {
+      const llvmOp = (signed ? "s" : "u") + expr.op; // sdiv/udiv/srem/urem
+      const val = this.nextTemp();
+      lines.push(`  ${val} = ${llvmOp} ${lt} ${lv}, ${rv}`);
+      return val;
+    });
   }
 
   // Integer bit intrinsics. countOnes/leadingZeros/trailingZeros (ctpop/ctlz/cttz)

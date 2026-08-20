@@ -29,6 +29,22 @@ jobs:
       # 'SDL2' not found"). tests/examples.test.ts never noticed because it stops at
       # emit-ir; scripts/run-examples.ts links and runs, which is the point of it.
       - run: brew install sdl2
+      # Sync the dependencies of every example that declares some. Two things skip
+      # silently without them: an example whose package cannot resolve is type-checked no
+      # further (~4.5k lines of apsis), and a FIXTURE carrying `@requires-package` is
+      # skipped by tests/run.test.ts (flybyGeometry, which needs `gl`). That is why this
+      # runs BEFORE `bun test` rather than next to the example harness -- placed after it,
+      # the fixture stayed skipped on every CI run and said so in a line nobody reads.
+      #
+      # NON-FATAL on purpose: the only step in this lane that reaches the network for a
+      # package, and a registry hiccup must not redden a run about the compiler. When it
+      # fails, both harnesses fall back to the skips they already do.
+      - name: Sync example package deps (non-fatal)
+        continue-on-error: true
+        run: |
+          for f in $(find examples -name milo.json); do
+            (cd "$(dirname "$f")" && bun run "$GITHUB_WORKSPACE/src/main.ts" install) || true
+          done
       - run: bun test
       # Checks every scalar-returning `extern fn` against this runner's real headers.
       # Needs no annotations; see the script's header for what it does and doesn't cover.
@@ -37,18 +53,6 @@ jobs:
       # a codegen bug that produces valid-looking IR and a broken binary passes it. This
       # script builds every entry point through clang and executes the 32 that carry a
       # `// @run:` annotation. It existed and was wired to nothing.
-      # Sync the dependencies of every example that declares some, so those examples get
-      # type-checked rather than skipped for an unresolvable package. NON-FATAL on purpose:
-      # this is the only step in the lane that reaches the network for a package, and a
-      # registry hiccup must not redden a run about the compiler. When it fails, the
-      # harness falls back to the skip it already does, exactly as before this step
-      # existed. Worth ~4.5k lines of apsis that CI could not otherwise check.
-      - name: Sync example package deps (non-fatal)
-        continue-on-error: true
-        run: |
-          for f in $(find examples -name milo.json); do
-            (cd "$(dirname "$f")" && bun run "$GITHUB_WORKSPACE/src/main.ts" install) || true
-          done
       - run: bun run scripts/run-examples.ts
 
       # A fixture that leaks still prints the right bytes, so `bun test` cannot see one.

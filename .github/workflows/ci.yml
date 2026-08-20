@@ -51,7 +51,7 @@ jobs:
       # double-free in generated code had no gate. The leak ratchet above cannot see any of
       # those — different question, and it only sees blocks big enough for `leaks` to report.
       - name: AddressSanitizer sweep
-        run: bun run scripts/asan-sweep.ts
+        run: bun run scripts/asan-sweep.ts --all
 
   # Nothing has ever executed std/*.linux.milo — epoll, eventfd, the glibc paths — because
   # the suite above runs on macOS only. This job is the first thing that does.

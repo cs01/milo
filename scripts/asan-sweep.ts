@@ -8,13 +8,15 @@
 // question, and answers it only for blocks big enough for `leaks` to notice.
 //
 //   bun scripts/asan-sweep.ts                 # sweep tests/fixtures
-//   bun scripts/asan-sweep.ts --filter vec    # only fixtures whose name contains "vec"
-//   bun scripts/asan-sweep.ts --verbose       # name every fixture as it runs
+//   bun scripts/asan-sweep.ts --examples      # sweep the examples that carry `// @run:`
+//   bun scripts/asan-sweep.ts --all           # both corpora
+//   bun scripts/asan-sweep.ts --filter vec    # only entries whose name contains "vec"
+//   bun scripts/asan-sweep.ts --verbose       # name every entry as it runs
 //
 // Leak detection is OFF here on purpose: LeakSanitizer does not exist on darwin/arm64, and
 // leaks are already ratcheted by scripts/leak-check.ts. This is for the errors ASan finds
 // that a leak checker structurally cannot.
-import { readdirSync, readFileSync, mkdtempSync, rmSync, existsSync } from "fs";
+import { readdirSync, readFileSync, mkdtempSync, rmSync, existsSync, statSync } from "fs";
 import { execFileSync } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -25,12 +27,48 @@ const argv = process.argv.slice(2);
 const filter = argv.includes("--filter") ? argv[argv.indexOf("--filter") + 1]! : null;
 const VERBOSE = argv.includes("--verbose");
 
-const names = readdirSync(FIXTURES)
-  .filter(f => f.endsWith(".milo"))
-  .filter(f => !filter || f.includes(filter))
-  // Same contract as the fixture lane: a fixture that does not run on this OS is not a
-  // memory-safety signal here either.
-  .filter(f => !readFileSync(join(FIXTURES, f), "utf8").includes("@skip-os"));
+const wantExamples = argv.includes("--examples") || argv.includes("--all");
+const wantFixtures = !argv.includes("--examples") || argv.includes("--all");
+
+// One entry to sweep: where its source is, and the argv it needs to run headlessly.
+interface Entry { name: string; src: string; args: string[] }
+
+function fixtureEntries(): Entry[] {
+  return readdirSync(FIXTURES)
+    .filter(f => f.endsWith(".milo"))
+    // Same contract as the fixture lane: a fixture that does not run on this OS is not a
+    // memory-safety signal here either.
+    .filter(f => !readFileSync(join(FIXTURES, f), "utf8").includes("@skip-os"))
+    .map(f => ({ name: f.replace(/\.milo$/, ""), src: join(FIXTURES, f), args: [] }));
+}
+
+// Only examples carrying `// @run:` — the rest are library modules with no main, or SDL
+// programs that would block a headless runner forever. The annotation also carries the
+// argv the program needs, which is why scripts/run-examples.ts uses the same marker.
+function exampleEntries(): Entry[] {
+  const out: Entry[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith(".milo")) {
+        const text = readFileSync(p, "utf8");
+        const m = /^\s*\/\/\s*@run:(.*)$/m.exec(text);
+        if (!m) continue;
+        out.push({
+          name: p.slice(ROOT.length + 1).replace(/\.milo$/, "").replace(/\//g, "_"),
+          src: p,
+          args: m[1]!.trim().split(/\s+/).filter(Boolean),
+        });
+      }
+    }
+  };
+  walk(join(ROOT, "examples"));
+  return out;
+}
+
+const entries = [...(wantFixtures ? fixtureEntries() : []), ...(wantExamples ? exampleEntries() : [])]
+  .filter(e => !filter || e.name.includes(filter));
 
 const dir = mkdtempSync(join(tmpdir(), "milo-asan-"));
 let ran = 0, buildFailed = 0;
@@ -38,9 +76,8 @@ const errors: { name: string; detail: string }[] = [];
 const unbuildable: string[] = [];
 
 try {
-  for (const file of names) {
-    const name = file.replace(/\.milo$/, "");
-    const src = join(FIXTURES, file);
+  for (const entry of entries) {
+    const { name, src } = entry;
     const bin = join(dir, name);
     // A fixture with a companion .c is compiled together with it, exactly as the fixture
     // lane does — without that these nine link-fail and silently leave the sweep.
@@ -56,7 +93,7 @@ try {
     }
     let out: string;
     try {
-      out = execFileSync(bin, [], {
+      out = execFileSync(bin, entry.args, {
         cwd: ROOT, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
       });
@@ -74,12 +111,14 @@ try {
 
 for (const e of errors) console.log(`ASAN  ${e.name}: ${e.detail}`);
 if (unbuildable.length) console.log(`\ncould not build under -fsanitize=address: ${unbuildable.join(", ")}`);
-console.log(`\n${ran} fixtures ran under AddressSanitizer, ${buildFailed} could not build, ${errors.length} reported an error`);
+const corpus = wantExamples && wantFixtures ? "fixtures + examples" : wantExamples ? "examples" : "fixtures";
+console.log(`\n${ran} ${corpus} ran under AddressSanitizer, ${buildFailed} could not build, ${errors.length} reported an error`);
 
 // A sweep that builds nothing reports zero errors and exits 0 forever. Say so instead.
 // Only on a FULL sweep: `--filter vec` is meant to run a handful.
-if (!filter && ran < 300) {
-  console.error(`only ${ran} fixtures ran (expected several hundred) — the sweep is not exercising the corpus`);
+const floor = wantFixtures ? 300 : 20;
+if (!filter && ran < floor) {
+  console.error(`only ${ran} ${corpus} ran (expected at least ${floor}) — the sweep is not exercising the corpus`);
   process.exit(2);
 }
 process.exit(errors.length ? 1 : 0);

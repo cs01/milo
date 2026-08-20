@@ -1,3 +1,4 @@
+
 addressOf
 aesGcmLengthGuards
 aliasBehindRef
@@ -223,14 +224,17 @@ genericStructMulti
 genericStructVecField
 genericStructVecInfer
 genericTraitDrop
+getOrDefaultOwnedResult
 global_ptr
 globalArrayInit
 globalConstFold
 globalInitOrder
+globalRefFold
 globalRuntimeInit
 globalStructArray
 globalStructInit
 globalStructMutation
+globalVarRefNoFold
 greenIoPipe
 greenStackSize
 greenThread
@@ -251,6 +255,7 @@ hashmapOverwrite
 hashmapRemove
 hashmapStringKey
 hashmapStructKey
+hashmapTombstoneReuse
 heapBasic
 heapRecursive
 hello
@@ -325,6 +330,7 @@ letElse
 letInWhile
 lintBorrowThatClones
 logicalOps
+lookupKeyTempLeak
 loopBreakDrop
 loopInvariant
 mapIterTwoLoops
@@ -572,6 +578,7 @@ vec_swap
 vecAnyAll
 vecAssign
 vecBasic
+vecCallbackByValue
 vecChain
 vecClearTruncate
 vecClone

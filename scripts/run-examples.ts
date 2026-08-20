@@ -135,11 +135,18 @@ for (const f of examples) {
     // thinking of this as "the flight and apsis problem".
     const chk = milo(["check", f]);
     if (chk.status !== 0) {
-      failures.push({
-        file: f,
-        phase: "check",
-        detail: (chk.stderr || chk.stdout || "").trim().split("\n").slice(-4).join("\n"),
-      });
+      const out = (chk.stderr || chk.stdout || "").trim();
+      // A package this checkout has no copy of is the same kind of excuse as a missing
+      // asset, and must not read as a type error. apsis imports `gl`, which is a PACKAGE
+      // (github.com/milo-language/milo-gl); a dev machine has it in the local cache and a
+      // CI runner does not, so requiring `check` to pass unconditionally turned CI red on
+      // a program that is perfectly well typed. Only what survives this is a real finding.
+      const missingPkg = /not found in the local package cache|Import paths without a leading 'std\/'/.test(out);
+      if (missingPkg) {
+        console.log(`  (type check skipped: a package this checkout lacks)`);
+      } else {
+        failures.push({ file: f, phase: "check", detail: out.split("\n").slice(-4).join("\n") });
+      }
     }
     continue;
   }

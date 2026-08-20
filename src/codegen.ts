@@ -7644,22 +7644,26 @@ export class Codegen {
     // KNOWN LEAK when accTy owns heap (a String accumulator): the value in `acc` is owned
     // by nobody once this call returns.
     //
-    // `acc` is a raw `load` out of the alloca above — synthesized here, not an HIRExpr — so
-    // the caller-side machinery cannot see it: isOwnedTempExpr/dropOwnedTemp only ever
-    // classify real expressions. And the callee does not cover it either when the callback
-    // has an EXPRESSION body: codegen registers a closure's by-value owned parameters as
-    // droppable locals (with an alive flag, dropped at scope exit unless moved out) only
-    // for a BLOCK-bodied closure. Compare the emitted IR — a block-bodied `(a: string): i64
-    // => { ... }` gets `%a.alive` and a guarded free; `(a: string): i64 => a + …` gets
-    // neither.
+    // Caller side: `acc` is a raw `load` out of the alloca above — synthesized here, not an
+    // HIRExpr — so isOwnedTempExpr/dropOwnedTemp, which only ever classify real
+    // expressions, cannot see it.
     //
-    // Every other call shape is covered by one side or the other, which is why this only
-    // shows up here: `v.fold("s", (a: string, x: &i64): string => a + x.toString())` leaks
-    // one accumulator per element.
+    // Callee side: a CLOSURE never registers its by-value owned parameters as droppable
+    // locals. A plain `fn` does (see the param loop that pushes to droppableLocals with an
+    // alive flag, dropped at scope exit unless moved out) — emit IR for
+    // `fn cat(a: string)` and you get `%a.alive` plus a guarded free; the closure param
+    // loop stores the parameter and registers a local, and stops there. So a closure
+    // relies entirely on its CALLER owning the argument.
     //
-    // Do not "fix" it by dropping `acc` here. The callback received it BY VALUE and may
-    // have moved it out, and this side cannot tell — that is the same ownership question
-    // as backlog #18, and guessing turns a leak into a double free.
+    // That works everywhere else, because the caller does own it. It fails here because
+    // fold's accumulator is invisible to the caller's own drop machinery, so neither side
+    // covers it: `v.fold("s", (a: string, x: &i64): string => a + x.toString())` leaks one
+    // accumulator per element.
+    //
+    // Do not "fix" it by dropping `acc` here, and do not make closures drop their params
+    // without checking who else already does. A closure called with a temporary has that
+    // temporary dropped by the CALLER today, so a callee-side drop would double free —
+    // which is backlog #18's missing contract again.
     lines.push(`  ${next} = call ${accTy} ${fnPtr}(ptr ${envPtr}, ${accTy} ${acc}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  store ${accTy} ${next}, ptr ${accAddr}`);
     const nextIdx = this.nextTemp();

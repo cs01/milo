@@ -103,6 +103,9 @@ docs/site/public/install.sh
 
 # Fuzzer output — regenerated per run, never a source of truth.
 .fuzz-findings*/
+# Reduced cases the arena/hashmap falsifiers drop in the repo root on a mismatch.
+arena-fuzz-*.milo
+hm-fuzz-*.milo
 
 # Generated game assets — 82 MB of downloaded terrain, imagery and planet maps.
 # Regenerate with scripts/fetch-assets.sh; that script (not this repo) is the

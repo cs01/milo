@@ -105,6 +105,10 @@ const HM_DATA = 0;
 const HM_LEN = 1;
 const HM_CAP = 2;
 const HM_SEED = 3;
+// Deleted slots, counted so the resize trigger can see them. Without it a table can reach
+// a state where every slot is occupied-or-tombstone, and a probe that stops only at an
+// EMPTY slot would never terminate.
+const HM_TOMBS = 4;
 
 export class Codegen {
   private target: TargetInfo;
@@ -650,7 +654,7 @@ export class Codegen {
         break;
       }
       case "hashmap":
-        id = this.diComposite("HashMap", ["ptr", "i64", "i64", "i64"], ["entries", "cap", "len", "tombstones"],
+        id = this.diComposite("HashMap", ["ptr", "i64", "i64", "i64", "i64"], ["data", "len", "cap", "seed", "tombstones"],
           [{ tag: "ptr", inner: { tag: "unknown" } }, { tag: "int", bits: 64, signed: true }, { tag: "int", bits: 64, signed: true }, { tag: "int", bits: 64, signed: true }], key);
         break;
       case "struct": {
@@ -1812,7 +1816,7 @@ export class Codegen {
     // opaque %String and clang rejected it ("invalid type for null constant").
     // The failure was order-dependent, hence intermittent across builds.
     if (this.hasHashMapType)
-      this.output.splice(1, 0, `%HashMap = type { ptr, i64, i64, i64 }`);
+      this.output.splice(1, 0, `%HashMap = type { ptr, i64, i64, i64, i64 }`);
     if (this.hasVecType)
       this.output.splice(1, 0, `%Vec = type { ptr, i64, i64 }`);
     if (this.hasStringType)
@@ -9429,7 +9433,9 @@ export class Codegen {
     // seed = 0 (lazy init on first insert)
     const s3 = this.nextTemp();
     lines.push(`  ${s3} = insertvalue %HashMap ${s2}, i64 0, 3`);
-    return [lines, s3, "%HashMap"];
+    const s4 = this.nextTemp();
+    lines.push(`  ${s4} = insertvalue %HashMap ${s3}, i64 0, ${HM_TOMBS}`);
+    return [lines, s4, "%HashMap"];
   }
 
   private genHashMapInsert(expr: HIRExpr & { kind: "HashMapInsert" }, lines: string[]): Gen {
@@ -9500,9 +9506,21 @@ export class Codegen {
     const dataFieldPtr = this.nextTemp();
     lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
 
-    // resize check: (len + 1) * 4 >= cap * 3
+    // resize check: (len + tombstones + 1) * 4 >= cap * 3
+    //
+    // Tombstones are counted, not just live entries. A probe below stops only at an EMPTY
+    // slot, so the table must always have one; a load factor computed from `len` alone
+    // lets insert/remove churn tombstone every slot while len stays near zero, and then
+    // no probe terminates. Rehashing drops tombstones, which is what makes this the fix
+    // for both that and the duplicate-key bug.
+    const tombsPtr = this.nextTemp();
+    lines.push(`  ${tombsPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_TOMBS}`);
+    const tombs = this.nextTemp();
+    lines.push(`  ${tombs} = load i64, ptr ${tombsPtr}`);
+    const lenPlusTombs = this.nextTemp();
+    lines.push(`  ${lenPlusTombs} = add i64 ${len}, ${tombs}`);
     const lenPlus1 = this.nextTemp();
-    lines.push(`  ${lenPlus1} = add i64 ${len}, 1`);
+    lines.push(`  ${lenPlus1} = add i64 ${lenPlusTombs}, 1`);
     const lhs = this.nextTemp();
     lines.push(`  ${lhs} = mul i64 ${lenPlus1}, 4`);
     const rhs = this.nextTemp();
@@ -9614,6 +9632,8 @@ export class Codegen {
     lines.push(`  call void @free(ptr ${oldData})`);
     lines.push(`  store ptr ${newData}, ptr ${dataFieldPtr}`);
     lines.push(`  store i64 ${newCap}, ptr ${capPtr}`);
+    // The rehash loop above relocates occupied slots only, so the new table has none.
+    lines.push(`  store i64 0, ptr ${tombsPtr}`);
     lines.push(`  br label %${insertLabel}`);
 
     // insert block — probe for slot
@@ -9638,6 +9658,17 @@ export class Codegen {
     const probeEmpty = this.nextLabel("hm.empty");
     const probeNext = this.nextLabel("hm.pnext");
     const insertDone = this.nextLabel("hm.done");
+    const probeNotOcc = this.nextLabel("hm.notocc");
+    const probeTomb = this.nextLabel("hm.tomb");
+    const probeTombRecord = this.nextLabel("hm.tombrec");
+
+    // Where to put the entry if the key turns out to be absent: the FIRST tombstone
+    // passed on the way, or the empty slot that ends the probe. -1 = none seen yet.
+    // Stopping at a tombstone instead of remembering it is what let `insert` write a
+    // second copy of a key that already existed further along the chain.
+    const firstTombAddr = this.nextTemp();
+    lines.push(`  ${firstTombAddr} = alloca i64`);
+    lines.push(`  store i64 -1, ptr ${firstTombAddr}`);
 
     lines.push(`  br label %${probeCond}`);
     lines.push(`${probeCond}:`);
@@ -9650,7 +9681,25 @@ export class Codegen {
     // state == 1 (occupied) -> check key
     const stateIsOccupied = this.nextTemp();
     lines.push(`  ${stateIsOccupied} = icmp eq i8 ${state}, 1`);
-    lines.push(`  br i1 ${stateIsOccupied}, label %${probeOccupied}, label %${probeEmpty}`);
+    lines.push(`  br i1 ${stateIsOccupied}, label %${probeOccupied}, label %${probeNotOcc}`);
+
+    // not occupied: either a tombstone to remember and probe past, or the empty slot
+    // that proves the key is absent.
+    lines.push(`${probeNotOcc}:`);
+    const stateIsTomb = this.nextTemp();
+    lines.push(`  ${stateIsTomb} = icmp eq i8 ${state}, 2`);
+    lines.push(`  br i1 ${stateIsTomb}, label %${probeTomb}, label %${probeEmpty}`);
+
+    lines.push(`${probeTomb}:`);
+    const seenTomb = this.nextTemp();
+    lines.push(`  ${seenTomb} = load i64, ptr ${firstTombAddr}`);
+    const tombUnset = this.nextTemp();
+    lines.push(`  ${tombUnset} = icmp eq i64 ${seenTomb}, -1`);
+    lines.push(`  br i1 ${tombUnset}, label %${probeTombRecord}, label %${probeNext}`);
+
+    lines.push(`${probeTombRecord}:`);
+    lines.push(`  store i64 ${slot}, ptr ${firstTombAddr}`);
+    lines.push(`  br label %${probeNext}`);
 
     // occupied: compare keys
     lines.push(`${probeOccupied}:`);
@@ -9682,14 +9731,33 @@ export class Codegen {
     }
     lines.push(`  br label %${insertDone}`);
 
-    // empty or tombstone: insert here
+    // Empty slot reached: the key is definitely absent, because the probe walked every
+    // slot between its home and here. Reuse the first tombstone passed if there was one,
+    // which keeps the chain short; otherwise take this slot.
     lines.push(`${probeEmpty}:`);
-    lines.push(`  store i8 1, ptr ${entryPtr}`);
+    const tombCandidate = this.nextTemp();
+    lines.push(`  ${tombCandidate} = load i64, ptr ${firstTombAddr}`);
+    const reuseTomb = this.nextTemp();
+    lines.push(`  ${reuseTomb} = icmp ne i64 ${tombCandidate}, -1`);
+    const writeSlot = this.nextTemp();
+    lines.push(`  ${writeSlot} = select i1 ${reuseTomb}, i64 ${tombCandidate}, i64 ${slot}`);
+    const writePtr = this.nextTemp();
+    lines.push(`  ${writePtr} = getelementptr ${entryTy}, ptr ${curData}, i64 ${writeSlot}`);
+    // Reusing a tombstone retires it — otherwise the count only ever grows and the table
+    // rehashes on a load it does not actually carry.
+    const tombsNow = this.nextTemp();
+    lines.push(`  ${tombsNow} = load i64, ptr ${tombsPtr}`);
+    const tombsLess = this.nextTemp();
+    lines.push(`  ${tombsLess} = sub i64 ${tombsNow}, 1`);
+    const tombsAfter = this.nextTemp();
+    lines.push(`  ${tombsAfter} = select i1 ${reuseTomb}, i64 ${tombsLess}, i64 ${tombsNow}`);
+    lines.push(`  store i64 ${tombsAfter}, ptr ${tombsPtr}`);
+    lines.push(`  store i8 1, ptr ${writePtr}`);
     const newKeySlotPtr = this.nextTemp();
-    lines.push(`  ${newKeySlotPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
+    lines.push(`  ${newKeySlotPtr} = getelementptr ${entryTy}, ptr ${writePtr}, i32 0, i32 1`);
     lines.push(`  store ${keyTy} ${keyVal}, ptr ${newKeySlotPtr}`);
     const newValSlotPtr = this.nextTemp();
-    lines.push(`  ${newValSlotPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 2`);
+    lines.push(`  ${newValSlotPtr} = getelementptr ${entryTy}, ptr ${writePtr}, i32 0, i32 2`);
     lines.push(`  store ${valTy} ${valVal}, ptr ${newValSlotPtr}`);
     // increment len
     const curLen = this.nextTemp();
@@ -9910,6 +9978,15 @@ export class Codegen {
     const newLen = this.nextTemp();
     lines.push(`  ${newLen} = sub i64 ${curLen}, 1`);
     lines.push(`  store i64 ${newLen}, ptr ${lenPtr}`);
+    // The slot just became a tombstone. Insert's resize trigger reads this, so a remove
+    // that did not count itself would let tombstones accumulate past the load factor.
+    const rmTombsPtr = this.nextTemp();
+    lines.push(`  ${rmTombsPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_TOMBS}`);
+    const rmTombs = this.nextTemp();
+    lines.push(`  ${rmTombs} = load i64, ptr ${rmTombsPtr}`);
+    const rmTombsNew = this.nextTemp();
+    lines.push(`  ${rmTombsNew} = add i64 ${rmTombs}, 1`);
+    lines.push(`  store i64 ${rmTombsNew}, ptr ${rmTombsPtr}`);
     lines.push(`  br label %${doneLabel}`);
 
     lines.push(`${probeNext}:`);
@@ -9985,7 +10062,9 @@ export class Codegen {
     lines.push(`  ${s2} = insertvalue %HashMap ${s1}, i64 ${cap}, 2`);
     const s3 = this.nextTemp();
     lines.push(`  ${s3} = insertvalue %HashMap ${s2}, i64 0, 3`);
-    return [lines, s3, "%HashMap"];
+    const s4 = this.nextTemp();
+    lines.push(`  ${s4} = insertvalue %HashMap ${s3}, i64 0, ${HM_TOMBS}`);
+    return [lines, s4, "%HashMap"];
   }
 
   private genHashMapClone(expr: HIRExpr & { kind: "HashMapClone" }, lines: string[]): Gen {
@@ -10082,6 +10161,10 @@ export class Codegen {
     const lenPtr = this.nextTemp();
     lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_LEN}`);
     lines.push(`  store i64 0, ptr ${lenPtr}`);
+    // The memset above put every slot back to EMPTY, so no tombstone survives either.
+    const clearTombsPtr = this.nextTemp();
+    lines.push(`  ${clearTombsPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_TOMBS}`);
+    lines.push(`  store i64 0, ptr ${clearTombsPtr}`);
     lines.push(`  br label %${endLabel}`);
     lines.push(`${endLabel}:`);
     return [lines, "0", "void"];
@@ -11458,7 +11541,13 @@ export class Codegen {
       lines.push(`  ${h2} = insertvalue %HashMap ${h1}, i64 ${cap}, 2`);
       const h3 = this.nextTemp();
       lines.push(`  ${h3} = insertvalue %HashMap ${h2}, i64 ${seed}, 3`);
-      return h3;
+      // The buffer is memcpy'd verbatim, tombstone slots and all, so the clone starts
+      // life with exactly the source's deleted-slot count — not zero.
+      const srcTombs = this.nextTemp();
+      lines.push(`  ${srcTombs} = extractvalue %HashMap ${orig}, ${HM_TOMBS}`);
+      const h4 = this.nextTemp();
+      lines.push(`  ${h4} = insertvalue %HashMap ${h3}, i64 ${srcTombs}, ${HM_TOMBS}`);
+      return h4;
     }
 
     // array — fall back to shallow load

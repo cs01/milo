@@ -7641,6 +7641,25 @@ export class Codegen {
     lines.push(`  ${acc} = load ${accTy}, ptr ${accAddr}`);
     const next = this.nextTemp();
     const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy, 1);
+    // KNOWN LEAK when accTy owns heap (a String accumulator): the value in `acc` is owned
+    // by nobody once this call returns.
+    //
+    // `acc` is a raw `load` out of the alloca above — synthesized here, not an HIRExpr — so
+    // the caller-side machinery cannot see it: isOwnedTempExpr/dropOwnedTemp only ever
+    // classify real expressions. And the callee does not cover it either when the callback
+    // has an EXPRESSION body: codegen registers a closure's by-value owned parameters as
+    // droppable locals (with an alive flag, dropped at scope exit unless moved out) only
+    // for a BLOCK-bodied closure. Compare the emitted IR — a block-bodied `(a: string): i64
+    // => { ... }` gets `%a.alive` and a guarded free; `(a: string): i64 => a + …` gets
+    // neither.
+    //
+    // Every other call shape is covered by one side or the other, which is why this only
+    // shows up here: `v.fold("s", (a: string, x: &i64): string => a + x.toString())` leaks
+    // one accumulator per element.
+    //
+    // Do not "fix" it by dropping `acc` here. The callback received it BY VALUE and may
+    // have moved it out, and this side cannot tell — that is the same ownership question
+    // as backlog #18, and guessing turns a leak into a double free.
     lines.push(`  ${next} = call ${accTy} ${fnPtr}(ptr ${envPtr}, ${accTy} ${acc}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  store ${accTy} ${next}, ptr ${accAddr}`);
     const nextIdx = this.nextTemp();

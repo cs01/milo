@@ -558,6 +558,23 @@ fn osThreadTrampoline(arg: *u8): *u8 {
         memcpy((fnPtr.addrOf()) as *u8, arg, 8)
         memcpy((envPtr.addrOf()) as *u8, (arg as i64 + 8) as *u8, 8)
         _callClosureVoid(fnPtr, envPtr)
+        // This frees the BLOCK, not the captures: a closure environment's first word is
+        // its drop glue, and that glue is the whole destructor. So an owning capture on a
+        // detached thread leaks — measured at ~5 allocations / 336 bytes per
+        // `Promise.blocking`, since each captures the worker's channel handle and that
+        // handle's refcount therefore never reaches zero.
+        //
+        // Backlog #18 says every closure environment OTHER than a spawned green task's is
+        // released. That is not true of this one, and the two leak for different reasons:
+        // reapTask never frees the green env at all, while this frees the block and skips
+        // the glue.
+        //
+        // Calling the glue here instead does zero the leak (100 -> 0 across every shape
+        // tried) and SIGSEGVs tests/fixtures/battleConcurrency.milo. A `move` closure body
+        // may CONSUME its captures — `chSend.send(result)` moves the handle out — and the
+        // glue then drops them a second time. Whether a capture survives the body is
+        // per-closure, so this trampoline cannot decide it; that is the same shape as the
+        // milojs failure recorded under #18, reached from a different direction.
         free(envPtr)
         free(arg)
         return 0 as *u8

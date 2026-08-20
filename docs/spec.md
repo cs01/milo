@@ -6875,6 +6875,7 @@ A conforming implementation shall accept this program, and running it shall writ
 - `default-miss 110`
 - `vec-found 30`
 - `removed 30`
+- `find-sum 160`
 
 **Rationale.** A lookup takes the caller's key and only READS it. Nothing on that path takes ownership, so a key built at the call site — `m.get("k" + i.toString())`, the most ordinary map idiom there is — had no owner and leaked, one allocation per call. `insert` already knew this for the key it discards when overwriting; the six read-only lookups did not. getOrDefault leaked twice over: the key, and the DEFAULT whenever the key was found and the default went unused. This fixture exists to be leak-checked, not just to print the right numbers — the counts below were correct all along. tests/leak-clean.txt is what makes it a regression test.
 

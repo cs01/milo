@@ -9167,6 +9167,12 @@ export class Codegen {
     lines.push(`${endLabel}:`);
     const result = this.nextTemp();
     lines.push(`  ${result} = load ${enumTy}, ptr ${resultAddr}`);
+    // indexOf/indexOfFrom/lastIndexOf read both operands and answer an INDEX, so nothing
+    // points into either by the time we get here and both can go now — no deferral to
+    // argTempDrops needed. `s.indexOf("o" + i.toString())` leaked its needle per call, and
+    // `("pre" + i.toString()).indexOf("r")` leaked the receiver as well.
+    this.dropOwnedTemp(lines, strValue, "%String", expr.str);
+    this.dropOwnedTemp(lines, needleValue, "%String", expr.needle);
     return [lines, result, enumTy];
   }
 

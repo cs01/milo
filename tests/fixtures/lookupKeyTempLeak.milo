@@ -4,6 +4,7 @@
 // @expect: default-miss 110
 // @expect: vec-found 30
 // @expect: removed 30
+// @expect: find-sum 160
 // A lookup takes the caller's key and only READS it. Nothing on that path takes ownership,
 // so a key built at the call site — `m.get("k" + i.toString())`, the most ordinary map
 // idiom there is — had no owner and leaked, one allocation per call. `insert` already knew
@@ -67,5 +68,19 @@ pub fn main(): i32 {
     print("default-miss " + dMiss.toString())
     print("vec-found " + vecFound.toString())
     print("removed " + removed.toString())
+
+    // indexOf/indexOfFrom/lastIndexOf read both operands and answer an INDEX, so both the
+    // needle AND a temporary receiver were leaking per call.
+    let hay: string = "hello world hello"
+    var findSum = 0
+    var f = 0
+    while f < 10 {
+        findSum = findSum + (hay.indexOf("o" + f.toString()) ?? 5)
+        findSum = findSum + (hay.indexOfFrom("l" + f.toString(), 0) ?? 5)
+        findSum = findSum + (hay.lastIndexOf("h" + f.toString()) ?? 5)
+        findSum = findSum + (("pre" + f.toString()).indexOf("r") ?? 5)
+        f = f + 1
+    }
+    print("find-sum " + findSum.toString())
     return 0
 }

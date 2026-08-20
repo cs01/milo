@@ -22,6 +22,8 @@ const MILO_ROOT = join(import.meta.dir, "..");
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
 const FIXTURES_DIR = join(MILO_ROOT, "tests", "fixtures");
 const MANIFEST = join(MILO_ROOT, "tests", "selfhost-manifest.txt");
+// How many extra times a newly-passing fixture must pass before the manifest claims it.
+const CONFIRM_RUNS = 3;
 const CHILD_ENV = { ...process.env, MILO_ROOT };
 // 4 workers × 1.5GB compile cap = 6GB worst case, under the 8GB global cap on
 // a 16GB machine. 8×4GB default caps could outrun the watchdog and swap-thrash.
@@ -231,9 +233,29 @@ async function main() {
         console.error(`\nREFUSING TO WRITE: manifest would shrink — these regressed:\n  ${lost.join("\n  ")}`);
         process.exit(1);
       }
+      // A GAIN adopted from one lucky run makes the ratchet permanently red, and it is
+      // the adopter who then looks wrong rather than the flake. `arrayOfGenericElements`
+      // passed once locally, was written into the manifest, and failed the very next CI
+      // sweep -- it passes about 1 run in 3, crashing with no output otherwise.
+      //
+      // Failures already get re-verified serially above, because a fixture can fail from
+      // parallel load alone. Gains deserve the same suspicion in the other direction, so
+      // confirm each new one before claiming it forever.
+      const gains = passing.filter(n => !old.includes(n));
+      const flaky: string[] = [];
+      for (const n of gains) {
+        for (let i = 0; i < CONFIRM_RUNS; i++) {
+          const r = await sweepOne(n, tmpDir);
+          if (!r.ok) { flaky.push(`${n} (failed confirmation ${i + 1}/${CONFIRM_RUNS}: ${r.bucket})`); break; }
+        }
+      }
+      const adopted = passing.filter(n => !flaky.some(f => f.startsWith(`${n} `)));
+      if (flaky.length) {
+        console.error(`\nNOT ADOPTED — passed the sweep but not ${CONFIRM_RUNS} confirmation run(s):\n  ${flaky.join("\n  ")}`);
+      }
       const header = readFileSync(MANIFEST, "utf-8").split("\n").filter(l => l.startsWith("#")).join("\n");
-      writeFileSync(MANIFEST, `${header}\n${passing.join("\n")}\n`);
-      console.log(`\nmanifest: ${old.length} → ${passing.length} fixtures`);
+      writeFileSync(MANIFEST, `${header}\n${adopted.join("\n")}\n`);
+      console.log(`\nmanifest: ${old.length} → ${adopted.length} fixtures`);
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });

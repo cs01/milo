@@ -63,7 +63,7 @@ function genCase(seed: number): { src: string; expect: string[] } {
   for (let op = 0; op < OPS; op++) {
     const kind = pick([
       "push", "push", "push", "pop", "insert", "remove", "swap", "truncate",
-      "reverse", "sort", "get", "clear", "retain", "extend",
+      "reverse", "sort", "get", "clear", "retain", "extend", "sortBy", "sortByKey",
     ]);
     const n = model.length;
 
@@ -105,6 +105,14 @@ function genCase(seed: number): { src: string; expect: string[] } {
     } else if (kind === "sort") {
       body.push(`    v.sort()`);
       model.sort((x, y) => x - y);
+    } else if (kind === "sortBy") {
+      // Declared by VALUE on purpose. The checker allows it for a Copy element and
+      // codegen must load; passing the pointer instead made this a no-op sort.
+      body.push(`    v.sortBy((x: i64, y: i64): bool => x > y)`);
+      model.sort((x, y) => x - y);
+    } else if (kind === "sortByKey") {
+      body.push(`    v.sortByKey((x: i64): i64 => 0 - x)`);
+      model.sort((x, y) => y - x);
     } else if (kind === "clear") {
       body.push(`    v.clear()`);
       model.length = 0;

@@ -51,6 +51,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/fuzz-hashmap.ts` | Differential falsifier for the built-in HASHMAP — the open-addressing table codegen.ts emits, not a .milo file. |
 | `scripts/fuzz-ownership.ts` | Differential falsifier for the OWNERSHIP checker. |
 | `scripts/fuzz-scan.ts` | Raw lexical splitter used by the frontend fuzzer for mutation and reduction. |
+| `scripts/fuzz-string.ts` | Differential falsifier for the built-in STRING methods codegen.ts emits. |
 | `scripts/fuzz-vec.ts` | Differential falsifier for the built-in VEC — the growable array codegen.ts emits. |
 | `scripts/fuzz-worker.ts` | Case runner for scripts/fuzz-frontend.ts. |
 | `scripts/gen-benchmarks.ts` | Renders the benchmark table in benchmarks/README.md and the docs-site chart data from benchmarks/results.json, the one place the numbers live. |

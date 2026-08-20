@@ -107,6 +107,7 @@ docs/site/public/install.sh
 arena-fuzz-*.milo
 hm-fuzz-*.milo
 vec-fuzz-*.milo
+str-fuzz-*.milo
 
 # Generated game assets — 82 MB of downloaded terrain, imagery and planet maps.
 # Regenerate with scripts/fetch-assets.sh; that script (not this repo) is the

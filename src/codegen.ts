@@ -5931,6 +5931,26 @@ export class Codegen {
         closureBody.push(`  %${p.name}.addr = alloca ${lt}`);
         closureBody.push(`  store ${lt} %${p.name}, ptr %${p.name}.addr`);
         this.locals.set(p.name, { type: lt, typeKind: p.type, mutable: false, isRef: false });
+        // A by-value owned parameter belongs to the CALLEE, exactly as it does for a plain
+        // `fn` (see the matching block in the function-parameter loop). Without this a
+        // closure never dropped such a parameter — and the caller does not either: it moves
+        // the value in, zeroing the slot and clearing the alive flag, then frees nothing.
+        // So nobody did, and every call leaked the argument:
+        //
+        //     let f = (a: string): i64 => (a + "x").len
+        //     let s = big()
+        //     f(s)                      // s's buffer leaked, every call
+        //
+        // The leak gate never saw it because `leaks` finds a small block reachable from a
+        // stale stack slot and does not report it; at 16 KB a string it is 200 leaks per
+        // 200 calls. Registering here is a drop the caller cannot double, precisely because
+        // the caller was not dropping at all.
+        if (this.needsDropCg(p.type)) {
+          const aliveFlag = `%${p.name}.alive`;
+          closureBody.push(`  ${aliveFlag} = alloca i1`);
+          closureBody.push(`  store i1 1, ptr ${aliveFlag}`);
+          this.droppableLocals.push({ name: p.name, typeKind: p.type, aliveFlag, addr: `%${p.name}.addr` });
+        }
       }
     }
 

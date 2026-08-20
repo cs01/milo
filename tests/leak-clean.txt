@@ -4,6 +4,8 @@ addressOf
 aesGcmLengthGuards
 aliasBehindRef
 aliasResultFromConversion
+arenaHandles
+arenaRead
 arena_clear
 arenaBasic
 arenaContracts
@@ -14,6 +16,8 @@ arenaModify
 arenaWith
 argparseAbsentVsEmpty
 arithmetic
+arrayCombinators
+arrayOfGenericElements
 array_index_clone
 arrayCopy
 arrayLen
@@ -37,6 +41,8 @@ bigZeroBuffer
 binary
 bitCount
 bitRotate
+blanketImpl
+blanketImplHashMap
 blockScopeDrop
 booleanLogic
 borrowed_literal_arg_temp
@@ -68,10 +74,12 @@ closureEmptyParams
 closureInferParams
 closureLet
 closureMapFilter
+closureMoveNested
 closureMultiCapture
 closureMutCapture
 closureNoCapture
 closureNonRetainingArg
+closureParamOwnership
 closureStoredMove
 closureWrapperMethodForward
 coalesceHeapPayload
@@ -95,15 +103,20 @@ defaultValue
 deflateRoundtrip
 derefStore
 deriveJsonErrors
+deriveJsonFixedArray
 deriveJsonGeneric
 deriveJsonHandWritten
 deriveJsonHashMap
 deriveJsonRecursive
+deriveTemplate
+deriveTemplateJson
 discardRebind
 displayStructEnum
 dlSelfSymbol
 dropAccounting
+dropBehindTraitObject
 dropEarlyReturn
+dropEmptyContainerField
 dropMatchBinding
 dropRunsAfterFieldClone
 dropString
@@ -156,6 +169,7 @@ floatExponent
 floatLiteralNarrowing
 floatNanCompare
 floatRoundTrip
+flybyGeometry
 fnArgI64Lit
 fnInStruct
 fnPtrDispatch
@@ -192,10 +206,13 @@ genericFn
 genericFnPair
 genericIterator
 genericIterFn
+genericMethod
+genericMethodTrait
 genericRefClosure
 genericRefInfer
 genericResult
 genericStack
+genericStaticInfer
 genericStruct
 genericStructFn
 genericStructMulti
@@ -203,6 +220,9 @@ genericStructVecField
 genericStructVecInfer
 genericTraitDrop
 getOrDefaultOwnedResult
+globalRefFold
+globalRuntimeInitScalar
+globalVarRefNoFold
 global_ptr
 globalArrayInit
 globalConstFold
@@ -228,6 +248,7 @@ hashmapOverwrite
 hashmapRemove
 hashmapStringKey
 hashmapStructKey
+hashmapTombstoneReuse
 heapBasic
 heapRecursive
 hello
@@ -241,6 +262,7 @@ html
 httpAbsentVsEmpty
 httpFetchCoexist
 httpRenderResponse
+ifLetOwnedInspect
 if_expr
 ifElse
 ifExprCoerce
@@ -305,6 +327,7 @@ loopInvariant
 mapIterTwoLoops
 matchBareVariant
 matchBigAggSubject
+matchConsumesSubjectDrop
 matchDivergingArmMove
 matchExpr
 matchHeapDerefBorrows
@@ -394,6 +417,7 @@ rngSeeded
 rvalueIndex
 safeExternCall
 saturatingArith
+saturatingMulSign
 secondClassRef
 selectChildExit
 selectTimerMain
@@ -406,6 +430,7 @@ signalTwoPipes
 sigpipeIgnored
 sizeOf
 sliceCloneReassign
+sliceCombinators
 sliceI32Bounds
 sliceScopeRelease
 sliceView
@@ -513,6 +538,9 @@ unwrap_temp_no_leak
 unwrapOption
 urlParse
 variables
+vecCallbackByValue
+vecClone
+vecRemoveDiscardedDrop
 vec_infer_from_push
 vec_swap
 vecAnyAll
@@ -548,5 +576,6 @@ wsBasic
 wsFrameRoundtrip
 xxh64
 zipRead
+zstdCompress
 zstdFrame
 zstdRoundtrip

@@ -24,41 +24,6 @@ pub struct Json {
     root: i64,
 }
 
-fn jsonNull(): Json {
-    var nodes: Vec<JsonNode> = Vec.new()
-    nodes.push(JsonNode {
-        kind: 0, boolVal: false, numVal: 0.0, strStart: 0, strLen: 0, childStart: 0, childCount: 0, keyStart: 0
-    }
-    )
-    return Json {
-        source: "", nodes: nodes, childIdx: Vec.new(), keyOffsets: Vec.new(), keyLens: Vec.new(), root: 0
-    }
-}
-
-fn jsonClone(src: &Json): Json {
-    var nodes: Vec<JsonNode> = Vec.new()
-    for i in 0..src.nodes.len() {
-        let n = src.nodes[i]
-        nodes.push(JsonNode {
-            kind: n.kind, boolVal: n.boolVal, numVal: n.numVal, strStart: n.strStart, strLen: n.strLen, childStart: n.childStart, childCount: n.childCount, keyStart: n.keyStart
-        }
-        )
-    }
-    var ci: Vec<i64> = Vec.new()
-    for i in 0..src.childIdx.len() {
-        ci.push(src.childIdx[i])
-    }
-    var ko: Vec<i64> = Vec.new()
-    var kl: Vec<i64> = Vec.new()
-    for i in 0..src.keyOffsets.len() {
-        ko.push(src.keyOffsets[i])
-        kl.push(src.keyLens[i])
-    }
-    return Json {
-        source: src.source.clone(), nodes: nodes, childIdx: ci, keyOffsets: ko, keyLens: kl, root: src.root
-    }
-}
-
 // ── Key comparison (byte-by-byte against source, zero allocation) ──
 
 fn jsonKeyEq(source: &string, off: i64, klen: i64, target: &string): bool {

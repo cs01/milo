@@ -1,0 +1,35 @@
+// @expect: temp 8000
+// @expect: named 8000
+// substr COPIES out of its receiver, so nothing points into the receiver afterwards and a
+// temporary one can be released immediately. It was not: `big(i).substr(0, 100).len` leaked
+// the entire receiver on every call, while the small 100-byte result was correctly freed.
+//
+// ~16 KB strings on purpose — `leaks` finds a small abandoned block reachable from a stale
+// stack slot and reports nothing, so a fixture has to allocate big enough for the oracle to
+// see the failure it exists to catch. See tests/fixtures/closureParamOwnership.milo.
+fn big(n: i64): string {
+    return ("ab" + n.toString()).repeat(4000)
+}
+
+pub fn main(): i32 {
+    // temporary receiver — this is the one that leaked
+    var temp = 0
+    var i = 0
+    while i < 80 {
+        temp = temp + big(i).substr(0, 100).len
+        i = i + 1
+    }
+    print("temp " + temp.toString())
+
+    // a named receiver was always correct and must stay correct: dropping it here would be
+    // a double free, since the local still owns it.
+    var named = 0
+    var j = 0
+    while j < 80 {
+        let s = big(j)
+        named = named + s.substr(0, 100).len
+        j = j + 1
+    }
+    print("named " + named.toString())
+    return 0
+}

@@ -502,6 +502,7 @@ structI64Field
 structMutate
 structPackedLayout
 structs
+substrReceiverTemp
 subtleConstantTimeEq
 swapDistinctIndex
 targetOs

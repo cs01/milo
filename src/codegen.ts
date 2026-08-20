@@ -25,6 +25,18 @@ export const NOT_OWNED_TEMP: readonly string[] = [
   "ArrayLen", "ArrayRepeat", "BitIntrinsic", "BoolLit", "CFnCall", "Cast",
   "CharLit", "CheckedArith", "Closure", "EnumTryFrom", "FieldAccess", "FloatLit",
   "Forget", "HashMapClear", "HashMapContains", "HashMapInsert", "HashMapLen",
+  // KNOWN LEAK, and NOT safe to move to the owned side as-is. An `if`/`match` used as an
+  // expression yields an owned value when its arms do, and nothing frees it:
+  // `(if c { big(i) } else { big(j) }).len` leaks the whole string every evaluation
+  // (measured: 80 leaks / 1.9 MB over 80 iterations).
+  //
+  // Moving it to isOwnedTempExpr fixes that and CRASHES with a double free when an arm
+  // yields a LOCAL — `if c { a } else { b }` for locals a, b aborts with exit 133, because
+  // the arm's value is still owned by the enclosing scope. Tried, measured, reverted.
+  //
+  // The safe condition is DefaultValue's: every arm that can produce the result must be one
+  // we own. That needs each arm's tail value, which is a statement list here rather than a
+  // single expression — hence not a one-line change, and left alone rather than guessed.
   "HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident", "IfExpr",
   "IntLit", "InterfaceCoerce", "IsCheck", "MatchExpr", "MemSwap", "OffsetOf",
   "OptionOp", "PtrDeref", "RangeCheck", "SaturatingArith", "SizeOf", "StringCstr",
@@ -8921,6 +8933,10 @@ export class Codegen {
     const s2 = this.nextTemp();
     lines.push(`  ${s2} = insertvalue %String ${s1}, i64 ${allocLen}, 2`);
 
+    // substr COPIES out of its receiver, so nothing points into it afterwards and a
+    // temporary receiver can go: `big(i).substr(0, 100).len` leaked the whole receiver on
+    // every call. Same shape as the Vec/HashMap/StringLen receiver drops.
+    this.dropOwnedTemp(lines, strVal, "%String", expr.str);
     return [lines, s2, "%String"];
   }
 
@@ -11917,7 +11933,6 @@ export class Codegen {
       // `v.fold("", (a: string, x: &i64): string => a + x.toString())` hands back a String
       // nobody else owns. It sat in NOT_OWNED_TEMP with the scalar-yielding Vec reads.
       // dropOwnedTemp still checks needsDropCg, so an i64 accumulator is unaffected.
-      case "VecFold":
       // Option-returning Vec reads: the payload is either cloned out of the buffer
       // (get/first/last/min/max/find) or moved out of it (pop). Either way nothing
       // else owns it, so `print(must(v, 0, "v"))` used to leak one copy per call.

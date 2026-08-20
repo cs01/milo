@@ -575,6 +575,12 @@ fn osThreadTrampoline(arg: *u8): *u8 {
         // glue then drops them a second time. Whether a capture survives the body is
         // per-closure, so this trampoline cannot decide it; that is the same shape as the
         // milojs failure recorded under #18, reached from a different direction.
+        //
+        // RETRIED 2026-08-20 after the owned-value fixes that session landed — closure
+        // by-value parameters, `??`, substr receivers, if/match results, all of which
+        // changed who drops what. It still SIGSEGVs battleConcurrency (139, no output).
+        // So this is not a consequence of the classification gaps fixed elsewhere; it is
+        // its own missing contract, and the ownership work did not move it.
         free(envPtr)
         free(arg)
         return 0 as *u8

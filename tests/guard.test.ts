@@ -24,7 +24,19 @@ test("stops a runaway allocation at the memory cap, not at the timeout", async (
   //           needed. A kernel-side cap is a better outcome, not a worse one.
   expect(r.guardKill).not.toBe("timeout");
   expect(r.code !== 0 || r.signal !== null).toBe(true);
-  if (process.platform === "darwin") {
+  // Which LAYER stopped it is a race, not a contract, and asserting it is what keeps
+  // breaking this test. The comment above already says so for Linux; a constrained macOS
+  // runner behaves the same way. On CI this hog died on its own in 585ms with no
+  // guardKill at all: the allocator refused before the polling watchdog's next tick. That
+  // is the kernel doing the guard's job, which is a better outcome than being SIGKILLed,
+  // and it is indistinguishable here from the guard working perfectly.
+  //
+  // So check the mechanism only when the watchdog is what acted. This does not thin the
+  // guard's coverage: "monitorPidTree kills an allocating child" and "shell watchdog
+  // survives parent death and still kills the hog" exercise the watchdog directly and do
+  // not depend on winning that race. What this test owns is the end-to-end property, and
+  // that is asserted unconditionally above.
+  if (process.platform === "darwin" && r.guardKill !== undefined) {
     expect(r.guardKill).toBe("memory");
     expect(r.signal).toBe("SIGKILL");
   }

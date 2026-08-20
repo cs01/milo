@@ -4760,15 +4760,24 @@ export class Codegen {
       case "StructLit":
         return this.genStructLit(expr, lines);
       case "FieldAccess": {
-        const [ptrLines, ptr, fieldTy] = this.genFieldPtr(expr);
+        const recvTemps: { addr: string; type: TypeKind }[] = [];
+        const [ptrLines, ptr, fieldTy] = this.genFieldPtr(expr, recvTemps);
         lines.push(...ptrLines);
         const val = this.nextTemp();
         lines.push(`  ${val} = load ${fieldTy}, ptr ${ptr}`);
         // Moving a non-Copy field out of a struct: zero the source field so the
         // struct's own drop glue skips it (a zeroed %String/Vec has cap=0/null).
         // Otherwise both the moved value and the struct free the same buffer.
-        if (expr.isMove && this.needsDropCg(expr.type)) {
+        const fieldMoved = expr.isMove && this.needsDropCg(expr.type);
+        if (fieldMoved) {
           lines.push(this.zeroStore(fieldTy, ptr));
+        }
+        // Release a receiver nobody owns, now that its field has been read. Only when
+        // the value just loaded cannot alias what the drop frees: either the field is
+        // Copy, or it was moved out and its slot zeroed just above. A borrowed owning
+        // field would still point into the struct, so leave that case alone.
+        if (recvTemps.length > 0 && (fieldMoved || !this.needsDropCg(expr.type))) {
+          for (const t of recvTemps) this.emitDropValue(lines, t.addr, t.type);
         }
         return [lines, val, fieldTy];
       }
@@ -7024,7 +7033,11 @@ export class Codegen {
     return [lines, byte, "i8"];
   }
 
-  private genFieldPtr(expr: HIRExpr & { kind: "FieldAccess" }): Gen {
+  // `ownedTemps`, when supplied, collects receivers that had to be materialised into an
+  // alloca because they are rvalues nobody owns (`makeRes().id`). The caller drops them
+  // AFTER it has read the field; dropping here would free the struct out from under the
+  // load. Without this the temporary's destructor never ran at all.
+  private genFieldPtr(expr: HIRExpr & { kind: "FieldAccess" }, ownedTemps?: { addr: string; type: TypeKind }[]): Gen {
     const lines: string[] = [];
     // pointer-to-struct: load the ptr value, GEP into the pointed-to struct
     if (expr.object.type.tag === "ptr" && expr.object.type.inner.tag === "struct") {
@@ -7051,6 +7064,9 @@ export class Codegen {
       lines.push(`  store ${exprTy} ${exprVal}, ptr ${tmp}`);
       finalPtr = tmp;
       finalTy = exprTy;
+      if (ownedTemps && this.isOwnedTempExpr(expr.object) && this.needsDropCg(expr.object.type)) {
+        ownedTemps.push({ addr: tmp, type: expr.object.type });
+      }
     }
     const structName = this.getStructName(finalTy);
     if (structName) {

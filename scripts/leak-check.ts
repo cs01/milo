@@ -91,6 +91,20 @@ function buildCmd(src: string, outBin: string): [string, string[]] {
 // "no verdict" — 17 of them — which the ratchet then declined to count either way.
 const MAC_SUMMARY = /(\d+) leaks? for (\d+) total leaked bytes/;
 
+// WHAT THIS GATE DOES NOT SEE: `leaks` walks from roots, and a SMALL abandoned block is
+// routinely still reachable from a stale stack slot — so it is not reported. The size
+// matters, not the logic. The same program that leaks one allocation per call shows
+// "0 leaks" with a 20-byte string and 200 leaks with a 16 KB one.
+//
+// That is not hypothetical: every closure call leaked its owned argument for as long as
+// closures have existed (fixed in d781fd9b), and none of the fixtures below caught it —
+// 28 of them were leaking the whole time and reported clean. It was found only by scaling
+// one repro to `("x" + i.toString()).repeat(4000)`.
+//
+// So a green run here means "no fixture leaks a block big enough for `leaks` to notice",
+// which is weaker than it looks. When writing a fixture to pin a leak, allocate BIG and say
+// why — see tests/fixtures/closureParamOwnership.milo.
+
 async function checkOne(name: string, tmpDir: string): Promise<Outcome> {
   const src = join(FIXTURES_DIR, `${name}.milo`);
   const outBin = join(tmpDir, name);

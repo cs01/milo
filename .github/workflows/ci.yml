@@ -51,12 +51,13 @@ jobs:
       # double-free in generated code had no gate. The leak ratchet above cannot see any of
       # those — different question, and it only sees blocks big enough for `leaks` to report.
       #
-      # COST: ~5 min locally for 641 programs (each is a separate -fsanitize=address build
-      # plus a run), so budget more on a runner. That is small next to the leak ratchet
-      # above but it is on every push. If it starts hurting, the precedent is right here in
-      # .github/workflows/selfhost.yml: keep the fast check on push and move the sweep to
-      # the nightly schedule. Right now it finds nothing — its whole value is catching a
-      # future regression, which is an argument for running it often, not rarely.
+      # COST, measured on this runner rather than guessed: 4m38s for the fixtures corpus
+      # (run 32382533309), against 9m11s for the leak ratchet immediately above. Each entry
+      # is its own -fsanitize=address build plus a run, so it scales with the corpus.
+      # If it ever starts hurting, the precedent is in .github/workflows/selfhost.yml: keep
+      # the fast check on push, move the slow sweep to the nightly schedule. It finds
+      # nothing today — the whole value is catching a future regression, which argues for
+      # running it often rather than rarely.
       - name: AddressSanitizer sweep
         run: bun run scripts/asan-sweep.ts --all
 

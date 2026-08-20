@@ -196,7 +196,18 @@ async function main() {
         console.error(`\nLEAK RATCHET FAILED: ${regressed.length} fixture(s) that used to exit clean now leak:\n  ${regressed.join("\n  ")}`);
         process.exit(1);
       }
-      console.log(`\nLEAK RATCHET OK — all ${claimed.length} manifest fixtures still exit clean`);
+      // Excusing an unmeasured fixture is right one at a time and catastrophic in bulk:
+      // if `leaks` changes its output and the verdict regex stops matching, EVERY fixture
+      // becomes "no-verdict", `regressed` is empty, and this gate passes forever having
+      // measured nothing. Scattered build breaks are the case the exemption exists for;
+      // most of the manifest going dark at once is a broken harness, not a clean run.
+      const measured = claimed.filter(n => !unmeasured.has(n)).length;
+      if (measured < Math.ceil(claimed.length * 0.9)) {
+        console.error(`\nLEAK GATE BROKEN: only ${measured}/${claimed.length} manifest fixtures produced a verdict.`);
+        console.error(`Too few to call this a pass — check that the '${IS_MAC ? "leaks -atExit" : "LeakSanitizer"}' output still parses.`);
+        process.exit(1);
+      }
+      console.log(`\nLEAK RATCHET OK — ${measured}/${claimed.length} manifest fixtures measured, all still exit clean`);
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });

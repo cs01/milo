@@ -156,4 +156,21 @@ for (const f of examples) {
 console.log(`\nexamples: ${compiled} compiled, ${ran} of those ran, ${skipped} library modules skipped, ${assetsMissing} skipped for missing assets, ${failures.length} failed`);
 if (assetsMissing > 0) console.log(`${assetsMissing} example(s) were NOT built — run scripts/fetch-assets.sh for their assets`);
 for (const fl of failures) console.log(`\n--- ${fl.phase} FAIL: ${fl.file} ---\n${fl.detail}`);
+
+// Exiting on `failures.length` alone means this passes when it does nothing. If the
+// directory walk stops finding entrypoints, or the `// @run:` regex stops matching after
+// a formatter change moves the annotation, `compiled` and `ran` fall to zero, no failure
+// is recorded, and CI stays green while executing nothing — which is the specific blind
+// spot this script was written to close in the first place.
+//
+// Floors, not exact counts, so adding or retiring an example needs no edit here. An
+// asset-skipped example still counts as discovered; only a compile floor would be unfair
+// on a machine with no assets fetched, so that one includes them.
+const COMPILE_FLOOR = 40, RUN_FLOOR = 25;
+const discovered = compiled + assetsMissing;
+if (discovered < COMPILE_FLOOR || ran < RUN_FLOOR) {
+  console.error(`\nHARNESS BROKEN: discovered ${discovered} entrypoints (floor ${COMPILE_FLOOR}) and ran ${ran} (floor ${RUN_FLOOR}).`);
+  console.error(`Too few to call this a pass — check the directory walk and the '// @run:' annotation match.`);
+  process.exit(1);
+}
 process.exit(failures.length ? 1 : 0);

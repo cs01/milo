@@ -314,7 +314,13 @@ pub fn main(): i32 {
     // speed; `--scale 100` gives back every pixel the display has.
     // Zero means "pick one" — `renderSize` decides, because it is the only place
     // that knows how big the drawable actually is.
-    let renderPct = parseInt(o.getString("scale")) ?? 0
+    // getString is Option<string>. `scale` is registered with a default so it is always
+    // Some, but a string is not Copy, so the value has to be moved out with a match
+    // rather than unwrapOr'd.
+    let renderPct = match o.getString("scale") {
+        Option.Some(scaleArg) => parseInt(scaleArg) ?? 0
+        Option.None => 0
+    }
     var scr = match screenOpen("FLYBY — written in Milo", W, H, W, H, renderPct, o.getBool("fullscreen"), o.getBool("maximized")) {
         Result.Ok(opened) => opened
         Result.Err(e) => {

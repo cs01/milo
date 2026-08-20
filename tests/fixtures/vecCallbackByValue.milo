@@ -46,7 +46,12 @@ pub fn main(): i32 {
     // The sort callbacks live in codegen-vec.ts, which the first pass at this fix did not
     // touch: sortByKey ordered by NEGATED POINTER and sortBy left the vector untouched.
     var sb: Vec<i64> = [5, 1, 4, 2, 3]
-    sb.sortBy((x: i64, y: i64): bool => x > y)
+    sb.sortBy((x: i64, y: i64): i32 => if x > y {
+        1
+    } else {
+        0
+    }
+    )
     var o1: string = "sortBy"
     for x in sb {
         o1 = o1 + " " + x.toString()

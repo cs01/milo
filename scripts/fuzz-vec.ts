@@ -108,7 +108,7 @@ function genCase(seed: number): { src: string; expect: string[] } {
     } else if (kind === "sortBy") {
       // Declared by VALUE on purpose. The checker allows it for a Copy element and
       // codegen must load; passing the pointer instead made this a no-op sort.
-      body.push(`    v.sortBy((x: i64, y: i64): bool => x > y)`);
+      body.push(`    v.sortBy((x: i64, y: i64): i32 => if x > y { 1 } else { 0 })`);
       model.sort((x, y) => x - y);
     } else if (kind === "sortByKey") {
       body.push(`    v.sortByKey((x: i64): i64 => 0 - x)`);

@@ -9560,6 +9560,19 @@ export class TypeChecker {
       this.error(`'${method}' callback parameter ${i + 1} is declared ${typeName(got)}, but ${method} passes ${typeName(expected)}`, sp);
       return;
     }
+    // The RETURN type too. Only the parameters were checked, so a comparator declared
+    // `: bool` where sortBy wants an i32 three-way result was accepted, and codegen then
+    // read an i1 return as i32 — zero-extended on arm64, garbage in the upper bits on
+    // x86_64. Silent, and wrong on one platform only.
+    //
+    // `unknown` means the combinator does not constrain it (map's element type is whatever
+    // the callback returns), so it is not a mismatch.
+    if (want.ret.tag !== "unknown" && actual.ret.tag !== "unknown" && !typeEq(actual.ret, want.ret)) {
+      this.error(
+        `'${method}' callback returns ${typeName(actual.ret)}, but ${method} expects ${typeName(want.ret)}`,
+        sp,
+      );
+    }
   }
 
   private isCopyBind(bt: TypeKind, subjectIsPlace: boolean): boolean {

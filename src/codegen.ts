@@ -11966,7 +11966,21 @@ export class Codegen {
   // so its drop is a no-op — those two are safe unconditionally. Everything else, Idents
   // included, stays false and keeps leaking rather than risking a double free.
   private defaultValueOwnsResult(expr: HIRExpr & { kind: "DefaultValue" }): boolean {
-    const branchOwns = (e: HIRExpr): boolean => e.kind === "StringLit" || this.isOwnedTempExpr(e);
+    // An Ident counts, for the same reason it does in unwrapMovesPayload: genDefaultValue
+    // MOVES out of whichever branch it takes, zeroing the source, so the named variable is
+    // not going to be dropped by its scope either. Requiring a literal or a temporary here
+    // missed the commonest shape by far —
+    //
+    //     let o: Option<string> = Option.Some(big(i))
+    //     (o ?? "d").len                                  // payload leaked, every time
+    //
+    // — one payload per evaluation, on BOTH branches. Still an AND: every branch that could
+    // produce the result has to be one this owns, or dropping it could free something the
+    // caller still holds.
+    const branchOwns = (e: HIRExpr): boolean =>
+      e.kind === "StringLit"
+      || this.isOwnedTempExpr(e)
+      || (this.needsDropCg(expr.type) && e.kind === "Ident");
     return branchOwns(expr.operand) && branchOwns(expr.default);
   }
 

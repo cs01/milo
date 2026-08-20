@@ -100,6 +100,7 @@ cValue
 dateTime
 dateTimeLocal
 defaultValue
+defaultValueOwnership
 deflateRoundtrip
 derefStore
 deriveJsonErrors

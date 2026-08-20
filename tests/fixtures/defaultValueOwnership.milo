@@ -1,0 +1,65 @@
+// @expect: ident 1560000
+// @expect: none-default 1560000
+// @expect: bound 1560000
+// @expect: call 1560000
+// `??` MOVES out of whichever branch it takes, zeroing the source — so its result is owned
+// and the named variable it came from will not be dropped by its scope either. The
+// ownership test required every branch to be a literal or a temporary, which missed the
+// commonest shape: an Option held in a variable.
+//
+//     let o: Option<string> = Option.Some(big(i))
+//     (o ?? "d").len                                // payload leaked, every evaluation
+//
+// Both branches leaked — Some through the payload, None through a computed default.
+//
+// ~16 KB strings on purpose: `leaks` finds a small abandoned block reachable from a stale
+// stack slot and reports nothing, so this fixture has to allocate big enough for the oracle
+// to see the failure it exists to catch. See tests/fixtures/closureParamOwnership.milo.
+fn big(n: i64): string {
+    return ("ab" + n.toString()).repeat(4000)
+}
+
+fn maybe(n: i64): Option<string> {
+    return Option.Some(big(n))
+}
+
+pub fn main(): i32 {
+    var ident = 0
+    var i = 0
+    while i < 100 {
+        let o: Option<string> = Option.Some(big(i))
+        ident = ident + (o ?? "d").len
+        i = i + 1
+    }
+    print("ident " + ident.toString())
+
+    // None branch, with a computed default that becomes the result
+    var noneDefault = 0
+    var j = 0
+    while j < 100 {
+        let o: Option<string> = Option.None
+        noneDefault = noneDefault + (o ?? big(j)).len
+        j = j + 1
+    }
+    print("none-default " + noneDefault.toString())
+
+    // binding the result was always correct; it must stay correct
+    var bound = 0
+    var k = 0
+    while k < 100 {
+        let o: Option<string> = Option.Some(big(k))
+        let r = o ?? "d"
+        bound = bound + r.len
+        k = k + 1
+    }
+    print("bound " + bound.toString())
+
+    var call = 0
+    var m = 0
+    while m < 100 {
+        call = call + (maybe(m) ?? "d").len
+        m = m + 1
+    }
+    print("call " + call.toString())
+    return 0
+}

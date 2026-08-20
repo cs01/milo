@@ -147,30 +147,27 @@ function requiredPackage(dir: string, file: string): string | null {
   return m ? m[1] : null;
 }
 
-// Present in the local package cache? Mirrors src/pkg.ts's cache root, honouring
-// XDG_CACHE_HOME, and answers "absent" rather than throwing on any surprise.
-function packageMissing(name: string): boolean {
+// Can this fixture's package actually be resolved? ASK THE COMPILER rather than guess
+// at the cache layout, which is what the previous version did and got wrong: it scanned
+// the cache for a directory named exactly `gl`, while `milo install` lays a package down
+// under its REPO name (github.com/milo-language/milo-gl/v0.2.0). So the fixture skipped
+// on every machine that had installed the package normally, and ran only where a legacy
+// `gl` directory happened to survive -- a skip that fired precisely when it should not.
+//
+// The alias cannot be looked up by name either: flybyGeometry reaches `gl` transitively
+// through examples/games/flight, so the mapping lives in THAT project's manifest, not
+// anywhere this test can see. A resolution attempt is the only honest answer, and it
+// costs one `check` per fixture carrying the annotation (one, today).
+function packageUnresolvable(dir: string, file: string): boolean {
   try {
-    const xdg = process.env.XDG_CACHE_HOME;
-    const root = xdg && xdg.length > 0 ? join(xdg, "milo") : join(homedir(), ".milo", "cache");
-    if (!existsSync(root)) return true;
-    const stack = [root];
-    for (let depth = 0; depth < 4 && stack.length; depth++) {
-      const next: string[] = [];
-      for (const d of stack) {
-        for (const e of readdirSync(d)) {
-          if (e === name) return false;
-          const child = join(d, e);
-          try { if (statSync(child).isDirectory()) next.push(child); } catch { /* unreadable */ }
-        }
-      }
-      stack.length = 0;
-      stack.push(...next);
-    }
-    return true;
+    const r = spawnSync("bun", ["run", "src/main.ts", "check", join(dir, file)], {
+      encoding: "utf8", timeout: 60_000,
+    });
+    if (r.status === 0) return false;
+    const out = (r.stderr || "") + (r.stdout || "");
+    return /not found in the local package cache|cannot open module/.test(out);
   } catch { return true; }
 }
-
 function lane(dir: string, describeName: string): string[] {
   let entries: string[] = [];
   try { entries = readdirSync(dir); } catch { return []; }
@@ -188,7 +185,7 @@ describe("fixtures (compile + run)", () => {
   const files: string[] = [];
   for (const f of all) {
     const pkg = requiredPackage(FIXTURES_DIR, f);
-    if (pkg && packageMissing(pkg)) blocked.set(f, pkg);
+    if (pkg && packageUnresolvable(FIXTURES_DIR, f)) blocked.set(f, pkg);
     else files.push(f);
   }
   for (const [file, pkg] of blocked) {

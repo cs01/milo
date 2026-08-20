@@ -111,6 +111,12 @@ jobs:
       - name: Toolchain info
         run: clang --version && clang -print-target-triple
         continue-on-error: true
+      - name: Sync example package deps (non-fatal)
+        continue-on-error: true
+        run: |
+          for f in $(find examples -name milo.json); do
+            (cd "$(dirname "$f")" && bun run "$GITHUB_WORKSPACE/src/main.ts" install) || true
+          done
       - run: bun test
       # Reads this runner's headers, so it's the only thing that can check the Linux decls.
       - run: bun run scripts/audit-extern-returns.ts

@@ -12,7 +12,13 @@
 // contents after every mutation rather than a count and a checksum. That is the strongest
 // oracle available here and it costs nothing extra.
 //
-// Usage: bun scripts/fuzz-vec.ts [--cases N] [--ops N] [--seed N] [--keep] [--verbose]
+// `--owned` switches the element type from i64 to string. That is not a cosmetic change:
+// it turns on drop glue for every op, and pairs with `--leaks` (macOS `leaks -atExit`) to
+// oracle something the value model cannot see at all — whether the right ANSWER was
+// produced while quietly losing memory. Four real leaks were found by hand this way before
+// this mode existed, all in the shape "nobody owns this temporary".
+//
+// Usage: bun scripts/fuzz-vec.ts [--cases N] [--ops N] [--seed N] [--owned] [--leaks] [--keep] [--verbose]
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { execFileSync } from "child_process";
 import { tmpdir } from "os";
@@ -28,6 +34,20 @@ const OPS = argOf("--ops", 45);
 const SEED = argOf("--seed", 1);
 const KEEP = process.argv.includes("--keep");
 const VERBOSE = process.argv.includes("--verbose");
+const OWNED = process.argv.includes("--owned");
+const LEAKS = process.argv.includes("--leaks");
+if (LEAKS && process.platform !== "darwin") {
+  console.error("--leaks uses macOS `leaks -atExit`; on Linux use scripts/leak-check.ts (LeakSanitizer)");
+  process.exit(2);
+}
+// With owned elements the values are strings, so the model holds their TEXT and the
+// generated program prints it. Everything else about the op sequence is identical.
+const ELEM = OWNED ? "string" : "i64";
+const lit = (n: number) => (OWNED ? `"e${n}"` : String(n));
+const shown = (n: number) => (OWNED ? `e${n}` : String(n));
+// A string is already printable; an i64 needs .toString(). Everything the generator prints
+// goes through this so the two modes emit the same shape of program.
+const asStr = (e: string) => (OWNED ? e : `${e}.toString()`);
 
 function rng(seed: number) {
   let s = seed >>> 0 || 1;
@@ -54,42 +74,43 @@ function genCase(seed: number): { src: string; expect: string[] } {
     const id = dumpId++;
     body.push(`    var d${id}: string = ""`);
     body.push(`    for x in v {`);
-    body.push(`        d${id} = d${id} + x.toString() + ","`);
+    body.push(`        d${id} = d${id} + ${asStr("x")} + ","`);
     body.push(`    }`);
     body.push(`    print("D" + v.len.toString() + "[" + d${id} + "]")`);
-    expect.push(`D${model.length}[${model.map(x => `${x},`).join("")}]`);
+    expect.push(`D${model.length}[${model.map(x => `${shown(x)},`).join("")}]`);
   };
 
   for (let op = 0; op < OPS; op++) {
     const kind = pick([
       "push", "push", "push", "pop", "insert", "remove", "swap", "truncate",
-      "reverse", "sort", "get", "clear", "retain", "extend", "sortBy", "sortByKey",
+      "reverse", "sort", "get", "clear", "retain", "extend",
+      ...(OWNED ? ["containsTemp", "indexOfTemp", "cloneLen"] : ["sortBy", "sortByKey"]),
     ]);
     const n = model.length;
 
     if (kind === "push") {
       const val = nextVal++;
-      body.push(`    v.push(${val})`);
+      body.push(`    v.push(${lit(val)})`);
       model.push(val);
     } else if (kind === "pop") {
       body.push(`    match v.pop() {`);
-      body.push(`        Option.Some(x) => { print("P" + x.toString()) }`);
+      body.push(`        Option.Some(x) => { print("P" + ${asStr("x")}) }`);
       body.push(`        Option.None => { print("Pnone") }`);
       body.push(`    }`);
       const x = model.pop();
-      expect.push(x === undefined ? "Pnone" : `P${x}`);
+      expect.push(x === undefined ? "Pnone" : `P${shown(x)}`);
     } else if (kind === "insert") {
       // Valid range is 0..len inclusive; an out-of-range insert traps by design and would
       // be testing the bounds check, not the shift.
       const at = Math.floor(rnd() * (n + 1));
       const val = nextVal++;
-      body.push(`    v.insert(${at}, ${val})`);
+      body.push(`    v.insert(${at}, ${lit(val)})`);
       model.splice(at, 0, val);
     } else if (kind === "remove") {
       if (n === 0) { op--; continue; }
       const at = Math.floor(rnd() * n);
-      body.push(`    print("R" + v.remove(${at}).toString())`);
-      expect.push(`R${model.splice(at, 1)[0]}`);
+      body.push(`    print("R" + ${asStr(`v.remove(${at})`)})`);
+      expect.push(`R${shown(model.splice(at, 1)[0]!)}`);
     } else if (kind === "swap") {
       if (n === 0) { op--; continue; }
       const a = Math.floor(rnd() * n), b = Math.floor(rnd() * n);
@@ -103,8 +124,11 @@ function genCase(seed: number): { src: string; expect: string[] } {
       body.push(`    v.reverse()`);
       model.reverse();
     } else if (kind === "sort") {
+      // Vec<string>.sort() is lexicographic, and "e10" sorts before "e2" — the model has
+      // to compare the TEXT, not the number behind it.
       body.push(`    v.sort()`);
-      model.sort((x, y) => x - y);
+      if (OWNED) model.sort((x, y) => (shown(x) < shown(y) ? -1 : shown(x) > shown(y) ? 1 : 0));
+      else model.sort((x, y) => x - y);
     } else if (kind === "sortBy") {
       // Declared by VALUE on purpose. The checker allows it for a Copy element and
       // codegen must load; passing the pointer instead made this a no-op sort.
@@ -113,31 +137,54 @@ function genCase(seed: number): { src: string; expect: string[] } {
     } else if (kind === "sortByKey") {
       body.push(`    v.sortByKey((x: i64): i64 => 0 - x)`);
       model.sort((x, y) => y - x);
+    } else if (kind === "containsTemp" || kind === "indexOfTemp") {
+      // A needle BUILT at the call site. A literal never leaks (cap 0, owns no heap), so
+      // without a computed one this harness could not see the argument-temp class at all —
+      // which is the class that actually shipped broken.
+      const want = n > 0 ? Math.floor(rnd() * n) : 0;
+      const idxVar = `q${op}`;
+      body.push(`    let ${idxVar}: i64 = ${want}`);
+      const needle = `"e" + ${idxVar}.toString()`;
+      const target = `e${want}`;
+      if (kind === "containsTemp") {
+        body.push(`    print("C" + (if v.contains(${needle}) { "1" } else { "0" }))`);
+        expect.push(`C${model.some(x => shown(x) === target) ? 1 : 0}`);
+      } else {
+        body.push(`    print("X" + (v.indexOf(${needle}) ?? -1).toString())`);
+        expect.push(`X${model.findIndex(x => shown(x) === target)}`);
+      }
+    } else if (kind === "cloneLen") {
+      // A receiver that is a TEMPORARY: reading a scalar off it frees nothing, so the
+      // whole clone leaked.
+      body.push(`    print("L" + v.clone().len.toString())`);
+      expect.push(`L${model.length}`);
     } else if (kind === "clear") {
       body.push(`    v.clear()`);
       model.length = 0;
     } else if (kind === "retain") {
       // Keep the even values. retain compacts in place, which is its own shift loop.
-      body.push(`    v.retain((x: i64): bool => x % 2 == 0)`);
-      const kept = model.filter(x => x % 2 === 0);
+      body.push(OWNED
+        ? `    v.retain((x: &string): bool => x.len > 2)`
+        : `    v.retain((x: i64): bool => x % 2 == 0)`);
+      const kept = OWNED ? model.filter(x => shown(x).length > 2) : model.filter(x => x % 2 === 0);
       model.length = 0;
       model.push(...kept);
     } else if (kind === "extend") {
       const m = 1 + Math.floor(rnd() * 4);
       const vals: number[] = [];
       for (let i = 0; i < m; i++) vals.push(nextVal++);
-      body.push(`    var ext${op}: Vec<i64> = [${vals.join(", ")}]`);
+      body.push(`    var ext${op}: Vec<${ELEM}> = [${vals.map(lit).join(", ")}]`);
       body.push(`    v.extend(ext${op})`);
       model.push(...vals);
     } else if (kind === "get") {
       // Deliberately reaches past the end: get must answer None, not read off the buffer.
       const at = Math.floor(rnd() * (n + 3)) - 1;
       body.push(`    match v.get(${at}) {`);
-      body.push(`        Option.Some(x) => { print("G" + x.toString()) }`);
+      body.push(`        Option.Some(x) => { print("G" + ${asStr("x")}) }`);
       body.push(`        Option.None => { print("Gnone") }`);
       body.push(`    }`);
       const got = at >= 0 && at < model.length ? model[at] : undefined;
-      expect.push(got === undefined ? "Gnone" : `G${got}`);
+      expect.push(got === undefined ? "Gnone" : `G${shown(got)}`);
     }
 
     // Dump often — a corrupted element is far easier to attribute to one op than to a
@@ -149,7 +196,7 @@ function genCase(seed: number): { src: string; expect: string[] } {
   const src = [
     `// generated by scripts/fuzz-vec.ts — seed ${seed}`,
     `pub fn main(): i32 {`,
-    `    var v: Vec<i64> = []`,
+    `    var v: Vec<${ELEM}> = []`,
     ...body,
     `    return 0`,
     `}`,
@@ -169,10 +216,31 @@ try {
     writeFileSync(file, src);
 
     let out: string;
+    let leaked: string | null = null;
     try {
-      out = execFileSync("bun", [join(ROOT, "src", "main.ts"), "run", file], {
-        cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-      });
+      if (LEAKS) {
+        // Two runs rather than one: `leaks` wraps the program's stdout in its own report
+        // headers, and parsing around those is a guess that breaks with the tool's
+        // formatting. Run the binary for the ANSWER, then again under leaks for the
+        // VERDICT. Both matter — the right answer while losing memory is exactly the
+        // failure this mode exists to catch.
+        const bin = join(dir, `case${seed}.bin`);
+        execFileSync("bun", [join(ROOT, "src", "main.ts"), "build", file, "-o", bin], {
+          cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        });
+        out = execFileSync(bin, [], { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+        const report = execFileSync("leaks", ["-atExit", "--", bin], {
+          cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        });
+        const m = /(\d+) leaks for (\d+) total leaked bytes/.exec(report);
+        // No verdict at all is not evidence of cleanliness — say so rather than pass.
+        if (!m) leaked = "no leaks verdict — could not measure";
+        else if (m[1] !== "0") leaked = `${m[1]} leaks / ${m[2]} bytes`;
+      } else {
+        out = execFileSync("bun", [join(ROOT, "src", "main.ts"), "run", file], {
+          cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        });
+      }
     } catch (e: any) {
       failures++;
       console.error(`\nseed ${seed}: program failed to build or run\n${((e.stderr ?? "") + (e.stdout ?? "")).slice(0, 1200)}`);
@@ -180,6 +248,12 @@ try {
       continue;
     }
     ran++;
+    if (leaked) {
+      failures++;
+      console.error(`\nseed ${seed}: LEAK — ${leaked}`);
+      writeFileSync(join(ROOT, `vec-fuzz-${seed}.milo`), src);
+      console.error(`case written to vec-fuzz-${seed}.milo`);
+    }
     const actual = out.trim().split("\n").map(l => l.trim()).filter(l => l.length);
     if (actual.length !== expect.length || actual.some((l, i) => l !== expect[i])) {
       failures++;

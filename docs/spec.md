@@ -9735,6 +9735,7 @@ A conforming implementation shall accept this program, and running it shall writ
 - `temps 2`
 - `literal 1`
 - `bound 2`
+- `indexedTemp 2`
 
 **Rationale.** Reading a field off a value nobody owns still has to destroy that value. `makeRes().id` materialises the returned struct into a temporary, reads the field, and used to walk away: the destructor never ran, for the temporary and for a struct literal alike. Bound values were always fine, which is why nothing caught it. It leaks no memory when the struct owns heap, because the field read moves that field out and the moved value is released on its own. So `leaks` and ASan are both clean while a user destructor is silently skipped, and counting Drop runs is the only thing that sees it.
 

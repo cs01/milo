@@ -4761,6 +4761,14 @@ export class Codegen {
         return this.genStructLit(expr, lines);
       case "FieldAccess": {
         const recvTemps: { addr: string; type: TypeKind }[] = [];
+        // Reading a field THROUGH an indexed temporary (`makeVec()[0].id`) reaches the
+        // container via genIndexObjectPtr, which materialises it and registers the slot in
+        // argTempDrops for its caller to release. That protocol is documented on
+        // genIndexObjectPtr and every read path in genExpr honours it -- except this one,
+        // which never took a mark, so the container was never freed and its elements never
+        // ran a destructor. The mark has to be taken BEFORE the pointer is computed and
+        // flushed after the load, or the element pointer outlives its buffer.
+        const fieldTempMark = this.argTempDrops.length;
         const [ptrLines, ptr, fieldTy] = this.genFieldPtr(expr, recvTemps);
         lines.push(...ptrLines);
         const val = this.nextTemp();
@@ -4779,6 +4787,7 @@ export class Codegen {
         if (recvTemps.length > 0 && (fieldMoved || !this.needsDropCg(expr.type))) {
           for (const t of recvTemps) this.emitDropValue(lines, t.addr, t.type);
         }
+        this.flushArgTempDrops(lines, fieldTempMark);
         return [lines, val, fieldTy];
       }
       case "ArrayLen":

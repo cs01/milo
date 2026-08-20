@@ -13,6 +13,7 @@
 // @expect: temps 2
 // @expect: literal 1
 // @expect: bound 2
+// @expect: indexedTemp 2
 var drops: i64 = 0
 
 struct Res {
@@ -29,6 +30,13 @@ fn makeRes(): Res {
     return Res {
         id: 7
     }
+}
+
+fn makeVec(): Vec<Res> {
+    var v: Vec<Res> = Vec.new()
+    v.push(makeRes())
+    v.push(makeRes())
+    return v
 }
 
 fn report(label: string): void {
@@ -54,4 +62,10 @@ fn main(): void {
         let _sum = a.id + b.id
     }
     report("bound")
+
+    // reading a field THROUGH an indexed temporary: the container is materialised by
+    // genIndexObjectPtr and registered for its caller to release, and this read path
+    // was the one that never took the mark, so the container was never freed
+    let _k = makeVec() [0].id
+    report("indexedTemp")
 }

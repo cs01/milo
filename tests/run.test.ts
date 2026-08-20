@@ -280,10 +280,14 @@ describe("runtime errors (debug mode traps)", () => {
 
       const r = await run(join(RUNTIME_ERRORS_DIR, file.replace(".milo", "")) + EXE, []);
       expect(r.code !== 0).toBe(true);
-      if (expectedError) {
-        // Panics go to stderr; a fixture that printed before dying leaves stdout non-empty.
-        expect(r.stdout + r.stderr).toContain(expectedError);
-      }
+      // Required, not optional — the same hardening the `errors` lane above already got.
+      // `if (expectedError)` left an unannotated fixture asserting nothing but "exited
+      // non-zero", which a build that traps for an unrelated reason satisfies just as
+      // well as the trap the fixture exists to pin. All 20 fixtures are annotated today;
+      // this is so the twenty-first cannot quietly not be.
+      expect(`${file}: ${expectedError ?? "NO @runtime-error: ANNOTATION"}`).toBe(`${file}: ${expectedError}`);
+      // Panics go to stderr; a fixture that printed before dying leaves stdout non-empty.
+      expect(r.stdout + r.stderr).toContain(expectedError!);
     }, 30000);
   }
 });

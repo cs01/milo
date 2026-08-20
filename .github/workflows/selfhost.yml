@@ -67,7 +67,11 @@ jobs:
   # parallel load — the sweep re-verifies failures serially anyway, so running it serially
   # from the start only costs wall-clock.
   sweep:
-    if: github.event_name == 'schedule'
+    # schedule + manual, never push: the sweep is the broadest self-host gate and the
+    # slowest, so it stays off the push path. But gating it on `schedule` ALONE meant the
+    # only way to run it was to wait for tomorrow, which is why a red sweep could sit for
+    # days: you cannot bisect a gate you cannot trigger.
+    if: github.event_name != 'push'
     runs-on: macos-latest
     timeout-minutes: 180
     steps:

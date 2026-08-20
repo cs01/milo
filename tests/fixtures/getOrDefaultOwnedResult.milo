@@ -1,0 +1,38 @@
+// @expect: Aabc
+// @expect: Babc
+// @expect: Cmiss
+// @expect: Dvardefault
+// getOrDefault yields an OWNED value on both paths — a deep clone of the stored value when
+// the key is present, the default itself when it is not. It sat in codegen's NOT_OWNED_TEMP
+// list beside `contains` and `len`, which really do yield scalars, so a discarded or
+// temporary result was never dropped and `print("A" + m.getOrDefault(k, d))` leaked the
+// clone on every call.
+//
+// The list's own comment describes this exact miss for VecRemove: implicit is how a node
+// inherits an answer nobody chose. Here the answer was chosen, and it was the wrong one.
+//
+// The printed values were always correct; tests/leak-clean.txt is what makes this a
+// regression test. The miss path with a literal default never leaked (a literal owns no
+// heap), which is most of why it survived.
+pub fn main(): i32 {
+    var m: HashMap<i64, string> = HashMap.new()
+    m.insert(3, "abc")
+
+    var i = 0
+    while i < 20 {
+        // temporary result, consumed by a concat
+        let a = "A" + m.getOrDefault(3, "zz")
+        if i == 0 {
+            print(a)
+        }
+        i = i + 1
+    }
+
+    let bound = m.getOrDefault(3, "zz")
+    print("B" + bound)
+    print("C" + m.getOrDefault(9, "miss"))
+
+    let dflt: string = "vardefault"
+    print("D" + m.getOrDefault(9, dflt))
+    return 0
+}

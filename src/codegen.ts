@@ -24,7 +24,7 @@ import { must } from "./must";
 export const NOT_OWNED_TEMP: readonly string[] = [
   "ArrayLen", "ArrayRepeat", "BitIntrinsic", "BoolLit", "CFnCall", "Cast",
   "CharLit", "CheckedArith", "Closure", "EnumTryFrom", "FieldAccess", "FloatLit",
-  "Forget", "HashMapClear", "HashMapContains", "HashMapGetOrDefault", "HashMapInsert", "HashMapLen",
+  "Forget", "HashMapClear", "HashMapContains", "HashMapInsert", "HashMapLen",
   "HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident", "IfExpr",
   "IntLit", "InterfaceCoerce", "IsCheck", "MatchExpr", "MemSwap", "OffsetOf",
   "OptionOp", "PtrDeref", "RangeCheck", "SaturatingArith", "SizeOf", "StringCstr",
@@ -11848,6 +11848,13 @@ export class Codegen {
       case "HashMapWithCapacity":
       case "HashMapClone":
       case "HashMapEntries":
+      // getOrDefault yields an OWNED value on both paths — a deep clone of the stored
+      // value when the key is present, the default itself when it is not — so a discarded
+      // or temporary result has to be dropped. It sat in NOT_OWNED_TEMP next to `contains`
+      // and `len`, which really do yield scalars, and `print("D" + m.getOrDefault(k, d))`
+      // therefore leaked the clone every time. Exactly the miss the list's own comment
+      // describes for VecRemove.
+      case "HashMapGetOrDefault":
       // Option-returning Vec reads: the payload is either cloned out of the buffer
       // (get/first/last/min/max/find) or moved out of it (pop). Either way nothing
       // else owns it, so `print(must(v, 0, "v"))` used to leak one copy per call.

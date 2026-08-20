@@ -229,10 +229,21 @@ try {
           cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
         });
         out = execFileSync(bin, [], { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
-        const report = execFileSync("leaks", ["-atExit", "--", bin], {
-          cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-        });
-        const m = /(\d+) leaks for (\d+) total leaked bytes/.exec(report);
+        // `leaks` exits NONZERO when it finds leaks, so it must not be allowed to throw
+        // into the build-failure path — that reported a real leak as "failed to build or
+        // run" and hid what it had actually found.
+        let report: string;
+        try {
+          report = execFileSync("leaks", ["-atExit", "--", bin], {
+            cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+          });
+        } catch (le: any) {
+          report = (le.stdout ?? "") + (le.stderr ?? "");
+        }
+        const m = // The `s?` is required: the summary reads "1 leak for 16 total leaked bytes" in the
+        // singular, and demanding the plural made a one-allocation leak look unmeasurable.
+        // scripts/leak-check.ts already carried this exact comment; this did not reuse it.
+        /(\d+) leaks? for (\d+) total leaked bytes/.exec(report);
         // No verdict at all is not evidence of cleanliness — say so rather than pass.
         if (!m) leaked = "no leaks verdict — could not measure";
         else if (m[1] !== "0") leaked = `${m[1]} leaks / ${m[2]} bytes`;

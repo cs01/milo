@@ -13,7 +13,13 @@
 // HashMap seeds its hash per run, so any test that pinned an order would be testing the
 // seed (see the note in CLAUDE.md about never deriving output order from a map).
 //
-// Usage: bun scripts/fuzz-hashmap.ts [--cases N] [--ops N] [--seed N] [--keys N] [--verbose]
+// `--owned` makes the VALUES strings as well as the keys, and emits keys built from a
+// runtime value rather than as literals. Both matter for `--leaks` (macOS `leaks -atExit`):
+// drop glue only exists for owned types, and a literal key never leaks because it carries
+// cap 0 and owns no heap — so a literal-only generator is blind to the argument-temp class
+// that shipped broken (`m.get("k" + i.toString())` lost its key on every call).
+//
+// Usage: bun scripts/fuzz-hashmap.ts [--cases N] [--ops N] [--seed N] [--keys N] [--owned] [--leaks] [--verbose]
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { execFileSync } from "child_process";
 import { tmpdir } from "os";
@@ -32,6 +38,12 @@ const SEED = argOf("--seed", 1);
 const KEYS = argOf("--keys", 12);
 const KEEP = process.argv.includes("--keep");
 const VERBOSE = process.argv.includes("--verbose");
+const OWNED = process.argv.includes("--owned");
+const LEAKS = process.argv.includes("--leaks");
+if (LEAKS && process.platform !== "darwin") {
+  console.error("--leaks uses macOS `leaks -atExit`; on Linux use scripts/leak-check.ts (LeakSanitizer)");
+  process.exit(2);
+}
 
 function rng(seed: number) {
   let s = seed >>> 0 || 1;
@@ -47,12 +59,29 @@ function genCase(seed: number, stringKeys: boolean): { src: string; expect: stri
   const rnd = rng(seed);
   const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)]!;
   const model = new Map<string, number>();
+  // With --owned the map holds strings; the model still stores the number behind each one
+  // and renders it the same way the generated program will.
+  const vLit = (n: number) => (OWNED ? `"n${n}"` : String(n));
+  const vShown = (n: number) => (OWNED ? `n${n}` : String(n));
+  const vStr = (e: string) => (OWNED ? e : `${e}.toString()`);
+  // A key BUILT at the call site rather than written as a literal. `keyLit` stays for the
+  // inserts; the lookups use this so the argument-temp path is actually exercised.
+  let tempIdx = 0;
   const body: string[] = [];
   const expect: string[] = [];
   let nextVal = 1000;
 
   const keyOf = (i: number) => stringKeys ? `k${i}` : String(i);
   const keyLit = (k: string) => stringKeys ? `"${k}"` : k;
+  // A key for a LOOKUP. In owned mode with string keys, build it from a runtime value so
+  // the argument is an owned temporary — the shape that leaked. A literal owns no heap and
+  // could never have shown the bug. Falls back to the literal everywhere else.
+  const lookupKey = (k: string): string => {
+    if (!OWNED || !stringKeys || !k.startsWith("k")) return keyLit(k);
+    const q = `q${tempIdx++}`;
+    body.push(`    let ${q}: i64 = ${k.slice(1)}`);
+    return `"k" + ${q}.toString()`;
+  };
 
   for (let op = 0; op < OPS; op++) {
     const kind = pick([
@@ -65,36 +94,36 @@ function genCase(seed: number, stringKeys: boolean): { src: string; expect: stri
 
     if (kind === "insert") {
       const v = nextVal++;
-      body.push(`    m.insert(${keyLit(k)}, ${v})`);
+      body.push(`    m.insert(${keyLit(k)}, ${vLit(v)})`);
       model.set(k, v);
     } else if (kind === "burst") {
       const n = 8 + Math.floor(rnd() * 24);
       for (let i = 0; i < n; i++) {
         const bk = keyOf(Math.floor(rnd() * KEYS));
         const v = nextVal++;
-        body.push(`    m.insert(${keyLit(bk)}, ${v})`);
+        body.push(`    m.insert(${keyLit(bk)}, ${vLit(v)})`);
         model.set(bk, v);
       }
     } else if (kind === "get") {
-      body.push(`    match m.get(${keyLit(k)}) {`);
-      body.push(`        Option.Some(v) => { print("G" + v.toString()) }`);
+      body.push(`    match m.get(${lookupKey(k)}) {`);
+      body.push(`        Option.Some(v) => { print("G" + ${vStr("v")}) }`);
       body.push(`        Option.None => { print("Gnone") }`);
       body.push(`    }`);
-      expect.push(model.has(k) ? `G${model.get(k)}` : "Gnone");
+      expect.push(model.has(k) ? `G${vShown(model.get(k)!)}` : "Gnone");
     } else if (kind === "contains") {
-      body.push(`    print("C" + (if m.contains(${keyLit(k)}) { "1" } else { "0" }))`);
+      body.push(`    print("C" + (if m.contains(${lookupKey(k)}) { "1" } else { "0" }))`);
       expect.push(`C${model.has(k) ? 1 : 0}`);
     } else if (kind === "remove") {
       // remove returns void, so the observable is what the table says afterwards —
       // which is the stronger check anyway: it reads through the probe that the
       // tombstone was just written into.
-      body.push(`    m.remove(${keyLit(k)})`);
+      body.push(`    m.remove(${lookupKey(k)})`);
       model.delete(k);
-      body.push(`    print("R" + (if m.contains(${keyLit(k)}) { "1" } else { "0" }))`);
+      body.push(`    print("R" + (if m.contains(${lookupKey(k)}) { "1" } else { "0" }))`);
       expect.push("R0");
     } else if (kind === "getOrDefault") {
-      body.push(`    print("D" + m.getOrDefault(${keyLit(k)}, -7).toString())`);
-      expect.push(`D${model.has(k) ? model.get(k) : -7}`);
+      body.push(`    print("D" + ${vStr(`m.getOrDefault(${lookupKey(k)}, ${vLit(-7)})`)})`);
+      expect.push(`D${model.has(k) ? vShown(model.get(k)!) : vShown(-7)}`);
     } else if (kind === "len") {
       body.push(`    print("L" + m.len.toString())`);
       expect.push(`L${model.size}`);
@@ -106,7 +135,7 @@ function genCase(seed: number, stringKeys: boolean): { src: string; expect: stri
   // one key it hid.
   for (let i = 0; i < KEYS; i++) {
     const k = keyOf(i);
-    body.push(`    print("F" + (if m.contains(${keyLit(k)}) { "1" } else { "0" }))`);
+    body.push(`    print("F" + (if m.contains(${lookupKey(k)}) { "1" } else { "0" }))`);
     expect.push(`F${model.has(k) ? 1 : 0}`);
   }
   body.push(`    print("L" + m.len.toString())`);
@@ -123,18 +152,20 @@ function genCase(seed: number, stringKeys: boolean): { src: string; expect: stri
   body.push(`    var itsum: i64 = 0`);
   body.push(`    for _k, v in m {`);
   body.push(`        itn = itn + 1`);
-  body.push(`        itsum = itsum + v`);
+  // With string values there is no number to add; sum their LENGTHS instead, which is
+  // still a per-entry read through the iterator.
+  body.push(OWNED ? `        itsum = itsum + v.len` : `        itsum = itsum + v`);
   body.push(`    }`);
   body.push(`    print("I" + itn.toString() + ":" + itsum.toString())`);
   let vsum = 0;
-  for (const v of model.values()) vsum += v;
+  for (const v of model.values()) vsum += OWNED ? vShown(v).length : v;
   expect.push(`I${model.size}:${vsum}`);
 
   const kt = stringKeys ? "string" : "i64";
   const src = [
-    `// generated by scripts/fuzz-hashmap.ts — seed ${seed}, ${kt} keys`,
+    `// generated by scripts/fuzz-hashmap.ts — seed ${seed}, ${kt} keys${OWNED ? ", string values" : ""}`,
     `pub fn main(): i32 {`,
-    `    var m: HashMap<${kt}, i64> = HashMap.new()`,
+    `    var m: HashMap<${kt}, ${OWNED ? "string" : "i64"}> = HashMap.new()`,
     ...body,
     `    return 0`,
     `}`,
@@ -156,10 +187,39 @@ try {
     writeFileSync(file, src);
 
     let out: string;
+    let leaked: string | null = null;
     try {
-      out = execFileSync("bun", [join(ROOT, "src", "main.ts"), "run", file], {
-        cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-      });
+      if (LEAKS) {
+        // Two runs: once for the ANSWER, once under `leaks` for the VERDICT. `leaks` wraps
+        // the program's stdout in its own headers and parsing around those is a guess.
+        const bin = join(dir, `case${seed}.bin`);
+        execFileSync("bun", [join(ROOT, "src", "main.ts"), "build", file, "-o", bin], {
+          cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        });
+        out = execFileSync(bin, [], { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+        // `leaks` exits NONZERO when it finds leaks, so it must not be allowed to throw
+        // into the build-failure path — that reported a real leak as "failed to build or
+        // run" and hid what it had actually found.
+        let report: string;
+        try {
+          report = execFileSync("leaks", ["-atExit", "--", bin], {
+            cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+          });
+        } catch (le: any) {
+          report = (le.stdout ?? "") + (le.stderr ?? "");
+        }
+        const lm = // The `s?` is required: the summary reads "1 leak for 16 total leaked bytes" in the
+        // singular, and demanding the plural made a one-allocation leak look unmeasurable.
+        // scripts/leak-check.ts already carried this exact comment; this did not reuse it.
+        /(\d+) leaks? for (\d+) total leaked bytes/.exec(report);
+        // No verdict is not evidence of cleanliness.
+        if (!lm) leaked = "no leaks verdict — could not measure";
+        else if (lm[1] !== "0") leaked = `${lm[1]} leaks / ${lm[2]} bytes`;
+      } else {
+        out = execFileSync("bun", [join(ROOT, "src", "main.ts"), "run", file], {
+          cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
+        });
+      }
     } catch (e: any) {
       failures++;
       console.error(`\nseed ${seed}: program failed to build or run\n${((e.stderr ?? "") + (e.stdout ?? "")).slice(0, 1200)}`);
@@ -167,6 +227,11 @@ try {
       continue;
     }
     ran++;
+    if (leaked) {
+      failures++;
+      console.error(`\nseed ${seed}: LEAK — ${leaked}`);
+      writeFileSync(join(ROOT, `hm-fuzz-${seed}.milo`), src);
+    }
     const actual = out.trim().split("\n").map(l => l.trim()).filter(l => l.length);
     if (actual.length !== expect.length || actual.some((l, i) => l !== expect[i])) {
       failures++;

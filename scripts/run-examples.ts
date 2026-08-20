@@ -15,7 +15,13 @@
 //     fetched is skipped into its own bucket, never silently passed. Neither a
 //     compile nor a failure: run scripts/fetch-assets.sh and it comes back.
 //
-// Usage: bun run scripts/run-examples.ts [--verbose]
+// Usage: bun run scripts/run-examples.ts [--verbose] [--bare]
+//
+// `--bare` reproduces a CI runner on a dev machine: fetchable game assets count as
+// absent and package resolution sees an empty cache. Run it before touching this
+// harness. A dev machine has the assets fetched and the packages cached and a runner
+// has neither, so a change can be green here and red there -- which happened twice in
+// one day, and both diagnoses cost a CI round trip each. It changes no files.
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, statSync, mkdtempSync, existsSync, readFileSync } from "node:fs";
@@ -23,6 +29,13 @@ import { join, dirname, normalize } from "node:path";
 import { tmpdir } from "node:os";
 
 const verbose = process.argv.includes("--verbose");
+// Reproduce a bare CI runner on a dev machine: no fetched game assets, no package cache.
+// Twice in one day a change to this harness was correct locally and wrong on the runner,
+// because a dev machine has both and the runner has neither -- and each time the only way
+// to see it was to hand-simulate the runner by moving files about, which is easy to get
+// wrong and easier to forget to undo. `--bare` does it without touching the working tree.
+const bare = process.argv.includes("--bare");
+const bareCache = bare ? mkdtempSync(join(tmpdir(), "milo-bare-cache-")) : null;
 const root = "examples";
 const out = mkdtempSync(join(tmpdir(), "milo-examples-"));
 
@@ -96,6 +109,10 @@ function milo(args: string[], input?: string) {
     encoding: "utf8",
     input,
     timeout: 60_000,
+    // An empty XDG_CACHE_HOME is how a runner sees packages: `cacheRoot()` in src/pkg.ts
+    // reads it, so pointing it at a fresh dir makes every `gl`/`sdl` import unresolvable
+    // exactly as it is on CI, without disturbing the real cache.
+    env: bareCache ? { ...process.env, XDG_CACHE_HOME: bareCache } : process.env,
   });
 }
 
@@ -116,7 +133,9 @@ for (const f of examples) {
   // separately: never counted as compiled (it was not), never counted as passed.
   // Only assets fetch-assets.sh can produce qualify — anything else missing is
   // a real failure and falls through to the compile gate below.
-  const missingAssets = embeddedAssetsOf(f).filter((p) => !existsSync(p));
+  // In --bare mode a fetchable asset counts as absent even when it is sitting right
+  // there, which is what a runner sees: CI never runs scripts/fetch-assets.sh.
+  const missingAssets = embeddedAssetsOf(f).filter((p) => !existsSync(p) || (bare && isFetchableAsset(p)));
   if (missingAssets.length > 0 && missingAssets.every(isFetchableAsset)) {
     assetsMissing++;
     console.log(`SKIP (assets)  ${f}`);

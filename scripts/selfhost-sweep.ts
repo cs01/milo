@@ -200,6 +200,24 @@ async function main() {
       if (gained.length) console.log(`\nNEW: ${gained.length} fixture(s) now pass — rerun with --write to ratchet: ${gained.join(", ")}`);
       if (unmeasured.size) console.error(`\nUNMEASURED (guard kill, not counted): ${[...unmeasured].join(", ")}`);
       if (regressed.length) {
+        // Name the actual cause when the whole corpus goes down together. A milo-self
+        // that builds but miscompiles everything shows up here as "602 fixture(s)
+        // regressed" and a 602-line list, which reads as a catastrophic language
+        // regression and buries the one fact that matters: the compiler under test is
+        // broken, so no fixture verdict below means anything. That is exactly how the
+        // 2026-08-20 nightly reported `0/636 fixtures pass` -- the provenance check
+        // confirms milo-self.bin MATCHES the source, never that it works.
+        const wipeout = passing.length === 0 && claimed.length > 0;
+        if (wipeout) {
+          console.error(`\nmilo-self COMPILED NOTHING: 0 of ${results.length} fixtures produced a passing run, `
+            + `while the manifest claims ${claimed.length}. This is a broken compiler, not ${regressed.length} `
+            + `independent regressions, so the per-fixture list is suppressed rather than printed: no fixture `
+            + `verdict means anything while the compiler under test is broken. Check that .selfhost/milo-self.bin `
+            + `builds and runs a trivial program first.`);
+          const modes = [...new Set(results.map(r => r.bucket))].join(", ");
+          console.error(`  failure modes seen: ${modes}`);
+          process.exit(1);
+        }
         console.error(`\nRATCHET FAILED: ${regressed.length} fixture(s) regressed:\n  ${regressed.join("\n  ")}`);
         process.exit(1);
       }

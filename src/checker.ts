@@ -7608,6 +7608,45 @@ export class TypeChecker {
     return this.setType(expr, { tag: "unknown" });
   }
 
+  // Arity and per-argument checking for a static / enum-variant call: auto-borrow for a
+  // `&T` param, the closure-capture rule that makes a non-mutating closure a move, and the
+  // moves themselves. Two call sites (the inherent-impl path and the static-method path)
+  // carried this verbatim and diverged only after it, so an auto-borrow fix in one would
+  // have silently missed the other. Returns paramOffset — the caller needs to know whether
+  // a `self` was stripped before it can line args up with the signature's contracts.
+  private checkStaticCallArgs(
+    sig: { params: { name: string; type: TypeKind }[] },
+    expr: any,
+    sp: Span | undefined,
+  ): number {
+    const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
+    const expectedParams = sig.params.slice(paramOffset);
+    if (expr.args.length !== expectedParams.length) {
+      this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
+    }
+    for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
+      const paramType = expectedParams[i].type;
+      const hint = paramType.tag === "ref" ? paramType.inner : paramType;
+      const argType = this.checkExprWithHint(expr.args[i], hint);
+      if (paramType.tag === "ref") {
+        if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
+          this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
+          if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
+            this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
+          }
+        }
+      } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
+        this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
+      }
+      if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
+        const caps = this.closureCaptures.get(expr.args[i]);
+        if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
+      }
+      if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
+    }
+    return paramOffset;
+  }
+
   private checkEnumLitExpr(expr: ExprOf<"EnumLit">): TypeKind {
     const sp = expr.span;
     // Promise.all(args) / Promise.race(args) → promiseAll(args) / promiseRace(args)
@@ -7746,31 +7785,7 @@ export class TypeChecker {
         const sig = inherent.methods.get(expr.variant);
         if (sig) {
           const mangledMethod = `${mangled}$${expr.variant}`;
-          const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
-          const expectedParams = sig.params.slice(paramOffset);
-          if (expr.args.length !== expectedParams.length) {
-            this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
-          }
-          for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
-            const paramType = expectedParams[i].type;
-            const hint = paramType.tag === "ref" ? paramType.inner : paramType;
-            const argType = this.checkExprWithHint(expr.args[i], hint);
-            if (paramType.tag === "ref") {
-              if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
-                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-                if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
-                  this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-                }
-              }
-            } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
-              this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-            }
-            if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
-              const caps = this.closureCaptures.get(expr.args[i]);
-              if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
-            }
-            if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
-          }
+          const paramOffset = this.checkStaticCallArgs(sig, expr, sp);
           this.staticCalls.set(expr, mangledMethod);
           // Send enforcement: Promise.blocking() runs the closure on a real
           // OS thread, so all captures must be Send.
@@ -7805,31 +7820,7 @@ export class TypeChecker {
         if (sig) {
           const mangled = `${expr.enumName}$${expr.variant}`;
           // static methods have no self param — check args directly
-          const paramOffset = (sig.params.length > 0 && sig.params[0].name === "self") ? 1 : 0;
-          const expectedParams = sig.params.slice(paramOffset);
-          if (expr.args.length !== expectedParams.length) {
-            this.error(`'${expr.enumName}.${expr.variant}' expects ${expectedParams.length} args, got ${expr.args.length}`, sp);
-          }
-          for (let i = 0; i < Math.min(expr.args.length, expectedParams.length); i++) {
-            const paramType = expectedParams[i].type;
-            const hint = paramType.tag === "ref" ? paramType.inner : paramType;
-            const argType = this.checkExprWithHint(expr.args[i], hint);
-            if (paramType.tag === "ref") {
-              if (!(argType.tag === "ref" && typeEq(paramType.inner, argType.inner))) {
-                this.setAutoBorrowChecked(expr.args[i], paramType.mutable, sp);
-                if (!typeEq(paramType.inner, argType) && argType.tag !== "unknown") {
-                  this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-                }
-              }
-            } else if (!typeEq(paramType, argType) && argType.tag !== "unknown") {
-              this.error(`'${expr.variant}' argument ${i + 1}: expected ${typeName(paramType)}, got ${typeName(argType)}`, expr.args[i].span);
-            }
-            if (expr.args[i].kind === "Closure" && paramType.tag === "fn" && !(expr.args[i] as any).isMove) {
-              const caps = this.closureCaptures.get(expr.args[i]);
-              if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
-            }
-            if (paramType.tag !== "ref") this.tryMove(expr.args[i]);
-          }
+          const paramOffset = this.checkStaticCallArgs(sig, expr, sp);
           this.staticCalls.set(expr, mangled);
           // Precondition checking on a static method call (Math.sqrt(-1.0) etc).
           // Only when there is no `self` param, so args align 1:1 with the sig's

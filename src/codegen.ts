@@ -97,6 +97,15 @@ type Gen = [lines: string[], value: string, type: string];
 // attribute groups, so 0 is always free.
 const SANITIZE_ATTRS = 0;
 
+// %HashMap field indices. The struct is { data, len, cap, seed }, and these offsets
+// appeared as bare `i32 0, i32 N` at 22 sites in this file — the only clue to which field
+// an N meant was the local variable name at the use site, so adding a field meant finding
+// and re-reading every one of them.
+const HM_DATA = 0;
+const HM_LEN = 1;
+const HM_CAP = 2;
+const HM_SEED = 3;
+
 export class Codegen {
   private target: TargetInfo;
   private output: string[] = [];
@@ -3487,9 +3496,9 @@ export class Codegen {
       const capPtr = this.nextTemp();
       const data = this.nextTemp();
       const cap = this.nextTemp();
-      lines.push(`  ${dataPtr} = getelementptr %HashMap, ptr ${iterAddr}, i32 0, i32 0`);
+      lines.push(`  ${dataPtr} = getelementptr %HashMap, ptr ${iterAddr}, i32 0, i32 ${HM_DATA}`);
       lines.push(`  ${data} = load ptr, ptr ${dataPtr}`);
-      lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${iterAddr}, i32 0, i32 2`);
+      lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${iterAddr}, i32 0, i32 ${HM_CAP}`);
       lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
 
       const keyType = stmt.varType.tag === "ref" ? stmt.varType.inner : stmt.varType;
@@ -9449,7 +9458,7 @@ export class Codegen {
 
     // lazy seed init
     const seedPtr = this.nextTemp();
-    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 3`);
+    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_SEED}`);
     const seed = this.nextTemp();
     lines.push(`  ${seed} = load i64, ptr ${seedPtr}`);
     const seedIsZero = this.nextTemp();
@@ -9481,15 +9490,15 @@ export class Codegen {
 
     // load cap and len
     const lenPtr = this.nextTemp();
-    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 1`);
+    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_LEN}`);
     const len = this.nextTemp();
     lines.push(`  ${len} = load i64, ptr ${lenPtr}`);
     const capPtr = this.nextTemp();
-    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_CAP}`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
     const dataFieldPtr = this.nextTemp();
-    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
 
     // resize check: (len + 1) * 4 >= cap * 3
     const lenPlus1 = this.nextTemp();
@@ -9776,15 +9785,15 @@ export class Codegen {
     lines.push(...keyLines);
 
     const seedPtr = this.nextTemp();
-    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 3`);
+    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_SEED}`);
     const seed = this.nextTemp();
     lines.push(`  ${seed} = load i64, ptr ${seedPtr}`);
     const capPtr = this.nextTemp();
-    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_CAP}`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
     const dataFieldPtr = this.nextTemp();
-    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
     const data = this.nextTemp();
     lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
 
@@ -9845,19 +9854,19 @@ export class Codegen {
     lines.push(...keyLines);
 
     const seedPtr = this.nextTemp();
-    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 3`);
+    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_SEED}`);
     const seed = this.nextTemp();
     lines.push(`  ${seed} = load i64, ptr ${seedPtr}`);
     const capPtr = this.nextTemp();
-    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_CAP}`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
     const dataFieldPtr = this.nextTemp();
-    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
     const data = this.nextTemp();
     lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
     const lenPtr = this.nextTemp();
-    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 1`);
+    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_LEN}`);
 
     const hash = this.emitFnvHash(lines, keyVal, keyType, seed);
     const mask = this.nextTemp();
@@ -10005,11 +10014,11 @@ export class Codegen {
     lines.push(...mapPtrLines);
 
     const dataFieldPtr = this.nextTemp();
-    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
     const data = this.nextTemp();
     lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
     const capPtr = this.nextTemp();
-    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_CAP}`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
     const isNull = this.nextTemp();
@@ -10071,7 +10080,7 @@ export class Codegen {
     lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, ${cap}`);
     lines.push(`  call ptr @memset(ptr ${data}, i32 0, i64 ${totalSize})`);
     const lenPtr = this.nextTemp();
-    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 1`);
+    lines.push(`  ${lenPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_LEN}`);
     lines.push(`  store i64 0, ptr ${lenPtr}`);
     lines.push(`  br label %${endLabel}`);
     lines.push(`${endLabel}:`);
@@ -10180,15 +10189,15 @@ export class Codegen {
     lines.push(...keyLines);
 
     const seedPtr = this.nextTemp();
-    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 3`);
+    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_SEED}`);
     const seed = this.nextTemp();
     lines.push(`  ${seed} = load i64, ptr ${seedPtr}`);
     const capPtr = this.nextTemp();
-    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_CAP}`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
     const dataFieldPtr = this.nextTemp();
-    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
     const data = this.nextTemp();
     lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
 
@@ -10294,15 +10303,15 @@ export class Codegen {
     lines.push(...defaultLines);
 
     const seedPtr = this.nextTemp();
-    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 3`);
+    lines.push(`  ${seedPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_SEED}`);
     const seed = this.nextTemp();
     lines.push(`  ${seed} = load i64, ptr ${seedPtr}`);
     const capPtr = this.nextTemp();
-    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 2`);
+    lines.push(`  ${capPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_CAP}`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = load i64, ptr ${capPtr}`);
     const dataFieldPtr = this.nextTemp();
-    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 0`);
+    lines.push(`  ${dataFieldPtr} = getelementptr %HashMap, ptr ${mapPtr}, i32 0, i32 ${HM_DATA}`);
     const data = this.nextTemp();
     lines.push(`  ${data} = load ptr, ptr ${dataFieldPtr}`);
 

@@ -54,6 +54,13 @@ function corpus(): string[] {
 // selfhost lane (173 tests, which rebuilds milo-self from this source) stayed green.
 // A handful under examples/ + tests/errors/ are still unformatted — tests/errors/ is
 // excluded on purpose (the fixtures are deliberately malformed).
+// Both tests below iterate corpus() and assert per file, so an empty corpus is a pass
+// that checked nothing — a renamed directory or a changed extension filter would take
+// the formatter gate offline without turning anything red. Floor well under today's 769.
+test("the formatter corpus is still being discovered", () => {
+  expect(corpus().length).toBeGreaterThan(500);
+});
+
 test("committed std/, tests/fixtures/ and src-milo/ sources are formatted", () => {
   const dirty: string[] = [];
   for (const path of corpus()) {

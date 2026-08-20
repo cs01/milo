@@ -46,6 +46,15 @@ const entries = [
 ];
 
 describe("examples compile", () => {
+  // A per-entry test loop registers nothing when discovery returns nothing, and a file
+  // with zero tests is a green file. Renaming a directory out of TOP_LEVEL_DIRS, or the
+  // examples moving under a subdir the way games/ and tools/ already have, would shrink
+  // this silently — the suite would keep passing with less and less actually compiled.
+  // Floor set below today's 52 so adding or retiring an example needs no edit here.
+  test("discovery still finds the examples", () => {
+    expect(entries.length).toBeGreaterThan(40);
+  });
+
   for (const path of entries) {
     const name = path.slice(MILO_ROOT.length + 1);
     test(name, async () => {

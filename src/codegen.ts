@@ -9703,6 +9703,64 @@ export class Codegen {
     return [lines, "0", "void"];
   }
 
+  // The open-addressing probe every keyed HashMap op opens with: read the slot, an empty
+  // state means the key is absent, a tombstone means keep probing, an occupied state
+  // compares the key. contains/remove/get/getOrDefault each carried this verbatim, so a
+  // change to the tombstone rule or the state encoding had to land in four places.
+  //
+  // The labels are allocated by the CALLER and passed in, not minted here: each call site
+  // allocates its seven labels in its own order, and taking that over would renumber them
+  // and cost the byte-identical-IR check that verifies this refactor changed nothing.
+  private emitHashProbePrologue(
+    lines: string[],
+    at: {
+      probeCond: string;
+      probeCheck: string;
+      probeOccupied: string;
+      probeNext: string;
+      // Where an empty slot goes (key absent) and where a key match goes. Only these two
+      // differ between callers: remove() jumps straight to its done/remove blocks.
+      emptyTarget: string;
+      matchTarget: string;
+    },
+    map: {
+      slotAddr: string;
+      data: string;
+      entryTy: string;
+      keyTy: string;
+      keyVal: string;
+      keyType: TypeKind;
+    },
+  ): { slot: string; entryPtr: string } {
+    lines.push(`  br label %${at.probeCond}`);
+    lines.push(`${at.probeCond}:`);
+    const slot = this.nextTemp();
+    lines.push(`  ${slot} = load i64, ptr ${map.slotAddr}`);
+    const entryPtr = this.nextTemp();
+    lines.push(`  ${entryPtr} = getelementptr ${map.entryTy}, ptr ${map.data}, i64 ${slot}`);
+    const state = this.nextTemp();
+    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
+    // state == 0 (empty) -> the key is not in the map
+    const stateIsEmpty = this.nextTemp();
+    lines.push(`  ${stateIsEmpty} = icmp eq i8 ${state}, 0`);
+    lines.push(`  br i1 ${stateIsEmpty}, label %${at.emptyTarget}, label %${at.probeCheck}`);
+
+    // state == 1 (occupied) -> compare keys; state == 2 (tombstone) -> keep probing
+    lines.push(`${at.probeCheck}:`);
+    const stateIsOccupied = this.nextTemp();
+    lines.push(`  ${stateIsOccupied} = icmp eq i8 ${state}, 1`);
+    lines.push(`  br i1 ${stateIsOccupied}, label %${at.probeOccupied}, label %${at.probeNext}`);
+
+    lines.push(`${at.probeOccupied}:`);
+    const existingKeyPtr = this.nextTemp();
+    lines.push(`  ${existingKeyPtr} = getelementptr ${map.entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
+    const existingKey = this.nextTemp();
+    lines.push(`  ${existingKey} = load ${map.keyTy}, ptr ${existingKeyPtr}`);
+    const keysMatch = this.emitKeyCompare(lines, map.keyVal, existingKey, map.keyType);
+    lines.push(`  br i1 ${keysMatch}, label %${at.matchTarget}, label %${at.probeNext}`);
+    return { slot, entryPtr };
+  }
+
   private genHashMapContains(expr: HIRExpr & { kind: "HashMapContains" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     const mapType = expr.map.type;
@@ -9747,31 +9805,11 @@ export class Codegen {
     const probeNext = this.nextLabel("hmc.pnext");
     const doneLabel = this.nextLabel("hmc.done");
 
-    lines.push(`  br label %${probeCond}`);
-    lines.push(`${probeCond}:`);
-    const slot = this.nextTemp();
-    lines.push(`  ${slot} = load i64, ptr ${slotAddr}`);
-    const entryPtr = this.nextTemp();
-    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${slot}`);
-    const state = this.nextTemp();
-    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
-    // state == 0 (empty) -> not found
-    const stateIsEmpty = this.nextTemp();
-    lines.push(`  ${stateIsEmpty} = icmp eq i8 ${state}, 0`);
-    lines.push(`  br i1 ${stateIsEmpty}, label %${notFoundLabel}, label %${probeCheck}`);
-
-    lines.push(`${probeCheck}:`);
-    const stateIsOccupied = this.nextTemp();
-    lines.push(`  ${stateIsOccupied} = icmp eq i8 ${state}, 1`);
-    lines.push(`  br i1 ${stateIsOccupied}, label %${probeOccupied}, label %${probeNext}`);
-
-    lines.push(`${probeOccupied}:`);
-    const existingKeyPtr = this.nextTemp();
-    lines.push(`  ${existingKeyPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
-    const existingKey = this.nextTemp();
-    lines.push(`  ${existingKey} = load ${keyTy}, ptr ${existingKeyPtr}`);
-    const keysMatch = this.emitKeyCompare(lines, keyVal, existingKey, keyType);
-    lines.push(`  br i1 ${keysMatch}, label %${foundLabel}, label %${probeNext}`);
+    const { slot, entryPtr } = this.emitHashProbePrologue(
+      lines,
+      { probeCond, probeCheck, probeOccupied, probeNext, emptyTarget: notFoundLabel, matchTarget: foundLabel },
+      { slotAddr, data, entryTy, keyTy, keyVal, keyType },
+    );
 
     lines.push(`${foundLabel}:`);
     lines.push(`  br label %${doneLabel}`);
@@ -9837,30 +9875,11 @@ export class Codegen {
     const probeNext = this.nextLabel("hmr.pnext");
     const doneLabel = this.nextLabel("hmr.done");
 
-    lines.push(`  br label %${probeCond}`);
-    lines.push(`${probeCond}:`);
-    const slot = this.nextTemp();
-    lines.push(`  ${slot} = load i64, ptr ${slotAddr}`);
-    const entryPtr = this.nextTemp();
-    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${slot}`);
-    const state = this.nextTemp();
-    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
-    const stateIsEmpty = this.nextTemp();
-    lines.push(`  ${stateIsEmpty} = icmp eq i8 ${state}, 0`);
-    lines.push(`  br i1 ${stateIsEmpty}, label %${doneLabel}, label %${probeCheck}`);
-
-    lines.push(`${probeCheck}:`);
-    const stateIsOccupied = this.nextTemp();
-    lines.push(`  ${stateIsOccupied} = icmp eq i8 ${state}, 1`);
-    lines.push(`  br i1 ${stateIsOccupied}, label %${probeOccupied}, label %${probeNext}`);
-
-    lines.push(`${probeOccupied}:`);
-    const existingKeyPtr = this.nextTemp();
-    lines.push(`  ${existingKeyPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
-    const existingKey = this.nextTemp();
-    lines.push(`  ${existingKey} = load ${keyTy}, ptr ${existingKeyPtr}`);
-    const keysMatch = this.emitKeyCompare(lines, keyVal, existingKey, keyType);
-    lines.push(`  br i1 ${keysMatch}, label %${removeLabel}, label %${probeNext}`);
+    const { slot, entryPtr } = this.emitHashProbePrologue(
+      lines,
+      { probeCond, probeCheck, probeOccupied, probeNext, emptyTarget: doneLabel, matchTarget: removeLabel },
+      { slotAddr, data, entryTy, keyTy, keyVal, keyType },
+    );
 
     lines.push(`${removeLabel}:`);
     // set tombstone
@@ -10190,30 +10209,11 @@ export class Codegen {
     const probeNext = this.nextLabel("hmg.pnext");
     const doneLabel = this.nextLabel("hmg.done");
 
-    lines.push(`  br label %${probeCond}`);
-    lines.push(`${probeCond}:`);
-    const slot = this.nextTemp();
-    lines.push(`  ${slot} = load i64, ptr ${slotAddr}`);
-    const entryPtr = this.nextTemp();
-    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${slot}`);
-    const state = this.nextTemp();
-    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
-    const stateIsEmpty = this.nextTemp();
-    lines.push(`  ${stateIsEmpty} = icmp eq i8 ${state}, 0`);
-    lines.push(`  br i1 ${stateIsEmpty}, label %${notFoundLabel}, label %${probeCheck}`);
-
-    lines.push(`${probeCheck}:`);
-    const stateIsOccupied = this.nextTemp();
-    lines.push(`  ${stateIsOccupied} = icmp eq i8 ${state}, 1`);
-    lines.push(`  br i1 ${stateIsOccupied}, label %${probeOccupied}, label %${probeNext}`);
-
-    lines.push(`${probeOccupied}:`);
-    const existingKeyPtr = this.nextTemp();
-    lines.push(`  ${existingKeyPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
-    const existingKey = this.nextTemp();
-    lines.push(`  ${existingKey} = load ${keyTy}, ptr ${existingKeyPtr}`);
-    const keysMatch = this.emitKeyCompare(lines, keyVal, existingKey, keyType);
-    lines.push(`  br i1 ${keysMatch}, label %${foundLabel}, label %${probeNext}`);
+    const { slot, entryPtr } = this.emitHashProbePrologue(
+      lines,
+      { probeCond, probeCheck, probeOccupied, probeNext, emptyTarget: notFoundLabel, matchTarget: foundLabel },
+      { slotAddr, data, entryTy, keyTy, keyVal, keyType },
+    );
 
     // found — construct Some(value)
     lines.push(`${foundLabel}:`);
@@ -10323,30 +10323,11 @@ export class Codegen {
     const probeNext = this.nextLabel("hmgd.pnext");
     const doneLabel = this.nextLabel("hmgd.done");
 
-    lines.push(`  br label %${probeCond}`);
-    lines.push(`${probeCond}:`);
-    const slot = this.nextTemp();
-    lines.push(`  ${slot} = load i64, ptr ${slotAddr}`);
-    const entryPtr = this.nextTemp();
-    lines.push(`  ${entryPtr} = getelementptr ${entryTy}, ptr ${data}, i64 ${slot}`);
-    const state = this.nextTemp();
-    lines.push(`  ${state} = load i8, ptr ${entryPtr}`);
-    const stateIsEmpty = this.nextTemp();
-    lines.push(`  ${stateIsEmpty} = icmp eq i8 ${state}, 0`);
-    lines.push(`  br i1 ${stateIsEmpty}, label %${notFoundLabel}, label %${probeCheck}`);
-
-    lines.push(`${probeCheck}:`);
-    const stateIsOccupied = this.nextTemp();
-    lines.push(`  ${stateIsOccupied} = icmp eq i8 ${state}, 1`);
-    lines.push(`  br i1 ${stateIsOccupied}, label %${probeOccupied}, label %${probeNext}`);
-
-    lines.push(`${probeOccupied}:`);
-    const existingKeyPtr = this.nextTemp();
-    lines.push(`  ${existingKeyPtr} = getelementptr ${entryTy}, ptr ${entryPtr}, i32 0, i32 1`);
-    const existingKey = this.nextTemp();
-    lines.push(`  ${existingKey} = load ${keyTy}, ptr ${existingKeyPtr}`);
-    const keysMatch = this.emitKeyCompare(lines, keyVal, existingKey, keyType);
-    lines.push(`  br i1 ${keysMatch}, label %${foundLabel}, label %${probeNext}`);
+    const { slot, entryPtr } = this.emitHashProbePrologue(
+      lines,
+      { probeCond, probeCheck, probeOccupied, probeNext, emptyTarget: notFoundLabel, matchTarget: foundLabel },
+      { slotAddr, data, entryTy, keyTy, keyVal, keyType },
+    );
 
     // found — return the value directly (deep-cloned; see genHashMapGet)
     lines.push(`${foundLabel}:`);

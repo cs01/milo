@@ -92,6 +92,11 @@ export interface VarInfo {
   // the arm's end). Non-Copy payloads bound by value are MOVED instead — the binding owns
   // the value, so writes are real and this stays false.
   copyBind?: boolean;
+  // Holds a `move` closure whose body moves a capture out, so calling it consumes it.
+  callsOnce?: boolean;
+  // `moved` was set by CALLING a call-once closure rather than by transferring it,
+  // which needs a different explanation than "ownership was transferred earlier".
+  consumedByCall?: boolean;
   // Places inside this variable whose value has already been moved out, as field
   // chains (".a", ".a.b"). `moved` answers the question for the whole binding; this
   // answers it for a part, which nothing did before — `let x = p.a` marked the
@@ -151,6 +156,10 @@ export interface CaptureInfo {
   // (cannot be move-captured) from a capture that is merely read or moved out
   // (safe to move-capture). Drives the auto-move decision for generic-fn calls.
   mutatedInClosure?: boolean;
+  // Set when the closure body MOVES this capture out (hands it to a callee by value).
+  // Captures live in the environment's own slots, so the move zeroes the slot — which
+  // makes the closure call-once: a second call reads the emptied slot.
+  consumedInClosure?: boolean;
 }
 
 export interface FnSig {
@@ -393,6 +402,8 @@ export class TypeChecker {
   private autoWrappedOption = new Map<Expr, string>();
   private arrayToVecCoercions = new Set<Expr>();
   private closureCaptures = new Map<Expr, CaptureInfo[]>();
+  // Closure literals whose body moves a capture out — call-once (see CaptureInfo).
+  private onceClosures = new Set<Expr>();
   private closureCalls = new Map<Expr, TypeKind>();
   private cfnCalls = new Map<Expr, TypeKind>();
   private sizeOfTypes = new Map<Expr, TypeKind>();
@@ -4492,7 +4503,7 @@ export class TypeChecker {
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) newlyFrozen.push(vi);
         const bindingType = hint ?? valType;
         if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
-        this.declare(stmt.name, { type: bindingType, mutable: false, moved: false, borrowed: false, read: false, span: sp, ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
+        this.declare(stmt.name, { type: bindingType, mutable: false, moved: false, borrowed: false, read: false, span: sp, ...(stmt.value && this.onceClosures.has(stmt.value) && { callsOnce: true }), ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
         // An unannotated `let x = <const-int-value>` stays width-adaptable until
         // its first use (see VarInfo.flexInt): its default i32 can widen to an
         // i64 (etc.) context without an `as` cast, since the value is literals.
@@ -4546,7 +4557,7 @@ export class TypeChecker {
           for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) newlyFrozen.push(vi);
           const bindingType = hint ?? valType;
           if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
-          this.declare(stmt.name, { type: bindingType, mutable: true, moved: false, borrowed: false, read: false, span: sp, ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
+          this.declare(stmt.name, { type: bindingType, mutable: true, moved: false, borrowed: false, read: false, span: sp, ...(stmt.value && this.onceClosures.has(stmt.value) && { callsOnce: true }), ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
           if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
           this.lintIndexClone(stmt.value, bindingType, sp);
         }
@@ -5576,6 +5587,13 @@ export class TypeChecker {
         }
         info.moved = true;
         this.movedExprs.add(expr);
+        // Moving a capture out of a `move` closure empties the environment slot it
+        // lives in, so the closure cannot run a second time. Record it on the capture
+        // and the literal is typed call-once below.
+        if (this.closureScopeDepth !== null) {
+          const consumedCap = this.currentClosureCaptures?.get(expr.name);
+          if (consumedCap) consumedCap.consumedInClosure = true;
+        }
         if (this.loopDepth > 0 && this.returnOnlyMovesStack.length > 0) {
           const cur = this.returnOnlyMovesStack[this.returnOnlyMovesStack.length - 1];
           if (this.inReturnInLoop) {
@@ -7192,7 +7210,9 @@ export class TypeChecker {
         // task, the task is reaped, and `f()` afterwards runs from a freed environment.
         if (varInfo.moved) {
           this.error(`use of moved variable '${expr.func}'`, sp,
-            varInfo.type.tag === "fn" && varInfo.type.owning === true
+            varInfo.consumedByCall
+              ? `'${expr.func}' moves a captured value out of itself when it runs, so calling it consumes it: the second call would see that capture already gone. Build a second closure, or clone what it captures inside the body instead of moving it.`
+              : varInfo.type.tag === "fn" && varInfo.type.owning === true
               ? `'${expr.func}' is a 'move' closure and it was transferred earlier, so calling it here would run against an environment its new owner may already have released.`
               : `ownership of '${expr.func}' was transferred earlier and it can no longer be used here.`);
         }
@@ -7224,6 +7244,14 @@ export class TypeChecker {
             if (!caps?.some(c => c.mutable)) (expr.args[i] as any).isMove = true;
           }
           this.tryMove(expr.args[i]);
+        }
+        // Calling a closure that moves a capture out consumes the closure: the call
+        // empties the environment slots its captures live in, so a second call reads
+        // zeroed captures. Before this, the second call silently returned a wrong
+        // answer (and, before captures aliased their slots, double-freed).
+        if (varInfo.callsOnce && !varInfo.moved) {
+          varInfo.moved = true;
+          varInfo.consumedByCall = true;
         }
         if (fnType.tag === "cfn") this.cfnCalls.set(expr, fnType);
         else this.closureCalls.set(expr, fnType);
@@ -8026,6 +8054,7 @@ export class TypeChecker {
     this.popScope();
     const captures = Array.from(this.currentClosureCaptures.values());
     this.closureCaptures.set(expr, captures);
+    if ((expr as any).isMove && captures.some(c => c.consumedInClosure)) this.onceClosures.add(expr);
     for (const cap of captures) {
       for (let i = this.scopes.length - 1; i >= 0; i--) {
         const info = this.scopes[i].get(cap.name);

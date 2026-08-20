@@ -12306,11 +12306,27 @@ export class Codegen {
     const bits = ty.tag === "int" ? ty.bits : 32;
     let clampVal: string;
     if (!signed) {
-      // unsigned: clamp to max
+      // Unsigned multiply can only overflow upward.
       clampVal = String(BigInt(2) ** BigInt(bits) - BigInt(1));
     } else {
-      // signed: clamp to max (simplification — true saturation would check sign)
-      clampVal = String(BigInt(2) ** BigInt(bits - 1) - BigInt(1));
+      // Signed multiply overflows in whichever direction the true product points, and this
+      // used to clamp to MAX either way behind a comment calling it a simplification. It
+      // is not one: `(-2i8).saturatingMul(100)` is -200, which saturates to -128, and the
+      // old code answered 127 — wrong bound AND wrong sign, from a documented API.
+      //
+      // The product's sign is the xor of the operands' signs. Neither operand can be zero
+      // on this path, since a multiply involving zero does not overflow.
+      const maxV = String(BigInt(2) ** BigInt(bits - 1) - BigInt(1));
+      const minV = String(-(BigInt(2) ** BigInt(bits - 1)));
+      const lNeg = this.nextTemp();
+      lines.push(`  ${lNeg} = icmp slt ${lt} ${lv}, 0`);
+      const rNeg = this.nextTemp();
+      lines.push(`  ${rNeg} = icmp slt ${lt} ${rv}, 0`);
+      const negProduct = this.nextTemp();
+      lines.push(`  ${negProduct} = xor i1 ${lNeg}, ${rNeg}`);
+      const bound = this.nextTemp();
+      lines.push(`  ${bound} = select i1 ${negProduct}, ${lt} ${minV}, ${lt} ${maxV}`);
+      clampVal = bound;
     }
 
     const result = this.nextTemp();

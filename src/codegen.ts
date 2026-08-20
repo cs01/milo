@@ -25,20 +25,8 @@ export const NOT_OWNED_TEMP: readonly string[] = [
   "ArrayLen", "ArrayRepeat", "BitIntrinsic", "BoolLit", "CFnCall", "Cast",
   "CharLit", "CheckedArith", "Closure", "EnumTryFrom", "FieldAccess", "FloatLit",
   "Forget", "HashMapClear", "HashMapContains", "HashMapInsert", "HashMapLen",
-  // KNOWN LEAK, and NOT safe to move to the owned side as-is. An `if`/`match` used as an
-  // expression yields an owned value when its arms do, and nothing frees it:
-  // `(if c { big(i) } else { big(j) }).len` leaks the whole string every evaluation
-  // (measured: 80 leaks / 1.9 MB over 80 iterations).
-  //
-  // Moving it to isOwnedTempExpr fixes that and CRASHES with a double free when an arm
-  // yields a LOCAL — `if c { a } else { b }` for locals a, b aborts with exit 133, because
-  // the arm's value is still owned by the enclosing scope. Tried, measured, reverted.
-  //
-  // The safe condition is DefaultValue's: every arm that can produce the result must be one
-  // we own. That needs each arm's tail value, which is a statement list here rather than a
-  // single expression — hence not a one-line change, and left alone rather than guessed.
-  "HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident", "IfExpr",
-  "IntLit", "InterfaceCoerce", "IsCheck", "MatchExpr", "MemSwap", "OffsetOf",
+"HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident",
+  "IntLit", "InterfaceCoerce", "IsCheck", "MemSwap", "OffsetOf",
   "OptionOp", "PtrDeref", "RangeCheck", "SaturatingArith", "SizeOf", "StringCstr",
   "StringFind", "StringLen", "StringLit", "StringPush", "StringPushStr", "StringSlice",
   "UnaryOp", "VecAll", "VecAny", "VecCapacity", "VecContains", "VecEach",
@@ -11878,6 +11866,34 @@ export class Codegen {
     return this.isOwnedTempExpr(v);
   }
 
+  // The value a block produces, when it produces one: a block's value is its tail
+  // expression, which is how genIfExpr and the match-arm emitter already read it. Anything
+  // else there (a Return, a loop) leaves no value for this expression to own.
+  private armTailExpr(body: HIRStmt[]): HIRExpr | null {
+    const last = body[body.length - 1];
+    return last && last.kind === "ExprStmt" ? last.expr : null;
+  }
+
+  // Whether an `if`/`match` used as an EXPRESSION hands back a value nobody else owns.
+  //
+  // Every arm that can produce the result has to be one we own, the same AND that guards
+  // DefaultValue. But NOT the same predicate: DefaultValue accepts an Ident because
+  // genDefaultValue MOVES out of the branch it takes, zeroing the source. An `if` arm does
+  // not — `if c { a } else { b }` for locals a and b leaves both still owned by the
+  // enclosing scope, and dropping the result on top of that aborts with a double free
+  // (measured: exit 133). So an Ident arm makes this false, which leaves that shape
+  // leaking rather than crashing; fixing it needs the arm's source zeroed first.
+  private blockValueOwnsResult(bodies: HIRStmt[][], type: TypeKind): boolean {
+    if (!this.needsDropCg(type)) return false;
+    if (bodies.length === 0) return false;
+    for (const body of bodies) {
+      const tail = this.armTailExpr(body);
+      if (!tail) return false;
+      if (tail.kind !== "StringLit" && !this.isOwnedTempExpr(tail)) return false;
+    }
+    return true;
+  }
+
   private isOwnedTempExpr(expr: HIRExpr): boolean {
     // A discarded small-type `replace(...)` result is dropped here (SSA path). A big-agg
     // replace drops its own moved-out value inside genExpr, so it must NOT double-drop here.
@@ -11964,6 +11980,10 @@ export class Codegen {
         return this.unwrapMovesPayload(expr);
       case "DefaultValue":
         return this.defaultValueOwnsResult(expr);
+      case "IfExpr":
+        return this.blockValueOwnsResult([expr.thenBody, expr.elseBody], expr.type);
+      case "MatchExpr":
+        return this.blockValueOwnsResult(expr.arms.map(a => a.body), expr.type);
       default:
         return false;
     }

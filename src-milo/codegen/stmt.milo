@@ -2093,16 +2093,21 @@ pub fn closureCaptures(cg: &Cgen, params: &Vec<Param>, body: &Vec<Heap<HStmt>>, 
     return caps
 }
 
+// Slot 0 of every closure environment is its drop glue, and captures start at 1.
+// src-milo does not emit glue yet, so it stores NULL there -- but the slot itself is
+// not optional: std/runtime reads slot 0 and calls it, and an env without the header
+// hands it the first CAPTURE to call as a function pointer. That crashed every
+// milo-self-compiled program that spawned a task or a detached thread, with no output
+// at all. A null header means the runtime falls back to free()ing the block, which is
+// what src-milo did before and still leaks the captures -- a leak, not a jump to
+// garbage, and it keeps both compilers on ONE environment layout.
 pub fn closureEnvTy(caps: &Vec<Local>): string {
     if caps.len == 0 {
         return "{}"
     }
-    var ty = "{ "
+    var ty = "{ ptr"
     for i in 0..caps.len {
-        if i > 0 {
-            ty = ty + ", "
-        }
-        ty = ty + "ptr"
+        ty = ty + ", ptr"
     }
     return ty + " }"
 }
@@ -2113,12 +2118,9 @@ pub fn closureMoveEnvTy(caps: &Vec<Local>): string {
     if caps.len == 0 {
         return "{}"
     }
-    var ty = "{ "
+    var ty = "{ ptr"
     for i in 0..caps.len {
-        if i > 0 {
-            ty = ty + ", "
-        }
-        ty = ty + llType(caps[i].ty)
+        ty = ty + ", " + llType(caps[i].ty)
     }
     return ty + " }"
 }
@@ -2748,7 +2750,7 @@ pub fn genClosure(cg: &mut Cgen, nodeId: u32, params: &Vec<Param>, retType: &Opt
     var clocs: Vec<Local> = Vec.new()
     for ci in 0..caps.len {
         let gp = nextTemp(cg)
-        emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr %__env, i32 0, i32 " + ci.toString() + "\n")
+        emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr %__env, i32 0, i32 " + (ci + 1).toString() + "\n")
         if isMove {
             // env slot holds the value directly — gp IS the local's storage
             clocs.push(Local {
@@ -2837,12 +2839,17 @@ pub fn genClosure(cg: &mut Cgen, nodeId: u32, params: &Vec<Param>, retType: &Opt
             emit(cg, "  " + szi + " = ptrtoint ptr " + szp + " to i64\n")
             ea = nextTemp(cg)
             emit(cg, "  " + ea + " = call ptr @malloc(i64 " + szi + ")\n")
+            // slot 0: this env's drop glue. src-milo emits none, so null tells
+            // std/runtime to free the block rather than call through it.
+            let hdr0 = nextTemp(cg)
+            emit(cg, "  " + hdr0 + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 0\n")
+            emit(cg, "  store ptr null, ptr " + hdr0 + "\n")
             for ci in 0..caps.len {
                 let cll = llType(caps[ci].ty)
                 let cv = nextTemp(cg)
                 emit(cg, "  " + cv + " = load " + cll + ", ptr " + caps[ci].addr.clone() + "\n")
                 let gp = nextTemp(cg)
-                emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 " + ci.toString() + "\n")
+                emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 " + (ci + 1).toString() + "\n")
                 emit(cg, "  store " + cll + " " + cv + ", ptr " + gp + "\n")
                 // The bits now live in TWO places (this local's slot and the env
                 // slot just stored above) but ownership was only ever meant to
@@ -2863,9 +2870,14 @@ pub fn genClosure(cg: &mut Cgen, nodeId: u32, params: &Vec<Param>, retType: &Opt
         } else {
             ea = nextTemp(cg)
             emit(cg, "  " + ea + " = alloca " + envTy + "\n")
+            // slot 0: this env's drop glue. src-milo emits none, so null tells
+            // std/runtime to free the block rather than call through it.
+            let hdr1 = nextTemp(cg)
+            emit(cg, "  " + hdr1 + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 0\n")
+            emit(cg, "  store ptr null, ptr " + hdr1 + "\n")
             for ci in 0..caps.len {
                 let gp = nextTemp(cg)
-                emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 " + ci.toString() + "\n")
+                emit(cg, "  " + gp + " = getelementptr " + envTy + ", ptr " + ea + ", i32 0, i32 " + (ci + 1).toString() + "\n")
                 emit(cg, "  store ptr " + caps[ci].addr.clone() + ", ptr " + gp + "\n")
             }
         }

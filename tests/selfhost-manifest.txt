@@ -20,6 +20,7 @@ arrayCopy
 arrayLen
 arrayMutate
 arrayMutRef
+arrayOfGenericElements
 arrayRepeat
 arrayRepeatStruct
 arrays
@@ -44,6 +45,7 @@ binary
 bitCount
 bitRotate
 blockScopeDrop
+blockValueOwnership
 booleanLogic
 borrowed_literal_arg_temp
 borrowIndexFieldPrecision
@@ -89,6 +91,7 @@ closureMultiCapture
 closureMutCapture
 closureNoCapture
 closureNonRetainingArg
+closureParamOwnership
 closureStoredMove
 closureWrapperMethodForward
 coalesceHeapPayload
@@ -110,6 +113,7 @@ cValue
 dateTime
 dateTimeLocal
 defaultValue
+defaultValueOwnership
 deflateRoundtrip
 derefStore
 deriveJsonErrors
@@ -534,6 +538,7 @@ structI64Field
 structMutate
 structPackedLayout
 structs
+substrReceiverTemp
 subtleConstantTimeEq
 swapDistinctIndex
 targetOs

@@ -9625,6 +9625,7 @@ A conforming implementation shall accept this program, and running it shall writ
 - `vec-empty 0`
 - `map-len 20`
 - `split-len 60`
+- `entries 40`
 
 **Rationale.** A keyed lookup needs the container's ADDRESS, and genLValue answers the literal "null" for anything that is not a place. A lookup on a TEMPORARY receiver therefore GEP'd from null, read a capacity out of low memory, and probed — and the probe only stops at an empty slot, so with a garbage capacity it never stopped. That is a HANG out of ordinary safe Milo (`parseHeaders(s).get(k)` is the shape), not a wrong answer, and it was there at every revision. The scalar reads next to it did not hang but leaked the whole container instead, because nothing owned the temporary.
 

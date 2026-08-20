@@ -10350,6 +10350,10 @@ export class Codegen {
     lines.push(`  ${v1} = insertvalue %Vec ${v0}, i64 ${len}, 1`);
     const v2 = this.nextTemp();
     lines.push(`  ${v2} = insertvalue %Vec ${v1}, i64 ${len}, 2`);
+    // keys()/values() build a fresh Vec of deep clones, so nothing points into the map
+    // afterwards and a temporary receiver can go: `mkMap().keys().len` leaked the map,
+    // its keys and its values on every call.
+    this.dropOwnedTemp(lines, ov, "%HashMap", expr.object);
     return [lines, v2, "%Vec"];
   }
 

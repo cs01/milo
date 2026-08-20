@@ -6,6 +6,7 @@
 // @expect: vec-empty 0
 // @expect: map-len 20
 // @expect: split-len 60
+// @expect: entries 40
 // A keyed lookup needs the container's ADDRESS, and genLValue answers the literal "null"
 // for anything that is not a place. A lookup on a TEMPORARY receiver therefore GEP'd from
 // null, read a capacity out of low memory, and probed — and the probe only stops at an
@@ -80,5 +81,17 @@ pub fn main(): i32 {
         k = k + 1
     }
     print("split-len " + splitLen.toString())
+
+    // keys()/values() build a fresh Vec of deep clones, so a temporary map receiver has
+    // nothing pointing into it afterwards — and leaked the map, its keys and its values
+    // on every call until it was dropped here too.
+    var entries = 0
+    var e = 0
+    while e < 20 {
+        entries = entries + mkm(e).keys().len
+        entries = entries + mkm(e).values().len
+        e = e + 1
+    }
+    print("entries " + entries.toString())
     return 0
 }

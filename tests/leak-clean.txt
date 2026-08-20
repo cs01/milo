@@ -482,6 +482,7 @@ taskJoin
 taskJoinLate
 tcpGreenConnectRefused
 tcpListenerPort
+tempReceiverLookup
 temp_name_collision
 termSize
 testingAsserts

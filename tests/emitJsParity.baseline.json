@@ -215,6 +215,7 @@
   "tcpGreenConnectRefused.milo": "noEmit",
   "tcpIpv6.milo": "noEmit",
   "tcpListenerPort.milo": "noEmit",
+  "tempReceiverLookup.milo": "noEmit",
   "termSize.milo": "noEmit",
   "testingAsserts.milo": "noEmit",
   "totpRfc.milo": "noEmit",

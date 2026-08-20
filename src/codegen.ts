@@ -4884,6 +4884,10 @@ export class Codegen {
         lines.push(...ol);
         const len = this.nextTemp();
         lines.push(`  ${len} = extractvalue %Vec ${ov}, 1`);
+        // The receiver is a temporary here — `mkVec().len` reads a length out of a Vec
+        // nobody owns. StringLen above already did this; its Vec and HashMap siblings did
+        // not. Reading a scalar keeps no pointer into the container, so it can go now.
+        this.dropOwnedTemp(lines, ov, "%Vec", expr.object);
         return [lines, len, "i64"];
       }
       case "VecClone": {
@@ -4923,6 +4927,10 @@ export class Codegen {
         lines.push(`  ${len} = extractvalue %Vec ${ov}, 1`);
         const result = this.nextTemp();
         lines.push(`  ${result} = icmp eq i64 ${len}, 0`);
+        // The receiver is a temporary here — `mkVec().len` reads a length out of a Vec
+        // nobody owns. StringLen above already did this; its Vec and HashMap siblings did
+        // not. Reading a scalar keeps no pointer into the container, so it can go now.
+        this.dropOwnedTemp(lines, ov, "%Vec", expr.object);
         return [lines, result, "i1"];
       }
       case "VecReverse":
@@ -4959,6 +4967,10 @@ export class Codegen {
         lines.push(...ol);
         const cap = this.nextTemp();
         lines.push(`  ${cap} = extractvalue %Vec ${ov}, 2`);
+        // The receiver is a temporary here — `mkVec().len` reads a length out of a Vec
+        // nobody owns. StringLen above already did this; its Vec and HashMap siblings did
+        // not. Reading a scalar keeps no pointer into the container, so it can go now.
+        this.dropOwnedTemp(lines, ov, "%Vec", expr.object);
         return [lines, cap, "i64"];
       }
       case "VecSort":
@@ -4993,6 +5005,10 @@ export class Codegen {
         lines.push(...ol);
         const len = this.nextTemp();
         lines.push(`  ${len} = extractvalue %HashMap ${ov}, 1`);
+        // The receiver is a temporary here — `mkVec().len` reads a length out of a Vec
+        // nobody owns. StringLen above already did this; its Vec and HashMap siblings did
+        // not. Reading a scalar keeps no pointer into the container, so it can go now.
+        this.dropOwnedTemp(lines, ov, "%HashMap", expr.object);
         return [lines, len, "i64"];
       }
       case "StringPush":
@@ -8043,6 +8059,9 @@ export class Codegen {
     // Same as the map lookups: the needle is the caller's, and a read-only search takes
     // no ownership of it. `v.contains("s" + i.toString())` leaked the needle per call.
     this.dropOwnedTemp(lines, valVal, valLt, expr.value);
+    // …and the receiver, when that is a temporary: `mkVec().contains(x)` leaked the whole
+    // container. A search keeps no pointer into it once the answer is a scalar.
+    this.dropOwnedTemp(lines, vecVal, "%Vec", expr.vec);
     return [lines, result, "i1"];
   }
 
@@ -8271,6 +8290,9 @@ export class Codegen {
     // Same as the map lookups: the needle is the caller's, and a read-only search takes
     // no ownership of it. `v.contains("s" + i.toString())` leaked the needle per call.
     this.dropOwnedTemp(lines, nv, elemTy, expr.value);
+    // …and the receiver, when that is a temporary: `mkVec().contains(x)` leaked the whole
+    // container. A search keeps no pointer into it once the answer is a scalar.
+    this.dropOwnedTemp(lines, vv, "%Vec", expr.vec);
     return [lines, result, slot.enumTy];
   }
 
@@ -9456,6 +9478,29 @@ export class Codegen {
     throw new Error(`uncomparable key type: ${keyType.tag}`);
   }
 
+  // The address of a map for a keyed operation.
+  //
+  // genLValue answers the literal "null" for anything that is not a place, so a lookup on
+  // a TEMPORARY receiver — `makeMap().contains(k)`, `parseHeaders(s).get(k)` — GEP'd from
+  // null, read a capacity out of low memory, and then probed. The probe only stops at an
+  // empty slot, so with a garbage capacity it never stopped: a HANG out of ordinary safe
+  // code, not a wrong answer. Every keyed op had it, at every revision.
+  //
+  // A temporary has no address until we give it one. Materialize it into a slot and tell
+  // the caller to drop that slot when the lookup is done — it is an owned value nobody
+  // else will ever free.
+  private mapReceiverPtr(lines: string[], mapExpr: HIRExpr): { ptr: string; tempSlot: string | null } {
+    const [ptrLines, ptr] = this.genLValue(mapExpr);
+    lines.push(...ptrLines);
+    if (ptr !== "null") return { ptr, tempSlot: null };
+    const [exprLines, exprVal, exprTy] = this.genExpr(mapExpr);
+    lines.push(...exprLines);
+    const slot = this.nextTemp();
+    lines.push(`  ${slot} = alloca ${exprTy}`);
+    lines.push(`  store ${exprTy} ${exprVal}, ptr ${slot}`);
+    return { ptr: slot, tempSlot: slot };
+  }
+
   private genHashMapNew(expr: HIRExpr & { kind: "HashMapNew" }, lines: string[]): Gen {
     this.hasHashMapType = true;
     this.needsMalloc = true;
@@ -9502,8 +9547,7 @@ export class Codegen {
     const entryTy = this.hashMapEntryType(keyType, valueType);
 
     // get pointer to map
-    const [mapPtrLines, mapPtr] = this.genLValue(expr.map);
-    lines.push(...mapPtrLines);
+    const { ptr: mapPtr, tempSlot: mapTempSlot } = this.mapReceiverPtr(lines, expr.map);
 
     // eval key and value
     const [keyLines, keyVal] = this.genExpr(expr.key);
@@ -9826,6 +9870,9 @@ export class Codegen {
     lines.push(`  br label %${probeCond}`);
 
     lines.push(`${insertDone}:`);
+    // Inserting into a temporary is pointless but legal, and the temporary still leaks
+    // without this.
+    if (mapTempSlot) this.emitDropValue(lines, mapTempSlot, expr.map.type);
     return [lines, "0", "void"];
   }
 
@@ -9896,8 +9943,7 @@ export class Codegen {
     const keyTy = this.llvmType(keyType);
     const entryTy = this.hashMapEntryType(keyType, valueType);
 
-    const [mapPtrLines, mapPtr] = this.genLValue(expr.map);
-    lines.push(...mapPtrLines);
+    const { ptr: mapPtr, tempSlot: mapTempSlot } = this.mapReceiverPtr(lines, expr.map);
     const [keyLines, keyVal] = this.genExpr(expr.key);
     lines.push(...keyLines);
 
@@ -9953,6 +9999,9 @@ export class Codegen {
     const result = this.nextTemp();
     lines.push(`  ${result} = phi i1 [true, %${foundLabel}], [false, %${notFoundLabel}]`);
     this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
+    // A materialized receiver is an owned temporary nobody else will free. This runs after
+    // the phi above, so the block it opens cannot invalidate the phi's predecessors.
+    if (mapTempSlot) this.emitDropValue(lines, mapTempSlot, expr.map.type);
     return [lines, result, "i1"];
   }
 
@@ -9966,8 +10015,7 @@ export class Codegen {
     const valTy = this.llvmType(valueType);
     const entryTy = this.hashMapEntryType(keyType, valueType);
 
-    const [mapPtrLines, mapPtr] = this.genLValue(expr.map);
-    lines.push(...mapPtrLines);
+    const { ptr: mapPtr, tempSlot: mapTempSlot } = this.mapReceiverPtr(lines, expr.map);
     const [keyLines, keyVal] = this.genExpr(expr.key);
     lines.push(...keyLines);
 
@@ -10049,6 +10097,9 @@ export class Codegen {
 
     lines.push(`${doneLabel}:`);
     this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
+    // A materialized receiver is an owned temporary nobody else will free. This runs after
+    // the phi above, so the block it opens cannot invalidate the phi's predecessors.
+    if (mapTempSlot) this.emitDropValue(lines, mapTempSlot, expr.map.type);
     return [lines, "0", "void"];
   }
 
@@ -10317,8 +10368,7 @@ export class Codegen {
     if (!optionLayout) throw new Error(`no enum layout for ${optionEnumName}`);
     const optionTy = `%${optionEnumName}`;
 
-    const [mapPtrLines, mapPtr] = this.genLValue(expr.map);
-    lines.push(...mapPtrLines);
+    const { ptr: mapPtr, tempSlot: mapTempSlot } = this.mapReceiverPtr(lines, expr.map);
     const [keyLines, keyVal] = this.genExpr(expr.key);
     lines.push(...keyLines);
 
@@ -10423,6 +10473,9 @@ export class Codegen {
     // the four read-only lookups did not. dropOwnedTemp no-ops unless the argument really
     // is an owned temporary, so a variable or a literal key is untouched.
     this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
+    // A materialized receiver is an owned temporary nobody else will free. This runs after
+    // the phi above, so the block it opens cannot invalidate the phi's predecessors.
+    if (mapTempSlot) this.emitDropValue(lines, mapTempSlot, expr.map.type);
     return [lines, result, optionTy];
   }
 
@@ -10436,8 +10489,7 @@ export class Codegen {
     const valTy = this.llvmType(valueType);
     const entryTy = this.hashMapEntryType(keyType, valueType);
 
-    const [mapPtrLines, mapPtr] = this.genLValue(expr.map);
-    lines.push(...mapPtrLines);
+    const { ptr: mapPtr, tempSlot: mapTempSlot } = this.mapReceiverPtr(lines, expr.map);
     const [keyLines, keyVal] = this.genExpr(expr.key);
     lines.push(...keyLines);
     const [defaultLines, defaultVal] = this.genExpr(expr.default);
@@ -10518,6 +10570,9 @@ export class Codegen {
     const result = this.nextTemp();
     lines.push(`  ${result} = phi ${valTy} [${foundVal}, %${foundJoin}], [${defaultVal}, %${notFoundLabel}]`);
     this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
+    // A materialized receiver is an owned temporary nobody else will free. This runs after
+    // the phi above, so the block it opens cannot invalidate the phi's predecessors.
+    if (mapTempSlot) this.emitDropValue(lines, mapTempSlot, expr.map.type);
     return [lines, result, valTy];
   }
 

@@ -1,0 +1,84 @@
+// @expect: map-contains 1
+// @expect: map-get 3
+// @expect: vec-contains 20
+// @expect: vec-indexof 0
+// @expect: vec-len 60
+// @expect: vec-empty 0
+// @expect: map-len 20
+// @expect: split-len 60
+// A keyed lookup needs the container's ADDRESS, and genLValue answers the literal "null"
+// for anything that is not a place. A lookup on a TEMPORARY receiver therefore GEP'd from
+// null, read a capacity out of low memory, and probed — and the probe only stops at an
+// empty slot, so with a garbage capacity it never stopped.
+//
+// That is a HANG out of ordinary safe Milo (`parseHeaders(s).get(k)` is the shape), not a
+// wrong answer, and it was there at every revision. The scalar reads next to it did not
+// hang but leaked the whole container instead, because nothing owned the temporary.
+fn mkv(n: i64): Vec<string> {
+    var v: Vec<string> = []
+    var j = 0
+    while j < 3 {
+        v.push("e" + (n + j).toString())
+        j = j + 1
+    }
+    return v
+}
+
+fn mkm(n: i64): HashMap<string, string> {
+    var m: HashMap<string, string> = HashMap.new()
+    m.insert("k" + n.toString(), "vv" + n.toString())
+    return m
+}
+
+pub fn main(): i32 {
+    var mapContains = 0
+    var mapGet = 0
+    var vecContains = 0
+    var vecIndexOf = 0
+    var vecLen = 0
+    var vecEmpty = 0
+    var mapLen = 0
+
+    var i = 0
+    while i < 20 {
+        if mkm(i).contains("k0") {
+            mapContains = mapContains + 1
+        }
+        match mkm(i).get("k0") {
+            Option.Some(s) => {
+                mapGet = mapGet + s.len
+            }
+            Option.None => {
+            }
+        }
+        if mkv(i).contains("e" + i.toString()) {
+            vecContains = vecContains + 1
+        }
+        vecIndexOf = vecIndexOf + (mkv(i).indexOf("e" + i.toString()) ?? 0)
+        vecLen = vecLen + mkv(i).len
+        if mkv(i).isEmpty() {
+            vecEmpty = vecEmpty + 1
+        }
+        mapLen = mapLen + mkm(i).len
+        i = i + 1
+    }
+
+    print("map-contains " + mapContains.toString())
+    print("map-get " + mapGet.toString())
+    print("vec-contains " + vecContains.toString())
+    print("vec-indexof " + vecIndexOf.toString())
+    print("vec-len " + vecLen.toString())
+    print("vec-empty " + vecEmpty.toString())
+    print("map-len " + mapLen.toString())
+
+    // A Vec-returning call whose result is only read for a scalar is the same shape.
+    let csv: string = "a,b,c"
+    var splitLen = 0
+    var k = 0
+    while k < 20 {
+        splitLen = splitLen + csv.split(",").len
+        k = k + 1
+    }
+    print("split-len " + splitLen.toString())
+    return 0
+}

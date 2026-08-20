@@ -48,6 +48,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/fuzz-check.ts` | The frontend contract the fuzzer tests, in one place so the Worker and the main-thread confirmation stage run byte-identical logic. |
 | `scripts/fuzz-confirm.ts` | Re-runs one fuzz case on a fresh process's MAIN thread and reports the verdict as JSON on stdout. |
 | `scripts/fuzz-coverage.ts` | Which surface forms can the ownership fuzzer actually emit? |
+| `scripts/fuzz-drops.ts` | Destructor accounting as a falsifiable invariant: every value constructed must be destroyed exactly once. |
 | `scripts/fuzz-frontend.ts` | Token-mutation fuzzer for the Milo frontend (lexer → parser → [resolver] → checker). |
 | `scripts/fuzz-hashmap.ts` | Differential falsifier for the built-in HASHMAP — the open-addressing table codegen.ts emits, not a .milo file. |
 | `scripts/fuzz-int.ts` | Differential falsifier for INTEGER arithmetic across every width. |

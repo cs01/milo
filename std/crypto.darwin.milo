@@ -82,22 +82,15 @@ pub struct AesGcmResult {
     tag: string,
 }
 
-// Encrypt with AES-256-GCM. Key must be 32 bytes, IV should be 12 bytes.
-fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
-requires key.len == 32
-requires iv.len == 12
-{
-    // Checked at RUNTIME, not only by the `requires` above: contracts are asserted in
-    // --debug and dropped at the default -O2, and these lengths are passed to the C
-    // API as CONSTANTS (32, 12, 16) regardless of what arrived. A short key therefore
-    // read past the end of the caller's buffer in an ordinary build — an out-of-bounds
-    // read reachable from safe Milo — and "encrypted" with whatever followed it.
-    if key.len != 32 {
-        return Result.Err("aesGcmEncrypt: key must be 32 bytes, got " + key.len.toString())
-    }
-    if iv.len != 12 {
-        return Result.Err("aesGcmEncrypt: iv must be 12 bytes, got " + iv.len.toString())
-    }
+// ── One GCM implementation per direction ──
+//
+// AES-128-GCM and AES-256-GCM differ by exactly one argument to CommonCrypto: the key
+// length. They used to be two 60-line copies each, and the copies had already drifted —
+// the 256 arm reported "AES-GCM encrypt failed" where the 128 arm said "AES-128-GCM".
+// The public wrappers keep the `requires` contracts and the self-naming length errors;
+// only the CommonCrypto call is shared.
+
+fn gcmEncryptRaw(keyBits: i64, key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string> {
     var tag: [u8; 16] = [0; 16]
 
     unsafe {
@@ -117,12 +110,12 @@ requires iv.len == 12
             ctBuf = malloc(plaintext.len)
         }
 
-        let ret = CCCryptorGCMOneshotEncrypt(0, key, 32, iv, 12, aadPtr, aad.len, ptPtr, plaintext.len, ctBuf, tag, 16)
+        let ret = CCCryptorGCMOneshotEncrypt(0, key, keyBits / 8, iv, 12, aadPtr, aad.len, ptPtr, plaintext.len, ctBuf, tag, 16)
         if ret != 0 {
             if plaintext.len > 0 {
                 free(ctBuf)
             }
-            return Result.Err("AES-GCM encrypt failed")
+            return Result.Err("AES-" + keyBits.toString() + "-GCM encrypt failed")
         }
 
         var ciphertext: string = ""
@@ -143,6 +136,62 @@ requires iv.len == 12
         }
         )
     }
+}
+
+fn gcmDecryptRaw(keyBits: i64, key: &string, iv: &string, ciphertext: &string, tag: &string, aad: &string): Result<string, string> {
+    unsafe {
+        let aadPtr = if aad.len > 0 {
+            aad as *u8
+        } else {
+            0 as *u8
+        }
+        let ctPtr = if ciphertext.len > 0 {
+            ciphertext as *u8
+        } else {
+            0 as *u8
+        }
+
+        var ptBuf: *u8 = 0 as *u8
+        if ciphertext.len > 0 {
+            ptBuf = malloc(ciphertext.len)
+        }
+
+        let ret = CCCryptorGCMOneshotDecrypt(0, key, keyBits / 8, iv, 12, aadPtr, aad.len, ctPtr, ciphertext.len, ptBuf, tag, 16)
+        if ret != 0 {
+            if ciphertext.len > 0 {
+                free(ptBuf)
+            }
+            return Result.Err("AES-" + keyBits.toString() + "-GCM decrypt failed: authentication error")
+        }
+
+        var plaintext: string = ""
+        for i in 0..ciphertext.len {
+            plaintext.push(*((ptBuf as i64 + i) as *u8))
+        }
+        if ciphertext.len > 0 {
+            free(ptBuf)
+        }
+        return Result.Ok(plaintext)
+    }
+}
+
+// Encrypt with AES-256-GCM. Key must be 32 bytes, IV should be 12 bytes.
+fn aesGcmEncrypt(key: &string, iv: &string, plaintext: &string, aad: &string): Result<AesGcmResult, string>
+requires key.len == 32
+requires iv.len == 12
+{
+    // Checked at RUNTIME, not only by the `requires` above: contracts are asserted in
+    // --debug and dropped at the default -O2, and these lengths are passed to the C
+    // API as CONSTANTS (32, 12, 16) regardless of what arrived. A short key therefore
+    // read past the end of the caller's buffer in an ordinary build — an out-of-bounds
+    // read reachable from safe Milo — and "encrypted" with whatever followed it.
+    if key.len != 32 {
+        return Result.Err("aesGcmEncrypt: key must be 32 bytes, got " + key.len.toString())
+    }
+    if iv.len != 12 {
+        return Result.Err("aesGcmEncrypt: iv must be 12 bytes, got " + iv.len.toString())
+    }
+    return gcmEncryptRaw(256, key, iv, plaintext, aad)
 }
 
 // Decrypt with AES-256-GCM. Key must be 32 bytes, IV 12 bytes, tag 16 bytes.
@@ -165,40 +214,7 @@ requires tag.len == 16
     if tag.len != 16 {
         return Result.Err("aesGcmDecrypt: tag must be 16 bytes, got " + tag.len.toString())
     }
-    unsafe {
-        let aadPtr = if aad.len > 0 {
-            aad as *u8
-        } else {
-            0 as *u8
-        }
-        let ctPtr = if ciphertext.len > 0 {
-            ciphertext as *u8
-        } else {
-            0 as *u8
-        }
-
-        var ptBuf: *u8 = 0 as *u8
-        if ciphertext.len > 0 {
-            ptBuf = malloc(ciphertext.len)
-        }
-
-        let ret = CCCryptorGCMOneshotDecrypt(0, key, 32, iv, 12, aadPtr, aad.len, ctPtr, ciphertext.len, ptBuf, tag, 16)
-        if ret != 0 {
-            if ciphertext.len > 0 {
-                free(ptBuf)
-            }
-            return Result.Err("AES-GCM decrypt failed: authentication error")
-        }
-
-        var plaintext: string = ""
-        for i in 0..ciphertext.len {
-            plaintext.push(*((ptBuf as i64 + i) as *u8))
-        }
-        if ciphertext.len > 0 {
-            free(ptBuf)
-        }
-        return Result.Ok(plaintext)
-    }
+    return gcmDecryptRaw(256, key, iv, ciphertext, tag, aad)
 }
 
 // Encrypt with AES-128-GCM. Key must be 16 bytes, IV 12 bytes. (termpair uses AES-128.)
@@ -217,51 +233,7 @@ requires iv.len == 12
     if iv.len != 12 {
         return Result.Err("aesGcm128Encrypt: iv must be 12 bytes, got " + iv.len.toString())
     }
-    var tag: [u8; 16] = [0; 16]
-
-    unsafe {
-        let aadPtr = if aad.len > 0 {
-            aad as *u8
-        } else {
-            0 as *u8
-        }
-        let ptPtr = if plaintext.len > 0 {
-            plaintext as *u8
-        } else {
-            0 as *u8
-        }
-
-        var ctBuf: *u8 = 0 as *u8
-        if plaintext.len > 0 {
-            ctBuf = malloc(plaintext.len)
-        }
-
-        let ret = CCCryptorGCMOneshotEncrypt(0, key, 16, iv, 12, aadPtr, aad.len, ptPtr, plaintext.len, ctBuf, tag, 16)
-        if ret != 0 {
-            if plaintext.len > 0 {
-                free(ctBuf)
-            }
-            return Result.Err("AES-128-GCM encrypt failed")
-        }
-
-        var ciphertext: string = ""
-        for i in 0..plaintext.len {
-            ciphertext.push(*((ctBuf as i64 + i) as *u8))
-        }
-        if plaintext.len > 0 {
-            free(ctBuf)
-        }
-
-        var tagStr: string = ""
-        for i in 0..16 {
-            tagStr.push(tag[i])
-        }
-
-        return Result.Ok(AesGcmResult {
-            ciphertext: ciphertext, tag: tagStr
-        }
-        )
-    }
+    return gcmEncryptRaw(128, key, iv, plaintext, aad)
 }
 
 // Decrypt with AES-128-GCM. Key 16 bytes, IV 12 bytes, tag 16 bytes.
@@ -284,40 +256,7 @@ requires tag.len == 16
     if tag.len != 16 {
         return Result.Err("aesGcm128Decrypt: tag must be 16 bytes, got " + tag.len.toString())
     }
-    unsafe {
-        let aadPtr = if aad.len > 0 {
-            aad as *u8
-        } else {
-            0 as *u8
-        }
-        let ctPtr = if ciphertext.len > 0 {
-            ciphertext as *u8
-        } else {
-            0 as *u8
-        }
-
-        var ptBuf: *u8 = 0 as *u8
-        if ciphertext.len > 0 {
-            ptBuf = malloc(ciphertext.len)
-        }
-
-        let ret = CCCryptorGCMOneshotDecrypt(0, key, 16, iv, 12, aadPtr, aad.len, ctPtr, ciphertext.len, ptBuf, tag, 16)
-        if ret != 0 {
-            if ciphertext.len > 0 {
-                free(ptBuf)
-            }
-            return Result.Err("AES-128-GCM decrypt failed: authentication error")
-        }
-
-        var plaintext: string = ""
-        for i in 0..ciphertext.len {
-            plaintext.push(*((ptBuf as i64 + i) as *u8))
-        }
-        if ciphertext.len > 0 {
-            free(ptBuf)
-        }
-        return Result.Ok(plaintext)
-    }
+    return gcmDecryptRaw(128, key, iv, ciphertext, tag, aad)
 }
 
 // Crypto namespace — Crypto.sha256/sha1/sha1Bytes/md5 (platform crypto lib) + AES-GCM.

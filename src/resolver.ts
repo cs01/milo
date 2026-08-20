@@ -6,6 +6,7 @@ import { resolve, dirname, sep } from "path";
 import { cacheRoot } from "./pkg";
 import type { Program, Span, DeclOrigins, DeclOrigin, ImportDecl } from "./ast";
 import { ParseError } from "./diagnostics";
+import { closest, importHint, stdModuleNames } from "./suggest";
 import type { TargetInfo } from "./target";
 import { Lexer } from "./lexer";
 import { Parser } from "./parser";
@@ -55,6 +56,12 @@ function bundleExists(absPath: string): boolean {
   if (!STDLIB_BUNDLE) return false;
   const key = toStdlibKey(absPath);
   return key !== null && STDLIB_BUNDLE.has(key);
+}
+
+// Best-effort source text for a diagnostic's caret. A file we cannot read still gets a
+// message and a location — only the snippet is dropped.
+function readSourceSafe(p?: string): string | undefined {
+  try { return p ? readSource(p) : undefined; } catch { return undefined; }
 }
 
 function readSource(absPath: string): string {
@@ -351,7 +358,21 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
       try {
         source = readSource(absPath);
       } catch {
-        throw new Error(`error[import]: ${imp.span?.line}:${imp.span?.col}: cannot open '${imp.path}'`);
+        // A misspelled std module is the common case and the compiler knows the whole
+        // list, so spell the fix out rather than making the user go read std/.
+        const near = imp.path.startsWith("std/") ? closest(imp.path, stdModuleNames()) : null;
+        throw new ParseError({
+          severity: "error",
+          code: "import",
+          span: imp.span,
+          len: imp.path.length + 7, // `from "` + path + `"`
+          message: `cannot open module '${imp.path}'`,
+          hint: near
+            ? `did you mean '${near}'?`
+            : imp.path.startsWith("std/")
+              ? `no std module is named '${imp.path}' — run 'milo api <name>' to find the one that has what you want`
+              : `resolved to '${absPath}', which does not exist. Import paths without a leading 'std/' are relative to the importing file.`,
+        }, readSourceSafe(unit.file), unit.file);
       }
 
       const tokens = new Lexer(source).tokenize();
@@ -369,7 +390,18 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
         for (const g of imported.globals) available.add(g.name);
         for (const name of imp.names) {
           if (!available.has(name)) {
-            throw new Error(`error[import]: ${imp.span?.line}:${imp.span?.col}: '${name}' not found in '${imp.path}'`);
+            // Two distinct fixes hide behind one message: a typo (the module has a
+            // near-miss) and an import from the wrong module (some OTHER std module
+            // exports this exact name). Only the second is worth a full import line.
+            const near = closest(name, available);
+            throw new ParseError({
+              severity: "error",
+              code: "import",
+              span: imp.span,
+              len: imp.path.length + 7, // `from "` + path + `"`
+              message: `'${name}' is not exported by '${imp.path}'`,
+              hint: near ? `did you mean '${near}'?` : importHint(name),
+            }, readSourceSafe(unit.file), unit.file);
           }
         }
       }
@@ -589,7 +621,6 @@ export function resolveImports(program: Program, sourceDir: string, target: Targ
   // return type decide whether one fn can stand in for another.
   const sigKey = (f: typeof functions[number]) =>
     f.params.map(p => JSON.stringify(p.type, stripSpan)).join(",") + "=>" + JSON.stringify(f.retType, stripSpan);
-  const readSourceSafe = (p?: string) => { try { return p ? readSource(p) : undefined; } catch { return undefined; } };
 
   // Stdlib/prelude signatures, to detect user shadows. First occurrence wins.
   const stdlibSigs = new Map<string, { file: string; sig: string; body: string }>();

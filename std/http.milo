@@ -542,17 +542,17 @@ impl Drop for Socket {
 
 // ── Public API ──
 
-pub fn serve(port: u16?, handler: (&Request) => Response): Result<Unit> {
+// Bind, listen and announce. Shared by serve() and serveRouter(): two copies of a
+// socket/bind/listen prologue is how one of them ends up with a setsockopt or an
+// address-family fix the other never got.
+fn openListener(port: u16?): Result<Socket> {
     let AF_INET: i32 = 2
     let SOCK_STREAM: i32 = 1
     let BACKLOG: i32 = 1024
-    let BUF_SIZE: i64 = 8192
-
     var bindPort: u16 = 0
     if let Option.Some(p) = port {
         bindPort = p
     }
-
     let rawFd = socket(AF_INET, SOCK_STREAM, 0)
     if rawFd < 0 {
         return Result.Err("socket() failed")
@@ -560,24 +560,24 @@ pub fn serve(port: u16?, handler: (&Request) => Response): Result<Unit> {
     let sock = Socket {
         fd: rawFd
     }
-
     var one: i32 = 1
     setsockopt(sock.fd, solSocket(), soReuseaddr(), one, 4)
-
     var addr = makeSockaddr(bindPort, 0)
-
     if bindIn(sock.fd, addr) < 0 {
         return Result.Err("bind() failed")
     }
-
     if listen(sock.fd, BACKLOG) < 0 {
         return Result.Err("listen() failed")
     }
-
     // family-agnostic: works for a v4 or v6 listener
     let actualPort = getSockPort(sock.fd)
-
     print($"listening on http://localhost:{actualPort}")
+    return Result.Ok(sock)
+}
+
+pub fn serve(port: u16?, handler: (&Request) => Response): Result<Unit> {
+    let BUF_SIZE: i64 = 8192
+    let sock = openListener(port)?
 
     while true {
         // storage-sized: accept lets the kernel pick the peer family, and a v6 peer
@@ -707,38 +707,8 @@ impl Router {
 
 // Start an HTTP server using a Router (headers from Context are sent on the wire).
 pub fn serveRouter(port: u16?, router: &Router): Result<Unit> {
-    let AF_INET: i32 = 2
-    let SOCK_STREAM: i32 = 1
-    let BACKLOG: i32 = 1024
     let BUF_SIZE: i64 = 8192
-
-    var bindPort: u16 = 0
-    if let Option.Some(p) = port {
-        bindPort = p
-    }
-
-    let rawFd = socket(AF_INET, SOCK_STREAM, 0)
-    if rawFd < 0 {
-        return Result.Err("socket() failed")
-    }
-    let sock = Socket {
-        fd: rawFd
-    }
-
-    var one: i32 = 1
-    setsockopt(sock.fd, solSocket(), soReuseaddr(), one, 4)
-
-    var addr = makeSockaddr(bindPort, 0)
-    if bindIn(sock.fd, addr) < 0 {
-        return Result.Err("bind() failed")
-    }
-    if listen(sock.fd, BACKLOG) < 0 {
-        return Result.Err("listen() failed")
-    }
-
-    // family-agnostic: works for a v4 or v6 listener
-    let actualPort = getSockPort(sock.fd)
-    print($"listening on http://localhost:{actualPort}")
+    let sock = openListener(port)?
 
     while true {
         // storage-sized: accept lets the kernel pick the peer family, and a v6 peer

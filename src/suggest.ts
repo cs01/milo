@@ -188,6 +188,9 @@ export function memberHint(name: string, candidates: Iterable<string>): string |
 // on the error path only — a clean compile never touches the filesystem here.
 
 let STD_EXPORTS: Map<string, string[]> | null = null;
+// Import paths any std module answers to, for spelling suggestions on a bad import.
+// Filled by the same scan as STD_EXPORTS so the two cannot disagree about what std holds.
+let STD_MODULES: Set<string> | null = null;
 
 function walkMilo(dir: string, out: string[]): void {
   for (const entry of readdirSync(dir)) {
@@ -201,6 +204,8 @@ function stdExports(): Map<string, string[]> {
   if (STD_EXPORTS) return STD_EXPORTS;
   const index = new Map<string, string[]>();
   STD_EXPORTS = index;
+  const modules = new Set<string>();
+  STD_MODULES = modules;
   const stdDir = resolve(STDLIB_DIR, "std");
   const files: string[] = [];
   try {
@@ -220,6 +225,7 @@ function stdExports(): Map<string, string[]> {
       .replace(/\\/g, "/")
       .replace(/\.milo$/, "")
       .replace(/\.(darwin|linux|windows)$/, "");
+    modules.add(mod);
     for (const m of src.matchAll(decl)) {
       const list = index.get(m[1]);
       if (!list) index.set(m[1], [mod]);
@@ -241,4 +247,10 @@ export function importHint(name: string): string | undefined {
 // Names any std module exports, for spelling suggestions on an unknown type.
 export function stdExportNames(): Iterable<string> {
   return stdExports().keys();
+}
+
+// Every importable std module path ("std/io", "std/json", …).
+export function stdModuleNames(): Iterable<string> {
+  stdExports();
+  return STD_MODULES ?? new Set<string>();
 }

@@ -32,6 +32,7 @@ To change an entry, change that line — this table is a projection of it.
 <!-- BEGIN GENERATED INDEX -->
 | Script | Purpose |
 |---|---|
+| `scripts/abstraction-scan.ts` | Abstraction scanner: finds indirection that is not paying for itself — helpers with exactly one caller, and forwarders whose whole body is a call to something else. |
 | `scripts/agent_review.sh` | Cross-model / multi-persona code review driver. |
 | `scripts/audit-extern-returns.ts` | Audit every `extern fn` in std/ against the real C headers — no annotations needed. |
 | `scripts/build.sh` | Build a standalone, self-contained milo binary. |
@@ -39,6 +40,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/check-api-docs.ts` | Checks the signature listings on the docs-site stdlib pages against the real std API. |
 | `scripts/check-breaking.ts` | Detects source-level breaks in the public std surface since the last release tag, and requires each one to be written up in docs/breaking-changes.md. |
 | `scripts/check-packages.sh` | Run the sibling Milo packages' OWN test suites against this checkout's compiler. |
+| `scripts/dup-scan.ts` | Duplicate-code scanner: finds maximal runs of identical normalized lines shared by two or more places, within or across files. |
 | `scripts/ecosystem-check.ts` | Compile every published milo-language package against THIS checkout. |
 | `scripts/fetch-assets.sh` | Regenerates the game assets that are deliberately NOT in git: the FLYBY city files (82 MB of terrain, footprints and aerial drape) and the APSIS planet maps. |
 | `scripts/fuzz-check.ts` | The frontend contract the fuzzer tests, in one place so the Worker and the main-thread confirmation stage run byte-identical logic. |

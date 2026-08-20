@@ -1,4 +1,4 @@
-// @error: 'nonexistent' not found in 'lib/math'
+// @error: 'nonexistent' is not exported by 'lib/math'
 from "lib/math" import {
     nonexistent
 }

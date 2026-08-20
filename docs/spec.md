@@ -1018,7 +1018,7 @@ A conforming implementation shall reject this program at compile time.
 
 A conforming implementation shall reject this program at compile time.
 
-- The diagnostic shall contain: `'nonexistent' not found in 'lib/math'`
+- The diagnostic shall contain: `'nonexistent' is not exported by 'lib/math'`
 
 *Program:* [`tests/errors/importNamedMissingSymbol.milo`](../tests/errors/importNamedMissingSymbol.milo) — *verified by:* tests/run.test.ts — `errors (type checker rejects)`
 

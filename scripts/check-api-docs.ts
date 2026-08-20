@@ -190,6 +190,15 @@ export function checkOne(mod: string, pageText: string): Problem[] {
   return problems;
 }
 
+// How many documented declarations this run actually compared against the compiler.
+// The gate's whole output is "problems found", and zero problems is indistinguishable
+// between "the docs are correct" and "the fence detector stopped matching and nothing was
+// read". NOT_YET_MATCHING used to double as a canary — a broken parser made every
+// ratcheted page look fixed — but that list is empty now, so the count is the only signal
+// left that this gate is still doing anything.
+export let comparedCount = 0;
+export function resetComparedCount(): void { comparedCount = 0; }
+
 function checkFence(mod: string, fence: { start: number; lines: string[] }, byBase: Map<string, Entry[]>, byName: Map<string, Entry[]>, structs: Map<string, string[]>, problems: Problem[]): void {
   checkStructListing(mod, fence, structs, problems);
   const body = fence.lines.filter(l => l.trim() && !l.trim().startsWith("//"));
@@ -208,6 +217,7 @@ function checkFence(mod: string, fence: { start: number; lines: string[] }, byBa
     const candidates = name.includes(".")
       ? byName.get(name) ?? byBase.get(baseName(name))
       : byBase.get(baseName(name));
+    comparedCount++;
     if (!candidates) {
       problems.push({ module: mod, line: fence.start + fence.lines.indexOf(raw) + 1, detail: `documents \`${decl}\` — std/${mod} has no such function` });
       continue;
@@ -254,8 +264,16 @@ if (import.meta.main) {
   }
   const offRatchet = [...failing].filter(m => !NOT_YET_MATCHING.has(m));
   const fixed = [...NOT_YET_MATCHING].filter(m => !failing.has(m) && existsSync(join(SITE, `${m}.md`)));
-  console.log(`\n${problems.length} mismatched signatures across ${failing.size} pages (${NOT_YET_MATCHING.size} on the ratchet)`);
+  console.log(`\n${comparedCount} documented signatures compared; ${problems.length} mismatched across ${failing.size} pages (${NOT_YET_MATCHING.size} on the ratchet)`);
   if (process.argv.includes("--check")) {
+    // Floor, not an exact count, so adding or removing a page does not need a code edit.
+    // Set well under today's number and well over zero: the failure this catches is the
+    // fence detector matching nothing at all, not a page-sized drift.
+    const FLOOR = 200;
+    if (comparedCount < FLOOR) {
+      console.error(`doc gate compared only ${comparedCount} signatures (floor ${FLOOR}) — the fence detector is probably not matching any more; a green run here would mean nothing`);
+      process.exit(1);
+    }
     if (offRatchet.length) { console.error(`pages failing that are not on the ratchet: ${offRatchet.join(", ")}`); process.exit(1); }
     if (fixed.length) { console.error(`these pages now match — remove them from NOT_YET_MATCHING: ${fixed.join(", ")}`); process.exit(1); }
     console.log("no page off the ratchet documents an API that does not exist");

@@ -1,0 +1,36 @@
+// A spawned green task destroys what its closure captured, exactly once.
+//
+// Counting Drop runs rather than leaked bytes is what makes this exact: a byte count
+// cannot separate "never destroyed" from "destroyed and the allocator kept the page".
+// This printed nothing between the body's output and `done` until 2026-08-20, because
+// reapTask freed the task struct and left the closure environment untouched.
+//
+// The release was written long before it could be turned on: running the drop glue
+// here silenced milojs's async path, since the glue dropped captures a body had
+// already moved out. Captures live in the environment's slots now and the glue skips
+// the ones a move zeroed, so reclaiming here is safe.
+// @expect: 1
+// @expect: dropped
+// @expect: done
+from "std/runtime" import {
+    Task
+}
+
+struct Res {
+    id: i64,
+}
+
+impl Drop for Res {
+    fn drop(self: &mut Self): void {
+        print("dropped")
+    }
+}
+
+fn main(): void {
+    let r = Res {
+        id: 1
+    }
+    let t = Task.spawn(move () => print(r.id))
+    t.join()
+    print("done")
+}

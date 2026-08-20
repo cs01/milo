@@ -209,6 +209,7 @@
   "stringViewSplitParity.milo": "crash",
   "string_cast.milo": "crash",
   "swapDistinctIndex.milo": "crash",
+  "taskCaptureDropped.milo": "mismatch",
   "taskJoin.milo": "noEmit",
   "taskJoinGreen.milo": "noEmit",
   "taskJoinLate.milo": "noEmit",

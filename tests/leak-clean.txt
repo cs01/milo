@@ -583,3 +583,4 @@ zstdCompress
 zstdFrame
 zstdRoundtrip
 moveClosureCaptureConsumed
+taskCaptureDropped

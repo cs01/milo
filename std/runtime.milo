@@ -1270,18 +1270,23 @@ fn reapTask(sched: *u8, task: *u8): void {
     let cell = rtReadPtr(task, tJoinCell())
     munmap(rtReadPtr(task, tStack()), rtReadI64(task, tStackSize()))
     free(rtReadPtr(task, tCtx()))
-    // NOT released here yet, so a spawned task's closure environment still leaks.
+    // Release the task's closure environment: slot 0 holds its drop glue, which drops
+    // every capture the body did not consume and frees the block. Null glue means a
+    // by-reference closure whose environment is a stack frame in the spawner — freeing
+    // that would corrupt the frame — and a null env means nothing was captured.
     //
-    // The ownership is now correct — an owning closure is non-Copy so `Task.spawn(f)`
-    // MOVES it, and `spawnWithStack` forgets it after handing the pointers over — and the
-    // release itself is one line: read the drop function out of slot 0 of the environment
-    // and call it. Doing that turns milojs's async path silent: `await` on a bound async
-    // function produces no output and exits 0, across six of its fixtures. Isolated to
-    // exactly this release (removing it, with every other part of the drop glue in place,
-    // makes them pass again), cause not yet identified — something reaches a task's
-    // environment after the task is reaped. Leaking here is the safe half of that trade
-    // until it is understood; every other closure environment IS now released.
-    // See docs/backlog.md #18.
+    // This was left leaking until 2026-08-20 because enabling it silenced milojs's async
+    // path (six fixtures, no output, exit 0) for reasons never identified. The cause was
+    // the glue, not the reclaim: captures were COPIES of the env slots, so the glue freed
+    // whatever a body had already moved out. Captures now live in the slots and the glue
+    // skips the ones a move zeroed, which makes releasing here safe.
+    let taskEnv = rtReadPtr(task, tClosureEnv())
+    if taskEnv as i64 != 0 {
+        let taskGlue = rtReadPtr(taskEnv, 0)
+        if taskGlue as i64 != 0 {
+            _callClosureVoid(taskGlue, taskEnv)
+        }
+    }
     free(task)
     rtWriteI64(sched, sNumTasks(), rtReadI64(sched, sNumTasks()) - 1)
     if cell as i64 != 0 {

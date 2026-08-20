@@ -42,7 +42,7 @@ function rng(seed: number) {
   };
 }
 
-const PRELUDE = `var made: i64 = 0
+const PRELUDE = `from "std/runtime" import {\n    Task, Promise\n}\n\nvar sink2: i64 = 0\nvar made: i64 = 0
 var gone: i64 = 0
 
 struct Res {
@@ -117,6 +117,12 @@ const FRAGMENTS: ((n: number) => string)[] = [
   n => `        var i${n}: i64 = 0\n        while i${n} < 5 {\n            let r${n} = newRes(${n})\n            if i${n} == 2 {\n                break\n            }\n            i${n} = i${n} + 1\n        }`,
   n => `        var r${n} = newRes(${n})\n        r${n} = newRes(${n})\n        sink = sink + r${n}.id`,
   n => `        var v${n}: Vec<Res> = Vec.new()\n        v${n}.push(newRes(${n}))\n        v${n}[0] = newRes(${n})\n        sink = sink + v${n}.len()`,
+  n => `        var o${n}: Option<Res> = Option.Some(newRes(${n}))\n        match o${n} {\n            Option.Some(r${n}) => {\n                sink = sink + r${n}.id\n            }\n            Option.None => {\n                sink = sink + 0\n            }\n        }`,
+  n => `        var v${n}: Vec<Res> = Vec.new()\n        v${n}.push(newRes(${n}))\n        v${n}.push(newRes(${n}))\n        for e${n} in v${n} {\n            sink = sink + e${n}.id\n        }`,
+  n => `        let r${n} = newRes(${n})\n        var fs${n}: Vec<move () => i64> = Vec.new()\n        fs${n}.push(move () => r${n}.id)\n        sink = sink + fs${n}.len()`,
+  n => `        let r${n} = newRes(${n})\n        let t${n} = Task.spawn(move () => {\n            sink2 = sink2 + r${n}.id\n        })\n        t${n}.join()`,
+  n => `        let r${n} = newRes(${n})\n        let p${n} = Promise.blocking(move () => r${n}.id)\n        sink = sink + p${n}.await()!`,
+  n => `        var w${n}: Vec<Wrap> = Vec.new()\n        w${n}.push(Wrap { inner: newRes(${n}) })\n        sink = sink + w${n}.len()`,
 ];
 
 function program(rand: () => number): string {

@@ -30,7 +30,7 @@ export const NOT_OWNED_TEMP: readonly string[] = [
   "OptionOp", "PtrDeref", "RangeCheck", "SaturatingArith", "SizeOf", "StringCstr",
   "StringFind", "StringLen", "StringLit", "StringPush", "StringPushStr", "StringSlice",
   "UnaryOp", "VecAll", "VecAny", "VecCapacity", "VecContains", "VecEach",
-  "VecEnumerate", "VecExtend", "VecFold", "VecIndexOf", "VecInsert", "VecIsEmpty",
+  "VecEnumerate", "VecExtend", "VecIndexOf", "VecInsert", "VecIsEmpty",
   "VecLen", "VecPosition", "VecPtr", "VecPush", "VecReserve", "VecRetain",
   "VecReverse", "VecSlice", "VecSort", "VecSortBy", "VecSortByKey", "VecSum",
   "VecSwap", "VecTruncate", "WrappingArith", "Zeroed",
@@ -11848,6 +11848,11 @@ export class Codegen {
       case "HashMapWithCapacity":
       case "HashMapClone":
       case "HashMapEntries":
+      // fold returns the ACCUMULATOR, which is owned whenever the accumulator type is —
+      // `v.fold("", (a: string, x: &i64): string => a + x.toString())` hands back a String
+      // nobody else owns. It sat in NOT_OWNED_TEMP with the scalar-yielding Vec reads.
+      // dropOwnedTemp still checks needsDropCg, so an i64 accumulator is unaffected.
+      case "VecFold":
       // getOrDefault yields an OWNED value on both paths — a deep clone of the stored
       // value when the key is present, the default itself when it is not — so a discarded
       // or temporary result has to be dropped. It sat in NOT_OWNED_TEMP next to `contains`
@@ -11855,6 +11860,11 @@ export class Codegen {
       // therefore leaked the clone every time. Exactly the miss the list's own comment
       // describes for VecRemove.
       case "HashMapGetOrDefault":
+      // fold returns the ACCUMULATOR, which is owned whenever the accumulator type is —
+      // `v.fold("", (a: string, x: &i64): string => a + x.toString())` hands back a String
+      // nobody else owns. It sat in NOT_OWNED_TEMP with the scalar-yielding Vec reads.
+      // dropOwnedTemp still checks needsDropCg, so an i64 accumulator is unaffected.
+      case "VecFold":
       // Option-returning Vec reads: the payload is either cloned out of the buffer
       // (get/first/last/min/max/find) or moved out of it (pop). Either way nothing
       // else owns it, so `print(must(v, 0, "v"))` used to leak one copy per call.

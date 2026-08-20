@@ -56,6 +56,11 @@ function insertionSortLoop(
   p: ReturnType<typeof sortPreamble>,
   prefix: string,
   emitCompare: (prevPtr: string, tmpAddr: string) => string,
+  // Runs inside the outer body, right after the element is copied to the scratch slot
+  // and before the inner loop starts. sortByKey extracts the key once here instead of
+  // re-calling the key function on every inner iteration; the absence of this hook is
+  // the entire reason a second copy of this loop existed.
+  afterOuterCopy?: () => void,
 ) {
   const { data, len, elemTy, elemSize, tmpAddr, iAddr, jAddr } = p;
   const outerCond = ctx.nextLabel(`${prefix}.outer.cond`);
@@ -77,6 +82,7 @@ function insertionSortLoop(
   const iPtr = ctx.nextTemp();
   lines.push(`  ${iPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
   lines.push(`  call void @llvm.memcpy.p0.p0.i64(ptr ${tmpAddr}, ptr ${iPtr}, i64 ${elemSize}, i1 false)`);
+  afterOuterCopy?.();
   lines.push(`  store i64 ${i}, ptr ${jAddr}`);
   lines.push(`  br label %${innerCond}`);
 
@@ -229,80 +235,24 @@ export function genVecSortByKey(
   const tmpKeyAddr = `%__sortkey_tmpkey.${ctx.scopeCounter++}.addr`;
   ctx.entryAllocas.push(`  ${tmpKeyAddr} = alloca ${keyTy}`);
 
-  // hook into the outer body to extract tmpKey after memcpy
-  const origInsertionLoop = insertionSortLoop;
-  // Instead of using the shared loop (which doesn't have a hook point after outer body setup),
-  // we need to inline the loop here to inject the key extraction.
-
-  const { data, len, elemTy, elemSize, tmpAddr, iAddr, jAddr } = p;
-  const outerCond = ctx.nextLabel("sortkey.outer.cond");
-  const outerBody = ctx.nextLabel("sortkey.outer.body");
-  const innerCond = ctx.nextLabel("sortkey.inner.cond");
-  const innerBody = ctx.nextLabel("sortkey.inner.body");
-  const innerEnd = ctx.nextLabel("sortkey.inner.end");
-  const outerEnd = ctx.nextLabel("sortkey.outer.end");
-
-  lines.push(`  br label %${outerCond}`);
-  lines.push(`${outerCond}:`);
-  const i = ctx.nextTemp();
-  lines.push(`  ${i} = load i64, ptr ${iAddr}`);
-  const iCmp = ctx.nextTemp();
-  lines.push(`  ${iCmp} = icmp ult i64 ${i}, ${len}`);
-  lines.push(`  br i1 ${iCmp}, label %${outerBody}, label %${outerEnd}`);
-
-  lines.push(`${outerBody}:`);
-  const iPtr = ctx.nextTemp();
-  lines.push(`  ${iPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
-  lines.push(`  call void @llvm.memcpy.p0.p0.i64(ptr ${tmpAddr}, ptr ${iPtr}, i64 ${elemSize}, i1 false)`);
-  // extract key for the element being inserted — only once per outer iteration
-  const tmpKey = ctx.nextTemp();
-  lines.push(`  ${tmpKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ptr ${tmpAddr})`);
-  lines.push(`  store ${keyTy} ${tmpKey}, ptr ${tmpKeyAddr}`);
-  lines.push(`  store i64 ${i}, ptr ${jAddr}`);
-  lines.push(`  br label %${innerCond}`);
-
-  lines.push(`${innerCond}:`);
-  const j = ctx.nextTemp();
-  lines.push(`  ${j} = load i64, ptr ${jAddr}`);
-  const jGtZero = ctx.nextTemp();
-  lines.push(`  ${jGtZero} = icmp ugt i64 ${j}, 0`);
-  const checkCmp = ctx.nextLabel("sortkey.checkcmp");
-  lines.push(`  br i1 ${jGtZero}, label %${checkCmp}, label %${innerEnd}`);
-
-  lines.push(`${checkCmp}:`);
-  const jm1 = ctx.nextTemp();
-  lines.push(`  ${jm1} = sub i64 ${j}, 1`);
-  const prevPtr = ctx.nextTemp();
-  lines.push(`  ${prevPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${jm1}`);
-  const prevKey = ctx.nextTemp();
-  lines.push(`  ${prevKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ptr ${prevPtr})`);
-  const curTmpKey = ctx.nextTemp();
-  lines.push(`  ${curTmpKey} = load ${keyTy}, ptr ${tmpKeyAddr}`);
-
-  const gtResult = emitBuiltinGt(ctx, lines, keyType, keyTy, prevKey, curTmpKey);
-
-  lines.push(`  br i1 ${gtResult}, label %${innerBody}, label %${innerEnd}`);
-
-  lines.push(`${innerBody}:`);
-  const jPtr = ctx.nextTemp();
-  lines.push(`  ${jPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${j}`);
-  lines.push(`  call void @llvm.memcpy.p0.p0.i64(ptr ${jPtr}, ptr ${prevPtr}, i64 ${elemSize}, i1 false)`);
-  const jNext = ctx.nextTemp();
-  lines.push(`  ${jNext} = sub i64 ${j}, 1`);
-  lines.push(`  store i64 ${jNext}, ptr ${jAddr}`);
-  lines.push(`  br label %${innerCond}`);
-
-  lines.push(`${innerEnd}:`);
-  const jFinal = ctx.nextTemp();
-  lines.push(`  ${jFinal} = load i64, ptr ${jAddr}`);
-  const destPtr = ctx.nextTemp();
-  lines.push(`  ${destPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${jFinal}`);
-  lines.push(`  call void @llvm.memcpy.p0.p0.i64(ptr ${destPtr}, ptr ${tmpAddr}, i64 ${elemSize}, i1 false)`);
-  const iNext = ctx.nextTemp();
-  lines.push(`  ${iNext} = add i64 ${i}, 1`);
-  lines.push(`  store i64 ${iNext}, ptr ${iAddr}`);
-  lines.push(`  br label %${outerCond}`);
-
-  lines.push(`${outerEnd}:`);
+  insertionSortLoop(
+    ctx,
+    lines,
+    p,
+    "sortkey",
+    (prevPtr, _tmpAddr) => {
+      const prevKey = ctx.nextTemp();
+      lines.push(`  ${prevKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ptr ${prevPtr})`);
+      const curTmpKey = ctx.nextTemp();
+      lines.push(`  ${curTmpKey} = load ${keyTy}, ptr ${tmpKeyAddr}`);
+      return emitBuiltinGt(ctx, lines, keyType, keyTy, prevKey, curTmpKey);
+    },
+    () => {
+      // once per outer iteration, not once per comparison
+      const tmpKey = ctx.nextTemp();
+      lines.push(`  ${tmpKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ptr ${p.tmpAddr})`);
+      lines.push(`  store ${keyTy} ${tmpKey}, ptr ${tmpKeyAddr}`);
+    },
+  );
   return [lines, "void", "void"];
 }

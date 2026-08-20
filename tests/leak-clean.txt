@@ -582,3 +582,4 @@ zipRead
 zstdCompress
 zstdFrame
 zstdRoundtrip
+moveClosureCaptureConsumed

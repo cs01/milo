@@ -5827,7 +5827,25 @@ export class Codegen {
       if (!this.needsDropCg(captures[i].type)) continue;
       const slot = this.nextTemp();
       body.push(`  ${slot} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i + 1}`);
+      // Skip a slot the body already moved its capture out of. Captures live in the env
+      // slots, so a move out zeroes the slot — all-zero IS the moved-from marker codegen
+      // writes. `String` carries its own liveness check (cap > 0), but a user struct's
+      // Drop does not: ChannelHandle.drop dereferences its `_ptr` to reach the refcount,
+      // so dropping a zeroed slot read through null. Comparing the whole slot against
+      // zero covers every droppable shape without a per-capture drop flag in the env.
+      const capTy = this.llvmType(captures[i].type);
+      const zero = this.nextTemp(), cmp = this.nextTemp(), isLive = this.nextTemp();
+      const liveL = this.nextLabel("envdrop.live"), skipL = this.nextLabel("envdrop.skip");
+      body.push(`  ${zero} = alloca ${capTy}`);
+      body.push(`  store ${capTy} zeroinitializer, ptr ${zero}`);
+      body.push(`  ${cmp} = call i32 @memcmp(ptr ${slot}, ptr ${zero}, i64 ${this.typeSize(capTy)})`);
+      body.push(`  ${isLive} = icmp ne i32 ${cmp}, 0`);
+      body.push(`  br i1 ${isLive}, label %${liveL}, label %${skipL}`);
+      body.push(`${liveL}:`);
       this.emitDropValue(body, slot, captures[i].type);
+      body.push(`  br label %${skipL}`);
+      body.push(`${skipL}:`);
+      this.needsMemcmp = true;
     }
     this.needsFree = true;
     body.push("  call void @free(ptr %env)");
@@ -5898,17 +5916,21 @@ export class Codegen {
     for (let i = 0; i < captures.length; i++) {
       const cap = captures[i];
       const capTy = this.llvmType(cap.type);
-      const gepPtr = this.nextTemp();
       // i + 1: slot 0 is the drop-function header (see envStructTy).
-      closureBody.push(`  ${gepPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i + 1}`);
+      const capSlot = `getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i + 1}`;
       if (isMove) {
-        // move closure: env holds the value directly — treat as local alloca
+        // A move closure's env slot IS the capture's storage — alias it rather than
+        // copying it into a private alloca. That aliasing is what makes the env drop
+        // glue move-aware for free: when the body moves a capture out, the move's
+        // existing zeroing of the source writes THROUGH to the env, so the glue's
+        // liveness check (cap > 0, non-null ptr) sees an empty slot and skips it.
+        // With a private copy the env kept a live header after the body had already
+        // handed the value to a callee, so any path that ran the glue double-freed.
         this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: false });
-        closureBody.push(`  %${cap.name}.addr = alloca ${capTy}`);
-        const loaded = this.nextTemp();
-        closureBody.push(`  ${loaded} = load ${capTy}, ptr ${gepPtr}`);
-        closureBody.push(`  store ${capTy} ${loaded}, ptr %${cap.name}.addr`);
+        closureBody.push(`  %${cap.name}.addr = ${capSlot}`);
       } else {
+        const gepPtr = this.nextTemp();
+        closureBody.push(`  ${gepPtr} = ${capSlot}`);
         const loadedPtr = this.nextTemp();
         closureBody.push(`  ${loadedPtr} = load ptr, ptr ${gepPtr}`);
         // the capture is a pointer to the original variable's alloca

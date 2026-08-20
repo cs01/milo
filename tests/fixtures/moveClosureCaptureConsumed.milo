@@ -1,0 +1,39 @@
+// A `move` closure body that CONSUMES a capture, on both paths that release an
+// environment: the closure value being dropped, and a detached OS thread finishing.
+//
+// Captures live in the environment's own slots, so moving one out zeroes the slot it
+// came from — that zero is what tells the env drop glue the capture is already gone.
+// When captures were copied into private allocas instead, the env kept a live header
+// after the body had handed the value to a callee, so whichever path ran the glue
+// freed it a second time. `Promise.blocking` sidestepped that by never running the
+// glue at all, which leaked every captured handle (measured 120 leaks / 7360 bytes
+// over 20 promises, now 0).
+// @expect: 52
+// @expect: 380
+from "std/runtime" import {
+    Promise
+}
+
+fn consume(s: string): i64 {
+    return s.len()
+}
+
+fn call(f: move () => i64): i64 {
+    return f()
+}
+
+fn main(): void {
+    // dropped-closure path: `call` owns f and drops it after the body moved `s` out
+    let s = "hello world, long enough to force a heap allocation" + "!"
+    print(call(move () => consume(s)))
+
+    // detached-thread path: the trampoline runs the glue for each worker's env
+    var i: i64 = 0
+    var total: i64 = 0
+    while i < 20 {
+        let p = Promise.blocking(move () => i * 2)
+        total = total + p.await()!
+        i = i + 1
+    }
+    print(total)
+}

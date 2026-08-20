@@ -123,11 +123,16 @@ for (const f of examples) {
     console.log(`  ${missingAssets.length} generated asset(s) missing, e.g. ${missingAssets[0]}`);
     console.log(`  run scripts/fetch-assets.sh to download them, then re-run`);
     // A missing asset excuses the BUILD, not the type check: `check` never opens an
-    // embedded file, so it runs perfectly well without one. Skipping outright meant
-    // flight and apsis were never type-checked on CI at all -- they are the two biggest
-    // programs in the repo and the only exercise several stdlib surfaces get, and a type
-    // error in them was invisible until someone with the assets fetched happened to
-    // build. A type error is not an asset problem, so it fails here like any other.
+    // embedded file, so it runs perfectly well without one. Skipping outright meant a
+    // type error in these was invisible to CI until someone with the assets already
+    // fetched happened to build locally, which is how flyby stopped compiling for a
+    // while unnoticed. A type error is not an asset problem, so it fails like any other.
+    //
+    // Measured 2026-08-20 by hiding the fetchable assets and running this harness: FOUR
+    // entrypoints skip (apsis/main, apsis/tools/checklayout, games/atlas/main,
+    // flight/main), and 27 modules totalling ~9k lines are reachable only through them.
+    // That is what CI was not type-checking. Note atlas, which is easy to miss when
+    // thinking of this as "the flight and apsis problem".
     const chk = milo(["check", f]);
     if (chk.status !== 0) {
       failures.push({

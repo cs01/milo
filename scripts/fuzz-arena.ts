@@ -93,6 +93,17 @@ class ArenaModel {
     this.live--;
     return true;
   }
+  // arenaHandles walks `data` in index order and emits one handle per slot whose
+  // generation is positive. A collector's sweep is built on this, so a slot it skips is
+  // a live object silently dropped — a different failure from a stale handle reading
+  // live, and one only this op can reach.
+  handles(): MHandle[] {
+    const out: MHandle[] = [];
+    for (let i = 0; i < this.gens.length; i++) {
+      if (this.gens[i]! > 0) out.push({ arenaId: this.id, index: i, generation: this.gens[i]! });
+    }
+    return out;
+  }
   clear(): void {
     this.id++;
     this.gens = []; this.vals = []; this.freeList = []; this.live = 0;
@@ -121,7 +132,8 @@ function genCase(seed: number): { src: string; expect: string[] } {
   for (let op = 0; op < OPS; op++) {
     // `clear` is rare on purpose: it resets everything, so a common one would keep the
     // arena shallow and never build the stale-handle depth this is hunting for.
-    const kind = rnd() < 0.06 ? "clear" : pick(["alloc", "get", "valid", "free", "set", "len", "get", "valid"]);
+    const kind = rnd() < 0.06 ? "clear"
+      : pick(["alloc", "get", "valid", "free", "set", "len", "get", "valid", "handles"]);
     const k = handles.length ? Math.floor(rnd() * handles.length) : -1;
 
     if (kind === "alloc") {
@@ -136,6 +148,24 @@ function genCase(seed: number): { src: string; expect: string[] } {
     } else if (kind === "len") {
       body.push(`    print("L" + a.len().toString())`);
       expect.push(`L${model.live}`);
+    } else if (kind === "handles") {
+      // Count AND value-sum: a handles() that returned the right number of wrong handles
+      // (stale generation, off-by-one index) would pass a count-only check.
+      // Each handles() op gets its own bindings — Milo has no shadowing, so reusing one
+      // name across two ops in the same function body is a redeclaration error.
+      const n = op;
+      body.push(`    var hsum${n}: i64 = 0`);
+      body.push(`    let snap${n} = a.handles()`);
+      body.push(`    for i in 0..snap${n}.len {`);
+      body.push(`        match a.get(snap${n}[i]) {`);
+      body.push(`            Option.Some(v) => { hsum${n} = hsum${n} + v }`);
+      body.push(`            Option.None => { hsum${n} = hsum${n} - 1 }`);
+      body.push(`        }`);
+      body.push(`    }`);
+      body.push(`    print("H" + snap${n}.len.toString() + ":" + hsum${n}.toString())`);
+      const hs2 = model.handles();
+      const sum = hs2.reduce((acc, h) => acc + (model.get(h) ?? -1), 0);
+      expect.push(`H${hs2.length}:${sum}`);
     } else if (k < 0) {
       op--;                        // nothing to address yet; do not burn the op
       continue;

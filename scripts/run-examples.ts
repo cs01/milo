@@ -122,6 +122,20 @@ for (const f of examples) {
     console.log(`SKIP (assets)  ${f}`);
     console.log(`  ${missingAssets.length} generated asset(s) missing, e.g. ${missingAssets[0]}`);
     console.log(`  run scripts/fetch-assets.sh to download them, then re-run`);
+    // A missing asset excuses the BUILD, not the type check: `check` never opens an
+    // embedded file, so it runs perfectly well without one. Skipping outright meant
+    // flight and apsis were never type-checked on CI at all -- they are the two biggest
+    // programs in the repo and the only exercise several stdlib surfaces get, and a type
+    // error in them was invisible until someone with the assets fetched happened to
+    // build. A type error is not an asset problem, so it fails here like any other.
+    const chk = milo(["check", f]);
+    if (chk.status !== 0) {
+      failures.push({
+        file: f,
+        phase: "check",
+        detail: (chk.stderr || chk.stdout || "").trim().split("\n").slice(-4).join("\n"),
+      });
+    }
     continue;
   }
 

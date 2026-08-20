@@ -20,20 +20,40 @@ import { join } from "path";
 
 const ROOT = join(import.meta.dir, "..");
 
-test("frontend survives mutated corpus input", () => {
+function fuzz(args: string[]): { out: string; code: number } {
   let out = "";
   let code = 0;
   try {
-    out = execFileSync("bun", [
-      join(ROOT, "scripts", "fuzz-frontend.ts"),
-      "--cases", "600",
-      "--seed", "1",
-      "--no-reduce",
-      "--out", ".fuzz-findings-test",
-    ], { cwd: ROOT, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+    out = execFileSync("bun", [join(ROOT, "scripts", "fuzz-frontend.ts"), ...args], {
+      cwd: ROOT,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   } catch (e: any) {
     out = (e.stdout ?? "") + (e.stderr ?? "");
     code = e.status ?? 1;
   }
+  return { out, code };
+}
+
+test("frontend survives mutated corpus input", () => {
+  const { out, code } = fuzz(["--cases", "600", "--seed", "1", "--no-reduce", "--out", ".fuzz-findings-test"]);
   expect(code, `fuzzer found a confirmed frontend crash:\n${out}`).toBe(0);
+}, 120_000);
+
+// Import resolution is a separate arm of the frontend and it was NOT swept until
+// 2026-08-19: the first 40k-case run with --resolve turned up both of the resolver's
+// import errors being raised as bare `throw new Error`, with no span and no source
+// context, which is precisely the "raw JS exception instead of a diagnostic" contract
+// this file exists to hold. Without this second test that arm has no gate, and the
+// default (resolve-off) run cannot reach it no matter how many cases it runs.
+test("import resolution survives mutated corpus input", () => {
+  const { out, code } = fuzz([
+    "--cases", "600",
+    "--seed", "2",
+    "--resolve",
+    "--no-reduce",
+    "--out", ".fuzz-findings-test",
+  ]);
+  expect(code, `fuzzer found a confirmed resolver crash:\n${out}`).toBe(0);
 }, 120_000);

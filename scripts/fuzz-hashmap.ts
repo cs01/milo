@@ -116,6 +116,19 @@ function genCase(seed: number, stringKeys: boolean): { src: string; expect: stri
   // on ORDER would be testing the seed.
   body.push(`    print("K" + m.keys().len.toString() + ":" + m.values().len.toString())`);
   expect.push(`K${model.size}:${model.size}`);
+  // for-in over a map is its own codegen path — it walks the slot array directly rather
+  // than probing, so it sees tombstones the lookups never reach. Count and value-sum
+  // only; the iteration ORDER is seed-dependent by design.
+  body.push(`    var itn: i64 = 0`);
+  body.push(`    var itsum: i64 = 0`);
+  body.push(`    for _k, v in m {`);
+  body.push(`        itn = itn + 1`);
+  body.push(`        itsum = itsum + v`);
+  body.push(`    }`);
+  body.push(`    print("I" + itn.toString() + ":" + itsum.toString())`);
+  let vsum = 0;
+  for (const v of model.values()) vsum += v;
+  expect.push(`I${model.size}:${vsum}`);
 
   const kt = stringKeys ? "string" : "i64";
   const src = [

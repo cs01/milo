@@ -1,0 +1,44 @@
+// @expect: each: 1 2 3
+// @expect: map: 10 20 30
+// @expect: filter kept 2
+// @expect: position 1
+// @expect: retain kept 3
+// @expect: fold 6
+// A combinator hands its callback a POINTER to the element, and the checker deliberately
+// lets the closure declare a Copy element by value instead of &T. Codegen has to load in
+// that case. Only map did.
+//
+// The others passed the pointer straight through, so the closure read an ADDRESS as its
+// value: each printed raw addresses, filter kept every element (a heap pointer is > 1),
+// position never matched, and retain kept everything (a heap pointer is even, so
+// `x % 2 == 0` was always true). All of it type-checked and none of it looked wrong at a
+// glance — a filter that keeps everything reads like a filter whose predicate is loose.
+pub fn main(): i32 {
+    let v: Vec<i64> = [1, 2, 3]
+
+    var e: string = "each:"
+    v.each((x: i64) => {
+        e = e + " " + x.toString()
+    }
+    )
+    print(e)
+
+    var m: string = "map:"
+    let doubled = v.map((x: i64): i64 => x * 10)
+    for y in doubled {
+        m = m + " " + y.toString()
+    }
+    print(m)
+
+    let kept = v.filter((x: i64): bool => x > 1)
+    print("filter kept " + kept.len.toString())
+
+    print("position " + (v.position((x: i64): bool => x == 2) ?? -1).toString())
+
+    var r: Vec<i64> = [1, 2, 3, 4, 5, 6]
+    r.retain((x: i64): bool => x % 2 == 0)
+    print("retain kept " + r.len.toString())
+
+    print("fold " + v.fold(0, (acc: i64, x: i64): i64 => acc + x).toString())
+    return 0
+}

@@ -9542,8 +9542,21 @@ export class TypeChecker {
     for (let i = 0; i < want.params.length; i++) {
       const got = actual.params[i], expected = want.params[i];
       if (got.tag === "unknown" || typeEq(got, expected)) continue;
-      // A `&T` position also accepts `T` when the closure takes it by value.
-      if (expected.tag === "ref" && typeEq(got, expected.inner)) continue;
+      // A `&T` position also accepts `T` when the closure takes it by value — but ONLY
+      // for a Copy T. The combinator holds a borrow of the container and hands the
+      // callback a pointer into it; taking that by value is a load, which for a Copy
+      // scalar is a copy and for anything owning heap is a move out of a container the
+      // caller still owns. `v.each((s: string) => print(s))` type-checked, and printed
+      // raw process memory.
+      if (expected.tag === "ref" && typeEq(got, expected.inner)) {
+        if (isCopy(got, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) continue;
+        this.error(
+          `'${method}' callback parameter ${i + 1} takes ${typeName(got)} by value, but ${method} passes ${typeName(expected)}`,
+          sp,
+          `${typeName(got)} owns heap, so taking it by value would move it out of the container being iterated. Declare the parameter as '${typeName(expected)}'.`,
+        );
+        return;
+      }
       this.error(`'${method}' callback parameter ${i + 1} is declared ${typeName(got)}, but ${method} passes ${typeName(expected)}`, sp);
       return;
     }

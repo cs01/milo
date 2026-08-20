@@ -7179,6 +7179,34 @@ export class Codegen {
     return { fnPtr, envPtr, data, len, elemTy: this.llvmType(elemType) };
   }
 
+  // What to hand a Vec combinator's callback for one element.
+  //
+  // Every combinator hints `&T`, but the checker deliberately lets a closure declare a
+  // COPY T by value (see checkCallbackSig). Codegen has to honour that or the closure
+  // receives a POINTER where it declared an integer: `each((x: i64) => print(x))` printed
+  // raw addresses, `filter((x: i64): bool => x > 1)` kept every element because a heap
+  // pointer is greater than 1, and `retain((x: i64): bool => x % 2 == 0)` kept every
+  // element because a heap pointer is even. genVecMap had this right and eight sibling
+  // sites did not — the same idiom, present in one copy and missing from the rest.
+  //
+  // `paramIdx` because the element is not always the first argument: fold takes the
+  // accumulator first, eachIndexed the index.
+  private callbackElemArg(
+    lines: string[],
+    cbType: TypeKind,
+    elemPtr: string,
+    elemTy: string,
+    paramIdx = 0,
+  ): { arg: string; argTy: string } {
+    const p = cbType.tag === "fn" ? cbType.params[paramIdx] : undefined;
+    // Unknown/missing means the checker already reported it; pass the pointer as before
+    // rather than inventing a load on a type we cannot name.
+    if (!p || p.tag === "ref" || p.tag === "unknown") return { arg: elemPtr, argTy: "ptr" };
+    const loaded = this.nextTemp();
+    lines.push(`  ${loaded} = load ${elemTy}, ptr ${elemPtr}`);
+    return { arg: loaded, argTy: elemTy };
+  }
+
   private genVecMap(expr: HIRExpr & { kind: "VecMap" }, lines: string[]): Gen {
     const { fnPtr, envPtr, data, len, elemTy } = this.genVecMethodPreamble(expr.vec, expr.callback, expr.elementType, lines);
     const resultElemTy = this.llvmType(expr.resultElementType);
@@ -7280,7 +7308,8 @@ export class Codegen {
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
     const keep = this.nextTemp();
-    lines.push(`  ${keep} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  ${keep} = call i1 ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  br i1 ${keep}, label %${copyLabel}, label %${nextLabel}`);
 
     lines.push(`${copyLabel}:`);
@@ -7334,7 +7363,8 @@ export class Codegen {
     lines.push(`${bodyLabel}:`);
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
-    lines.push(`  call void ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  call void ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     const nextIdx = this.nextTemp();
     lines.push(`  ${nextIdx} = add i64 ${idx}, 1`);
     lines.push(`  store i64 ${nextIdx}, ptr ${idxAddr}`);
@@ -7382,7 +7412,8 @@ export class Codegen {
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
     const match = this.nextTemp();
-    lines.push(`  ${match} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  ${match} = call i1 ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  br i1 ${match}, label %${foundLabel}, label %${nextLabel}`);
 
     lines.push(`${foundLabel}:`);
@@ -7431,7 +7462,8 @@ export class Codegen {
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
     const match = this.nextTemp();
-    lines.push(`  ${match} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  ${match} = call i1 ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     const foundLabel = this.nextLabel("any.found");
     const nextLabel = this.nextLabel("any.next");
     lines.push(`  br i1 ${match}, label %${foundLabel}, label %${nextLabel}`);
@@ -7529,7 +7561,8 @@ export class Codegen {
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
     const match = this.nextTemp();
-    lines.push(`  ${match} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  ${match} = call i1 ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     const failLabel = this.nextLabel("all.fail");
     const nextLabel = this.nextLabel("all.next");
     lines.push(`  br i1 ${match}, label %${nextLabel}, label %${failLabel}`);
@@ -7581,7 +7614,8 @@ export class Codegen {
     const acc = this.nextTemp();
     lines.push(`  ${acc} = load ${accTy}, ptr ${accAddr}`);
     const next = this.nextTemp();
-    lines.push(`  ${next} = call ${accTy} ${fnPtr}(ptr ${envPtr}, ${accTy} ${acc}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy, 1);
+    lines.push(`  ${next} = call ${accTy} ${fnPtr}(ptr ${envPtr}, ${accTy} ${acc}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  store ${accTy} ${next}, ptr ${accAddr}`);
     const nextIdx = this.nextTemp();
     lines.push(`  ${nextIdx} = add i64 ${idx}, 1`);
@@ -8256,7 +8290,8 @@ export class Codegen {
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
     const hit = this.nextTemp();
-    lines.push(`  ${hit} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  ${hit} = call i1 ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  br i1 ${hit}, label %${found}, label %${step}`);
     lines.push(`${found}:`);
     lines.push(`  store i32 ${slot.someTag}, ptr ${slot.tagPtr}`);
@@ -8431,7 +8466,8 @@ export class Codegen {
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${i}`);
     const hit = this.nextTemp();
-    lines.push(`  ${hit} = call i1 ${fnPtr}(ptr ${envPtr}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy);
+    lines.push(`  ${hit} = call i1 ${fnPtr}(ptr ${envPtr}, ${cbArg.argTy} ${cbArg.arg})`);
     lines.push(`  br i1 ${hit}, label %${keep}, label %${dropIt}`);
     lines.push(`${keep}:`);
     const kept = this.nextTemp();
@@ -8505,7 +8541,8 @@ export class Codegen {
     lines.push(`${bodyLabel}:`);
     const elemPtr = this.nextTemp();
     lines.push(`  ${elemPtr} = getelementptr ${elemTy}, ptr ${data}, i64 ${idx}`);
-    lines.push(`  call void ${fnPtr}(ptr ${envPtr}, i64 ${idx}, ptr ${elemPtr})`);
+    const cbArg = this.callbackElemArg(lines, expr.callback.type, elemPtr, elemTy, 1);
+    lines.push(`  call void ${fnPtr}(ptr ${envPtr}, i64 ${idx}, ${cbArg.argTy} ${cbArg.arg})`);
     const nextIdx = this.nextTemp();
     lines.push(`  ${nextIdx} = add i64 ${idx}, 1`);
     lines.push(`  store i64 ${nextIdx}, ptr ${idxAddr}`);

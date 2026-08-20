@@ -1,0 +1,16 @@
+// @error: takes string by value, but each passes &string
+// A combinator lends its callback a pointer INTO the container it is iterating. Declaring
+// the parameter by value is fine for a Copy element (codegen loads it), but a string owns
+// heap: taking it by value would move it out of a container the caller still owns.
+//
+// This used to type-check. Codegen passed the pointer anyway and the callback read it as
+// a string, so `each` printed whatever bytes followed that address in the process — a
+// memory disclosure out of ordinary safe Milo, no `unsafe` anywhere.
+pub fn main(): i32 {
+    let v: Vec<string> = ["a", "bb"]
+    v.each((s: string) => {
+        print(s)
+    }
+    )
+    return 0
+}

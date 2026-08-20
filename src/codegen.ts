@@ -109,6 +109,10 @@ const HM_SEED = 3;
 // a state where every slot is occupied-or-tombstone, and a probe that stops only at an
 // EMPTY slot would never terminate.
 const HM_TOMBS = 4;
+// Field count of %HashMap, and the single source for its size. Every field is 8 bytes
+// (one ptr + four i64), so the size is just the count — but the COUNT has to come from
+// one place or the two drift, which is exactly what happened.
+const HASHMAP_FIELDS = 5;
 
 export class Codegen {
   private target: TargetInfo;
@@ -824,7 +828,12 @@ export class Codegen {
     if (ty === "{ ptr, ptr }") return 16;
     if (ty === "%String") return 24; // ptr + i64 + i64
     if (ty === "%Vec") return 24; // ptr + i64 + i64
-    if (ty === "%HashMap") return 32; // ptr + i64 + i64 + i64
+    // Derived from the struct definition rather than written out, because writing it out
+    // is how it went wrong: adding the tombstone counter to %HashMap left this at 32 and
+    // every struct holding a map got an 8-byte-short memcpy. Fixtures did not notice; the
+    // self-hosted compiler segfaulted on its first lookup, because src-milo is full of
+    // structs with HashMap fields.
+    if (ty === "%HashMap") return HASHMAP_FIELDS * 8;
     const arrMatch = ty.match(/\[(\d+) x (.+)\]/);
     if (arrMatch) return parseInt(arrMatch[1]) * this.typeSize(arrMatch[2]);
     const structName = this.getStructName(ty);
@@ -1816,7 +1825,8 @@ export class Codegen {
     // opaque %String and clang rejected it ("invalid type for null constant").
     // The failure was order-dependent, hence intermittent across builds.
     if (this.hasHashMapType)
-      this.output.splice(1, 0, `%HashMap = type { ptr, i64, i64, i64, i64 }`);
+      // Built from HASHMAP_FIELDS so the layout and typeSize() cannot disagree again.
+      this.output.splice(1, 0, `%HashMap = type { ${["ptr", ...Array(HASHMAP_FIELDS - 1).fill("i64")].join(", ")} }`);
     if (this.hasVecType)
       this.output.splice(1, 0, `%Vec = type { ptr, i64, i64 }`);
     if (this.hasStringType)

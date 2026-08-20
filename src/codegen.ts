@@ -235,6 +235,9 @@ export class Codegen {
   private ifaceMethodCounts = new Map<string, number>();
   private helperFnBodies: string[][] = [];
   private emittedStrFind = false;
+  // Inside a closure body: capture alloca name -> pointer to its liveness flag in the
+  // environment. A move out of a capture clears the flag so the env drop glue skips it.
+  private captureFlagByAddr = new Map<string, string>();
   private closureBodies: string[][] = [];
   private closureCounter = 0;
   public scopeCounter = 0;
@@ -5164,6 +5167,10 @@ export class Codegen {
       lines.push(this.zeroStore(local.type, addr));
       const dl = this.droppableLocals.find(d => d.addr === addr);
       if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
+      // Moving a capture out of a `move` closure: the environment still owns the other
+      // captures, so clear this one's flag rather than the whole env's.
+      const capFlag = this.captureFlagByAddr.get(addr);
+      if (capFlag) lines.push(`  store i1 0, ptr ${capFlag}`);
     }
     return [lines, tmp, local.type];
   }
@@ -5818,7 +5825,7 @@ export class Codegen {
   // Returns null when nothing in the environment needs dropping AND the block would only
   // need freeing — no: it always returns a name for a move closure, because the malloc'd
   // block itself always needs freeing even when every capture is Copy.
-  private emitClosureEnvDrop(closureName: string, envStructTy: string, captures: { name: string; type: TypeKind }[]): string {
+  private emitClosureEnvDrop(closureName: string, envStructTy: string, captures: { name: string; type: TypeKind }[], capFlagSlot: (i: number) => number | null): string {
     const name = `${closureName}_envdrop`;
     const body: string[] = [];
     body.push(`define internal void @${name}(ptr %env) {`);
@@ -5827,25 +5834,25 @@ export class Codegen {
       if (!this.needsDropCg(captures[i].type)) continue;
       const slot = this.nextTemp();
       body.push(`  ${slot} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${i + 1}`);
-      // Skip a slot the body already moved its capture out of. Captures live in the env
-      // slots, so a move out zeroes the slot — all-zero IS the moved-from marker codegen
-      // writes. `String` carries its own liveness check (cap > 0), but a user struct's
-      // Drop does not: ChannelHandle.drop dereferences its `_ptr` to reach the refcount,
-      // so dropping a zeroed slot read through null. Comparing the whole slot against
-      // zero covers every droppable shape without a per-capture drop flag in the env.
-      const capTy = this.llvmType(captures[i].type);
-      const zero = this.nextTemp(), cmp = this.nextTemp(), isLive = this.nextTemp();
+      // Drop only what the body still owns. A `move` body can hand a capture to a
+      // callee by value, and the glue must not free what it gave away — so each
+      // droppable capture carries a liveness flag in the environment, set here at
+      // creation and cleared by the move.
+      //
+      // The flag is not paranoia about an extra bit: the value cannot answer this.
+      // Sniffing the slot for all-zero (which this did briefly) reads a legitimately
+      // zero-valued capture as moved-from, and `Res { id: 0 }` then never runs its
+      // destructor at all — silently, since nothing leaks when the struct owns no heap.
+      const flagIdx = capFlagSlot(i);
       const liveL = this.nextLabel("envdrop.live"), skipL = this.nextLabel("envdrop.skip");
-      body.push(`  ${zero} = alloca ${capTy}`);
-      body.push(`  store ${capTy} zeroinitializer, ptr ${zero}`);
-      body.push(`  ${cmp} = call i32 @memcmp(ptr ${slot}, ptr ${zero}, i64 ${this.typeSize(capTy)})`);
-      body.push(`  ${isLive} = icmp ne i32 ${cmp}, 0`);
-      body.push(`  br i1 ${isLive}, label %${liveL}, label %${skipL}`);
+      const flagPtr = this.nextTemp(), flag = this.nextTemp();
+      body.push(`  ${flagPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${flagIdx}`);
+      body.push(`  ${flag} = load i1, ptr ${flagPtr}`);
+      body.push(`  br i1 ${flag}, label %${liveL}, label %${skipL}`);
       body.push(`${liveL}:`);
       this.emitDropValue(body, slot, captures[i].type);
       body.push(`  br label %${skipL}`);
       body.push(`${skipL}:`);
-      this.needsMemcmp = true;
     }
     this.needsFree = true;
     body.push("  call void @free(ptr %env)");
@@ -5868,16 +5875,33 @@ export class Codegen {
     // reference environment carries the slot too, holding null: without it, a by-ref
     // closure passed to a `move` parameter would have its stack environment read as a
     // header and whatever happened to be in the frame called as a destructor.
-    const envStructTy = captures.length > 0
+    // Which captures a move environment must eventually drop, and where each one's
+    // liveness flag lives. A capture can be moved OUT by the body (handed to a callee
+    // by value), and the glue must not drop what the body gave away. The flag is the
+    // only honest way to know: an all-zero slot is not a moved-from marker, because a
+    // zero-valued struct (`Res { id: 0 }`) is a perfectly good live value whose
+    // destructor still has to run.
+    const dropCapIdx = isMove ? captures.map((c, i) => [c, i] as const)
+      .filter(([c]) => this.needsDropCg(c.type)).map(([, i]) => i) : [];
+    // flag slot for capture i, or null when it needs no drop
+    const capFlagSlot = (i: number) => {
+      const k = dropCapIdx.indexOf(i);
+      return k < 0 ? null : captures.length + 1 + k;
+    };
+    const envFields = captures.length > 0
       ? (isMove
-        ? `{ ptr, ${captures.map(c => this.llvmType(c.type)).join(", ")} }`
-        : `{ ptr, ${captures.map(() => "ptr").join(", ")} }`)
-      : "{}";
+        ? [...captures.map(c => this.llvmType(c.type)), ...dropCapIdx.map(() => "i1")]
+        : captures.map(() => "ptr"))
+      : [];
+    const envStructTy = captures.length > 0 ? `{ ptr, ${envFields.join(", ")} }` : "{}";
 
     // save codegen state
     const savedTemp = this.tempCounter;
     const savedLabel = this.labelCounter;
     const savedLocals = this.locals;
+    // per-closure: a nested closure must not see the outer body's capture flags
+    const savedCapFlags = this.captureFlagByAddr;
+    this.captureFlagByAddr = new Map();
     const savedDroppable = this.droppableLocals;
     const savedLoopHeader = this.loopHeader;
     const savedLoopExit = this.loopExit;
@@ -5928,6 +5952,12 @@ export class Codegen {
         // handed the value to a callee, so any path that ran the glue double-freed.
         this.locals.set(cap.name, { type: capTy, typeKind: cap.type, mutable: cap.mutable, isRef: false });
         closureBody.push(`  %${cap.name}.addr = ${capSlot}`);
+        const flagIdx = capFlagSlot(i);
+        if (flagIdx !== null) {
+          const flagPtr = `%${cap.name}.aliveflag`;
+          closureBody.push(`  ${flagPtr} = getelementptr ${envStructTy}, ptr %env, i32 0, i32 ${flagIdx}`);
+          this.captureFlagByAddr.set(`%${cap.name}.addr`, flagPtr);
+        }
       } else {
         const gepPtr = this.nextTemp();
         closureBody.push(`  ${gepPtr} = ${capSlot}`);
@@ -5999,6 +6029,7 @@ export class Codegen {
     this.tempCounter = savedTemp;
     this.labelCounter = savedLabel;
     this.locals = savedLocals;
+    this.captureFlagByAddr = savedCapFlags;
     this.droppableLocals = savedDroppable;
     this.entryAllocas = savedEntryAllocas;
     this.emittedAddrs = savedEmittedAddrs;
@@ -6012,7 +6043,7 @@ export class Codegen {
     if (captures.length > 0) {
       let envAddr = this.nextTemp();
       // The header slot is part of the allocation, so it is sized in here too.
-      const envSize = this.structPayloadSize(["ptr", ...captures.map(c => this.llvmType(c.type))]);
+      const envSize = this.structPayloadSize(["ptr", ...envFields]);
       // A by-ref env normally lives in the frame that created the closure, which
       // outlives every use — except in the global-init routine, whose frame is gone
       // before main runs. A closure global's env has to be static, so give it its own
@@ -6033,7 +6064,7 @@ export class Codegen {
       }
       // Slot 0: how to release this environment. A move closure owns its captures and
       // the block itself; a by-reference one owns neither, and stores null.
-      const dropFnName = isMove ? this.emitClosureEnvDrop(closureName, envStructTy, captures) : null;
+      const dropFnName = isMove ? this.emitClosureEnvDrop(closureName, envStructTy, captures, capFlagSlot) : null;
       const hdrSlot = this.nextTemp();
       lines.push(`  ${hdrSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 0`);
       lines.push(`  store ptr ${dropFnName === null ? "null" : `@${dropFnName}`}, ptr ${hdrSlot}`);
@@ -6045,6 +6076,12 @@ export class Codegen {
         const gepSlot = this.nextTemp();
         lines.push(`  ${gepSlot} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 ${i + 1}`);
         if (isMove) {
+          const flagIdx = capFlagSlot(i);
+          if (flagIdx !== null) {
+            const flagPtr = this.nextTemp();
+            lines.push(`  ${flagPtr} = getelementptr ${envStructTy}, ptr ${envAddr}, i32 0, i32 ${flagIdx}`);
+            lines.push(`  store i1 1, ptr ${flagPtr}`);
+          }
           // copy the VALUE into the env
           const loaded = this.nextTemp();
           if (local?.isRef) {
@@ -6061,6 +6098,12 @@ export class Codegen {
               lines.push(this.zeroStore(capTy, capAddr));
               const dl = this.droppableLocals.find(d => d.addr === capAddr);
               if (dl) lines.push(`  store i1 0, ptr ${dl.aliveFlag}`);
+              // The source may itself be a capture of the closure we are emitting inside
+              // (a nested `move` closure re-capturing the outer one's value). The outer
+              // environment has just handed the value over, so clear its flag too, or
+              // both environments drop it.
+              const outerFlag = this.captureFlagByAddr.get(capAddr);
+              if (outerFlag) lines.push(`  store i1 0, ptr ${outerFlag}`);
             }
           }
         } else if (local?.isRef) {

@@ -45,6 +45,7 @@
   "checkedArith.milo": "mismatch",
   "checkedDivRem.milo": "mismatch",
   "checkedNeg.milo": "mismatch",
+  "closureCaptureDropMatrix.milo": "mismatch",
   "closureCaptureHeap.milo": "noEmit",
   "closureCaptureMutableLocal.milo": "noEmit",
   "closureWrapperMethodForward.milo": "noEmit",

@@ -298,6 +298,7 @@ letElse
 letInWhile
 lintBorrowThatClones
 logicalOps
+lookupKeyTempLeak
 loopBreakDrop
 loopInvariant
 mapIterTwoLoops

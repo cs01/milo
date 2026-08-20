@@ -1,0 +1,71 @@
+// @expect: contains 30
+// @expect: get-sum 110
+// @expect: default-hit 110
+// @expect: default-miss 110
+// @expect: vec-found 30
+// @expect: removed 30
+// A lookup takes the caller's key and only READS it. Nothing on that path takes ownership,
+// so a key built at the call site — `m.get("k" + i.toString())`, the most ordinary map
+// idiom there is — had no owner and leaked, one allocation per call. `insert` already knew
+// this for the key it discards when overwriting; the six read-only lookups did not.
+//
+// getOrDefault leaked twice over: the key, and the DEFAULT whenever the key was found and
+// the default went unused.
+//
+// This fixture exists to be leak-checked, not just to print the right numbers — the counts
+// below were correct all along. tests/leak-clean.txt is what makes it a regression test.
+pub fn main(): i32 {
+    var m: HashMap<string, string> = HashMap.new()
+    var v: Vec<string> = []
+    var i = 0
+    while i < 30 {
+        m.insert("k" + i.toString(), "vv" + i.toString())
+        v.push("s" + i.toString())
+        i = i + 1
+    }
+
+    var contains = 0
+    var getSum = 0
+    var dHit = 0
+    var dMiss = 0
+    var vecFound = 0
+    var removed = 0
+
+    var d = 0
+    while d < 30 {
+        if m.contains("k" + d.toString()) {
+            contains = contains + 1
+        }
+        match m.get("k" + d.toString()) {
+            Option.Some(s) => {
+                getSum = getSum + s.len
+            }
+            Option.None => {
+            }
+        }
+        // key present: the computed default is dead
+        dHit = dHit + m.getOrDefault("k" + d.toString(), "zz" + d.toString()).len
+        // key absent: the computed default is the result and must NOT be dropped
+        dMiss = dMiss + m.getOrDefault("absent" + d.toString(), "yy" + d.toString()).len
+        if v.contains("s" + d.toString()) {
+            vecFound = vecFound + 1
+        }
+        match v.indexOf("s" + d.toString()) {
+            Option.Some(_p) => {
+                removed = removed + 1
+            }
+            Option.None => {
+            }
+        }
+        m.remove("k" + d.toString())
+        d = d + 1
+    }
+
+    print("contains " + contains.toString())
+    print("get-sum " + getSum.toString())
+    print("default-hit " + dHit.toString())
+    print("default-miss " + dMiss.toString())
+    print("vec-found " + vecFound.toString())
+    print("removed " + removed.toString())
+    return 0
+}

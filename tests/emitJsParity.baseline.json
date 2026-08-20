@@ -117,6 +117,7 @@
   "jwtHs256.milo": "noEmit",
   "keysDecode.milo": "crash",
   "lintBorrowThatClones.milo": "noEmit",
+  "lookupKeyTempLeak.milo": "noEmit",
   "matchConsumesSubjectDrop.milo": "mismatch",
   "moveClosureType.milo": "noEmit",
   "moveVarIntoEnumReturn.milo": "mismatch",

@@ -8040,6 +8040,9 @@ export class Codegen {
     lines.push(`${endLabel}:`);
     const result = this.nextTemp();
     lines.push(`  ${result} = load i1, ptr ${resultAddr}`);
+    // Same as the map lookups: the needle is the caller's, and a read-only search takes
+    // no ownership of it. `v.contains("s" + i.toString())` leaked the needle per call.
+    this.dropOwnedTemp(lines, valVal, valLt, expr.value);
     return [lines, result, "i1"];
   }
 
@@ -8265,6 +8268,9 @@ export class Codegen {
     lines.push(`${end}:`);
     const result = this.nextTemp();
     lines.push(`  ${result} = load ${slot.enumTy}, ptr ${slot.addr}`);
+    // Same as the map lookups: the needle is the caller's, and a read-only search takes
+    // no ownership of it. `v.contains("s" + i.toString())` leaked the needle per call.
+    this.dropOwnedTemp(lines, nv, elemTy, expr.value);
     return [lines, result, slot.enumTy];
   }
 
@@ -9940,6 +9946,7 @@ export class Codegen {
     lines.push(`${doneLabel}:`);
     const result = this.nextTemp();
     lines.push(`  ${result} = phi i1 [true, %${foundLabel}], [false, %${notFoundLabel}]`);
+    this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
     return [lines, result, "i1"];
   }
 
@@ -10035,6 +10042,7 @@ export class Codegen {
     lines.push(`  br label %${probeCond}`);
 
     lines.push(`${doneLabel}:`);
+    this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
     return [lines, "0", "void"];
   }
 
@@ -10402,6 +10410,13 @@ export class Codegen {
     lines.push(`${doneLabel}:`);
     const result = this.nextTemp();
     lines.push(`  ${result} = phi ${optionTy} [${someVal}, %${foundEnd}], [${noneVal}, %${notFoundLabel}]`);
+    // The key was built by the CALLER and handed to a lookup that only reads it. Nothing
+    // takes ownership on this path, so without a drop `m.get("k" + i.toString())` leaks
+    // that string on every call — one 16-byte allocation per lookup, in about the most
+    // ordinary map idiom there is. `insert` already knew this for its overwrite path;
+    // the four read-only lookups did not. dropOwnedTemp no-ops unless the argument really
+    // is an owned temporary, so a variable or a literal key is untouched.
+    this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
     return [lines, result, optionTy];
   }
 
@@ -10467,6 +10482,18 @@ export class Codegen {
     const foundEnd = this.nextLabel("hmgd.found.end");
     lines.push(`  br label %${foundEnd}`);
     lines.push(`${foundEnd}:`);
+    // The default is dead on this path — the map had the key — so a computed one has no
+    // owner. `m.getOrDefault(k, "dflt" + i.toString())` leaked its default on every hit.
+    // The drop is conditional by construction: it sits in the found block, and the
+    // not-found path hands that same value to the caller as the result.
+    //
+    // Dropping a Vec or an enum opens basic blocks of its own, so the block this path
+    // ENDS in is not `foundEnd` any more. Rejoin an empty one and let the phi below name
+    // that, exactly as the deep clone above already has to.
+    this.dropOwnedTemp(lines, defaultVal, valTy, expr.default);
+    const foundJoin = this.nextLabel("hmgd.found.join");
+    lines.push(`  br label %${foundJoin}`);
+    lines.push(`${foundJoin}:`);
     lines.push(`  br label %${doneLabel}`);
 
     // not found — use the default value
@@ -10483,7 +10510,8 @@ export class Codegen {
 
     lines.push(`${doneLabel}:`);
     const result = this.nextTemp();
-    lines.push(`  ${result} = phi ${valTy} [${foundVal}, %${foundEnd}], [${defaultVal}, %${notFoundLabel}]`);
+    lines.push(`  ${result} = phi ${valTy} [${foundVal}, %${foundJoin}], [${defaultVal}, %${notFoundLabel}]`);
+    this.dropOwnedTemp(lines, keyVal, keyTy, expr.key);
     return [lines, result, valTy];
   }
 

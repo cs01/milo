@@ -60,6 +60,26 @@ const BUCKETS: [string, RegExp][] = [
 
 type Outcome = { name: string; ok: boolean; bucket: string; detail: string };
 
+// The first index where two output lists disagree, rendered with enough context to act on.
+// A length difference past the common prefix is its own case: "got 2 lines, wanted 3" is
+// the useful sentence there, not a comparison against an element that does not exist.
+function describeDiff(expected: string[], actual: string[]): string {
+  const n = Math.min(expected.length, actual.length);
+  for (let i = 0; i < n; i++) {
+    if (expected[i] !== actual[i]) {
+      return `line ${i + 1}: want ${JSON.stringify(expected[i])} got ${JSON.stringify(actual[i])}`;
+    }
+  }
+  if (expected.length !== actual.length) {
+    const missing = expected.slice(n, n + 2);
+    const extra = actual.slice(n, n + 2);
+    return actual.length < expected.length
+      ? `got ${actual.length} line(s), wanted ${expected.length} — missing from line ${n + 1}: ${JSON.stringify(missing)}`
+      : `got ${actual.length} line(s), wanted ${expected.length} — extra from line ${n + 1}: ${JSON.stringify(extra)}`;
+  }
+  return "identical — reported as a mismatch, which means this comparison is wrong";
+}
+
 async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
   const src = join(FIXTURES_DIR, `${name}.milo`);
   const outBin = join(tmpDir, name);
@@ -100,7 +120,12 @@ async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
         : /\[guard\] (SIGKILL|killed)/.test(r.stderr) ? "guard-shed"
         : r.signal ? "run-crash"
         : "output-mismatch",
-      detail: `want ${JSON.stringify(expected.slice(0, 2))} got ${JSON.stringify(actual.slice(0, 2))}`,
+      // Show the line that actually DIFFERS, not the first two. Slicing to [0,2] printed
+      // `want ["got 1","drop 1"] got ["got 1","drop 1"]` for a fixture whose third line
+      // was the mismatch — two identical-looking arrays reported as a mismatch, which
+      // reads as a bug in this harness rather than in the compiler. It cost a diagnostic
+      // detour to find out the display was hiding the evidence.
+      detail: describeDiff(expected, actual),
     };
   }
   return { name, ok: true, bucket: "pass", detail: "" };

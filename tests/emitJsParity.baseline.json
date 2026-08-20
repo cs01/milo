@@ -221,6 +221,7 @@
   "typedFnPtr.milo": "noEmit",
   "unixSocket.milo": "noEmit",
   "unwrap_temp_no_leak.milo": "noEmit",
+  "vecCallbackByValue.milo": "noEmit",
   "vecClearTruncate.milo": "noEmit",
   "vecConstructors.milo": "noEmit",
   "vecReadsAndReshape.milo": "noEmit",

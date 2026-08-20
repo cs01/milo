@@ -22,6 +22,16 @@ on:
     paths: ['src-milo/**', 'std/**', 'scripts/selfhost*', 'scripts/guard.ts', '.github/workflows/selfhost.yml']
   pull_request:
     paths: ['src-milo/**', 'std/**', 'scripts/selfhost*', 'scripts/guard.ts', '.github/workflows/selfhost.yml']
+  # On demand. The path filter above deliberately excludes `src/` — self-host must never
+  # GATE a src/ change (CLAUDE.md; chasing parity is what parked src-milo for months) — but
+  # codegen can still break the bootstrap, and then nothing says so until an unrelated
+  # src-milo/ or std/ commit happens to run this, or the nightly does.
+  #
+  # That is not hypothetical: a `%HashMap` field added in src/codegen.ts left typeSize at
+  # the old size, every struct holding a map memcpy'd 8 bytes short, and milo-self
+  # segfaulted on its first lookup while `bun test` stayed green (fixed in 4f9b5dab). There
+  # was no way to re-run this to confirm the fix. Now there is.
+  workflow_dispatch:
   schedule:
     # 09:00 UTC daily. The sweep is too slow for the push path but too valuable to run only
     # when someone thinks to.

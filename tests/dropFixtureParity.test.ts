@@ -25,6 +25,11 @@ test("every fixture with a Drop impl is recorded as an emit-js mismatch", () => 
     .filter(f => f.endsWith(".milo"))
     .filter(f => /impl\s+Drop\s+for\b/.test(readFileSync(join(FIXTURES, f), "utf8")));
 
+  // The whole test is a filter over a filter, so if `impl\s+Drop\s+for` stops matching —
+  // a spelling change, a fixture rename, `Drop` becoming a derive — withDrop goes empty
+  // and this passes having checked nothing. Floor under today's 14.
+  expect(withDrop.length, "no fixture matched the Drop-impl pattern — this gate is checking nothing").toBeGreaterThan(8);
+
   // Not "is it present" — a fixture recorded as `agree` is the exact failure this
   // catches, and an absent one is read as `agree` by the sweep.
   const wrong = withDrop.filter(f => base[f] !== "mismatch")

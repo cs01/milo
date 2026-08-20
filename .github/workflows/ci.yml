@@ -45,6 +45,13 @@ jobs:
       # macOS gets `leaks -atExit`; LeakSanitizer does not exist on darwin/arm64.
       - name: Leak ratchet
         run: bun run scripts/leak-check.ts --check
+      # `milo build --sanitize` existed for a long time and nothing ran it over the corpus.
+      # scripts/selfhost-asan.ts asks whether milo-self's OUTPUT is memory-safe; nobody asked
+      # it of the reference compiler's output, so use-after-free, out-of-bounds and
+      # double-free in generated code had no gate. The leak ratchet above cannot see any of
+      # those — different question, and it only sees blocks big enough for `leaks` to report.
+      - name: AddressSanitizer sweep
+        run: bun run scripts/asan-sweep.ts
 
   # Nothing has ever executed std/*.linux.milo — epoll, eventfd, the glibc paths — because
   # the suite above runs on macOS only. This job is the first thing that does.

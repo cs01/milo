@@ -186,6 +186,29 @@ export function genVecSort(
   return [lines, "void", "void"];
 }
 
+// What to hand a sort callback for one element.
+//
+// sortBy and sortByKey hint `&T` but the checker lets a Copy element be declared by value
+// (checker.ts checkCallbackSig), and these two sites passed the pointer regardless. The
+// closure then compared ADDRESSES: `sortByKey((x: i64): i64 => 0 - x)` ordered by negated
+// pointer, and `sortBy((x: i64, y: i64): bool => x > y)` left the vector untouched. Same
+// hole, and the same fix, as callbackElemArg in codegen.ts — kept separate because this
+// file takes a CodegenCtx rather than the class.
+function cbElemArg(
+  ctx: CodegenCtx,
+  lines: string[],
+  cbType: TypeKind,
+  elemPtr: string,
+  elemTy: string,
+  paramIdx = 0,
+): { arg: string; argTy: string } {
+  const prm = cbType.tag === "fn" ? cbType.params[paramIdx] : undefined;
+  if (!prm || prm.tag === "ref" || prm.tag === "unknown") return { arg: elemPtr, argTy: "ptr" };
+  const loaded = ctx.nextTemp();
+  lines.push(`  ${loaded} = load ${elemTy}, ptr ${elemPtr}`);
+  return { arg: loaded, argTy: elemTy };
+}
+
 export function genVecSortBy(
   ctx: CodegenCtx,
   object: any,
@@ -203,8 +226,10 @@ export function genVecSortBy(
   lines.push(`  ${envPtr} = extractvalue { ptr, ptr } ${cv}, 1`);
 
   insertionSortLoop(ctx, lines, p, "sortby", (prevPtr, tmpAddr) => {
+    const a = cbElemArg(ctx, lines, callback.type, prevPtr, p.elemTy, 0);
+    const b = cbElemArg(ctx, lines, callback.type, tmpAddr, p.elemTy, 1);
     const cmpResult = ctx.nextTemp();
-    lines.push(`  ${cmpResult} = call i32 ${fnPtr}(ptr ${envPtr}, ptr ${prevPtr}, ptr ${tmpAddr})`);
+    lines.push(`  ${cmpResult} = call i32 ${fnPtr}(ptr ${envPtr}, ${a.argTy} ${a.arg}, ${b.argTy} ${b.arg})`);
     const shouldSwap = ctx.nextTemp();
     lines.push(`  ${shouldSwap} = icmp sgt i32 ${cmpResult}, 0`);
     return shouldSwap;
@@ -241,16 +266,18 @@ export function genVecSortByKey(
     p,
     "sortkey",
     (prevPtr, _tmpAddr) => {
+      const ka = cbElemArg(ctx, lines, callback.type, prevPtr, p.elemTy);
       const prevKey = ctx.nextTemp();
-      lines.push(`  ${prevKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ptr ${prevPtr})`);
+      lines.push(`  ${prevKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ${ka.argTy} ${ka.arg})`);
       const curTmpKey = ctx.nextTemp();
       lines.push(`  ${curTmpKey} = load ${keyTy}, ptr ${tmpKeyAddr}`);
       return emitBuiltinGt(ctx, lines, keyType, keyTy, prevKey, curTmpKey);
     },
     () => {
       // once per outer iteration, not once per comparison
+      const kb = cbElemArg(ctx, lines, callback.type, p.tmpAddr, p.elemTy);
       const tmpKey = ctx.nextTemp();
-      lines.push(`  ${tmpKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ptr ${p.tmpAddr})`);
+      lines.push(`  ${tmpKey} = call ${keyTy} ${fnPtr}(ptr ${envPtr}, ${kb.argTy} ${kb.arg})`);
       lines.push(`  store ${keyTy} ${tmpKey}, ptr ${tmpKeyAddr}`);
     },
   );

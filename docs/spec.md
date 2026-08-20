@@ -9964,6 +9964,8 @@ A conforming implementation shall accept this program, and running it shall writ
 - `position 1`
 - `retain kept 3`
 - `fold 6`
+- `sortBy 1 2 3 4 5`
+- `sortByKey 5 4 3 2 1`
 
 **Rationale.** A combinator hands its callback a POINTER to the element, and the checker deliberately lets the closure declare a Copy element by value instead of &T. Codegen has to load in that case. Only map did. The others passed the pointer straight through, so the closure read an ADDRESS as its value: each printed raw addresses, filter kept every element (a heap pointer is > 1), position never matched, and retain kept everything (a heap pointer is even, so `x % 2 == 0` was always true). All of it type-checked and none of it looked wrong at a glance — a filter that keeps everything reads like a filter whose predicate is loose.
 

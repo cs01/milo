@@ -4,6 +4,8 @@
 // @expect: position 1
 // @expect: retain kept 3
 // @expect: fold 6
+// @expect: sortBy 1 2 3 4 5
+// @expect: sortByKey 5 4 3 2 1
 // A combinator hands its callback a POINTER to the element, and the checker deliberately
 // lets the closure declare a Copy element by value instead of &T. Codegen has to load in
 // that case. Only map did.
@@ -40,5 +42,23 @@ pub fn main(): i32 {
     print("retain kept " + r.len.toString())
 
     print("fold " + v.fold(0, (acc: i64, x: i64): i64 => acc + x).toString())
+
+    // The sort callbacks live in codegen-vec.ts, which the first pass at this fix did not
+    // touch: sortByKey ordered by NEGATED POINTER and sortBy left the vector untouched.
+    var sb: Vec<i64> = [5, 1, 4, 2, 3]
+    sb.sortBy((x: i64, y: i64): bool => x > y)
+    var o1: string = "sortBy"
+    for x in sb {
+        o1 = o1 + " " + x.toString()
+    }
+    print(o1)
+
+    var sk: Vec<i64> = [5, 1, 4, 2, 3]
+    sk.sortByKey((x: i64): i64 => 0 - x)
+    var o2: string = "sortByKey"
+    for x in sk {
+        o2 = o2 + " " + x.toString()
+    }
+    print(o2)
     return 0
 }

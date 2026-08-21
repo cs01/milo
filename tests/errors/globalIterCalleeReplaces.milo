@@ -1,0 +1,17 @@
+// Same hole, reached by reassignment rather than realloc: dropping the old Vec frees the
+// buffer the loop variable points into.
+// @error: writes the global 'G', which is being iterated here
+var G: Vec<i64> = Vec.new()
+
+fn blow(): void {
+    G = Vec.new()
+}
+
+pub fn main(): i32 {
+    G.push(1)
+    for x in G {
+        blow()
+        print(x)
+    }
+    return 0
+}

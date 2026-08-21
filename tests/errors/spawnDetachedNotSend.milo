@@ -1,0 +1,19 @@
+// The same body errors on Promise.blocking. spawnOsThreadDetached was added after the two
+// hardcoded Send checks and never got one, so this compiled clean and handed a pointer
+// into a dead frame to a real OS thread.
+// @error: cannot send 'p' of type '*u8' across threads
+from "std/runtime" import {
+    spawnOsThreadDetached
+}
+
+pub fn main(): i32 {
+    var x: i32 = 42
+    unsafe {
+        let p = (x.addrOf()) as *u8
+        spawnOsThreadDetached(move () => {
+            print("ptr: ", p as i64)
+        }
+        )
+    }
+    return 0
+}

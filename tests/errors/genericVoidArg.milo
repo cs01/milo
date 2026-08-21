@@ -1,0 +1,16 @@
+// `void` has no runtime representation, so a generic instantiated with it emitted
+// `load void` and `void %param`, both rejected by LLVM at the link step, against a temp
+// .ll file with no source location. Fails here instead, where there is a span.
+// @error: cannot be instantiated with 'void'
+from "std/runtime" import {
+    Promise
+}
+
+pub fn main(): i32 {
+    let p = Promise<void>.blocking(move(): void => {
+        print("in thread")
+    }
+    )
+    p.await()!
+    return 0
+}

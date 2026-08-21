@@ -1,0 +1,21 @@
+// A mutable global is not a capture, so the Send/Sync check, which is keyed to closure
+// capture types, never saw it. Two OS threads incrementing it compiled clean, and at -O2
+// LLVM hoists the whole loop into one load/add/store pair, so the race loses every update
+// but the last rather than a few.
+// @error: is a mutable global, and this code runs on a real OS thread
+from "std/runtime" import {
+    Promise
+}
+
+var counter: i64 = 0
+
+pub fn main(): i32 {
+    let p = Promise<i64>.blocking(move(): i64 => {
+        counter = counter + 1
+        return 0
+    }
+    )
+    counter = counter + 1
+    p.await()!
+    return 0
+}

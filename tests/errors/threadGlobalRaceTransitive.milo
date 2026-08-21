@@ -1,0 +1,26 @@
+// The global is touched two frames below the closure, so a check that only looked at the
+// closure body would miss it. The diagnostic names the call chain that reached it.
+// @error: (via 'work' → 'record')
+from "std/runtime" import {
+    Promise
+}
+
+var hits: i64 = 0
+
+fn record(): void {
+    hits = hits + 1
+}
+
+fn work(): void {
+    record()
+}
+
+pub fn main(): i32 {
+    let p = Promise<i64>.blocking(move(): i64 => {
+        work()
+        return 0
+    }
+    )
+    p.await()!
+    return 0
+}

@@ -361,6 +361,7 @@ export class TypeChecker {
   private monomorphizedDecls: import("./ast").EnumDecl[] = [];
   private monomorphizedStructDecls: StructDecl[] = [];
   private monomorphizedFns: Function[] = [];
+  private voidGenericReported = new Set<string>();
   // Guard against an unbounded recursive generic (e.g. `fn grow<T>() { grow<Wrap<T>>() }`)
   // whose every instantiation is a fresh type, so the memo never hits and checkFunction
   // recurses until the JS stack blows. Cap the instantiation depth and fail cleanly.
@@ -1092,6 +1093,24 @@ export class TypeChecker {
           if (gs) {
             if (resolvedArgs.length !== gs.typeParams.length) {
               this.error(`'${ty.name}' expects ${gs.typeParams.length} type args, got ${resolvedArgs.length}`);
+              return { tag: "unknown" };
+            }
+            // `void` has no runtime representation, so instantiating a generic with it
+            // emits `load void` and `void %param`, both of which LLVM rejects outright.
+            // That surfaced as a link-step IR error with no source location attached —
+            // `Promise<void>` reported as "void type only allowed for function results"
+            // against a temp .ll file. Reject it here, where there is still a span to
+            // point at. Real zero-sized-type support would make this legal; until then
+            // failing in the right place with the right advice beats failing in the
+            // linker with none.
+            if (resolvedArgs.some(a => a.tag === "void")) {
+              // One report per generic: `Promise<void>` instantiates Channel, Result and
+              // friends with the same void, and 30 copies of one mistake buries the fix.
+              if (!this.voidGenericReported.has(ty.name)) {
+                this.voidGenericReported.add(ty.name);
+              this.error(`'${ty.name}' cannot be instantiated with 'void' — 'void' has no runtime representation`, undefined,
+                `carry a placeholder payload instead: '${ty.name}<i32>' whose closure ends in 'return 0'`);
+              }
               return { tag: "unknown" };
             }
             result = { tag: "struct", name: this.monomorphizeStruct(ty.name, resolvedArgs) };
@@ -2172,8 +2191,16 @@ export class TypeChecker {
               this.error(`'@pure' takes no arguments`, undefined, `write '@pure fn ${fn.name}(...)'`);
             }
           }
+          // @thread marks a fn that hands a closure param to a real OS thread. It is the
+          // single source of truth for where a data race can enter a program — see
+          // checkThreadBoundary, which reads this rather than hardcoding entry points.
+          else if (attr.name === "thread") {
+            if (attr.args.length > 0) {
+              this.error(`'@thread' takes no arguments`, undefined, `write '@thread fn ${fn.name}(...)'`);
+            }
+          }
           else this.error(`'@${attr.name}' is not supported on functions — '${fn.name}'`, undefined,
-            `only '@cSig', '@externalLinkage', '@link', '@pure' and '@wrapping' apply to a fn; it would be silently ignored otherwise`);
+            `only '@cSig', '@externalLinkage', '@link', '@pure', '@thread' and '@wrapping' apply to a fn; it would be silently ignored otherwise`);
         }
       }
       this.checkVariadicExtern(fn);
@@ -2315,6 +2342,14 @@ export class TypeChecker {
     // Also needs the finished maps: `closureCaptures` is filled as each closure body is
     // checked, and the auto-`move` promotions have all settled by now.
     this.checkEscapingClosures(program);
+
+    // Same reason: the `@thread` entry points, their call sites, and the closure captures
+    // are all resolved by now.
+    this.checkThreadBoundary(program);
+
+    // Needs the finished call-resolution maps too: the global-write summary is a fixpoint
+    // over the call graph, so every callee has to be resolvable before it runs.
+    this.checkGlobalBorrowInvalidation(program);
 
     // An expectation that never fired means the code it excused was fixed and the
     // suppression outlived its cause. Reported here, after every warning has had its
@@ -3462,6 +3497,316 @@ export class TypeChecker {
     }
   }
 
+  // Which functions hand a closure to a real OS thread? They say so themselves, with
+  // `@thread` on the declaration in std. The two hardcoded copies this replaces had
+  // already drifted apart: the `Thread` tier was deleted and its arm stayed behind
+  // guarding a type that no longer exists, while `spawnOsThreadDetached` — added after
+  // both — never got an arm, so the *same* fixture that errors on `Promise.blocking`
+  // compiled clean and shipped a pointer into a dead frame to another thread. A list the
+  // declarations own cannot drift from the declarations.
+  private checkThreadBoundary(program: Program): void {
+    const fns = new Map<string, Function>();
+    for (const f of [...program.functions, ...this.monomorphizedFns]) fns.set(f.name, f);
+    const isEntry = (target: string | undefined) =>
+      !!target && !!fns.get(target)?.attributes?.some(a => a.name === "thread");
+    if (![...fns.values()].some(f => f.attributes?.some(a => a.name === "thread"))) return;
+
+    // A `var` global is unsynchronized shared memory, and `Sync` is the wrong question to
+    // ask about it: `i64` is perfectly Sync — sharing `&i64` is safe — while the hazard
+    // here is the *write*, which Sync says nothing about. The synchronized way to hold
+    // shared mutable state is already a `let` global of a cell that mutates through
+    // `&self` (AtomicI64, Channel, Once), so `var` plus a thread is always the bug, and
+    // the optimizer makes it worse than it looks: a whole loop of `g = g + 1` gets hoisted
+    // into a single load/store pair, losing every update but the last rather than a few.
+    const mutableGlobals = new Set<string>();
+    for (const g of program.globals) if (g.mutable && !g.threadLocal) mutableGlobals.add(g.name);
+    // `@synchronized` marks a method whose closure argument is a critical section — the
+    // primitive itself provides the mutual exclusion and the happens-before edge, so a
+    // global written in there is not racing. Without this the canonical `Once.run(...)`
+    // one-shot-init pattern reports as a race, which is the reverse of the truth: it is
+    // the *fix* for one. The scan below stops at the boundary rather than reasoning about
+    // the primitive, so a new one only has to declare itself.
+    const isCriticalSection = (target: string | undefined) =>
+      !!target && !!fns.get(target)?.attributes?.some(a => a.name === "synchronized");
+
+    const reported = new Set<string>();
+    const target = (e: Expr): string | undefined =>
+      this.rewrittenCalls.get(e) ?? this.staticCalls.get(e) ?? this.resolvedMethods.get(e) ??
+      (e.kind === "Call" && typeof e.func === "string" ? e.func : undefined);
+
+    // Reports every unsynchronized global reachable from `closure`, following static calls
+    // so a touch three helpers deep still names the thread it escaped to. Approximate
+    // scoping on purpose, same as checkEscapingClosures: one flat bound-name set per body,
+    // which can only make this miss a shadowed global, never invent one.
+    // Root of a place expression: `G`, `G.field`, `G[i]` all root at `G`.
+    const rootOf = (e: unknown): string | undefined => {
+      let cur = e as Record<string, unknown> & { kind?: string };
+      while (cur && typeof cur === "object") {
+        if (cur.kind === "Ident") return typeof cur.name === "string" ? cur.name : undefined;
+        if (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") { cur = cur.object as typeof cur; continue; }
+        return undefined;
+      }
+      return undefined;
+    };
+
+    // Two phases over one reachable set, because reads and writes are not equally guilty.
+    // A *write* reached without crossing a critical section races on its own. A *read*
+    // only races if some write is also unsynchronized: `Once.run` publishes `gValue`, and
+    // every later read of it is ordered by that publication, so flagging the read would
+    // reject the very pattern that fixes the race.
+    type Touch = { name: string; span: Span | undefined; chain: string[]; write: boolean };
+    const scan = (closure: Expr, entry: string) => {
+      const touches: Touch[] = [];
+      const done = new Set<string>();
+      const walk = (node: unknown, bound: Set<string>, chain: string[]) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { for (const n of node) walk(n, bound, chain); return; }
+        const n = node as Record<string, unknown> & { kind?: string; name?: unknown; span?: unknown };
+        const span = (n.span as Span | undefined) ?? closure.span;
+        if ((n.kind === "LetDecl" || n.kind === "VarDecl") && typeof n.name === "string") bound.add(n.name);
+
+        const hit = (name: string | undefined, write: boolean) => {
+          if (!name || !mutableGlobals.has(name) || bound.has(name)) return;
+          touches.push({ name, span, chain, write });
+        };
+        if (n.kind === "Assign") hit(rootOf(n.target), true);
+        // `G.push(x)` is a write that never appears as an Assign. A `&self` method is not
+        // — `gOnce.run(...)` is the Once synchronizing itself, and `Sync` is the wrong
+        // question to ask here anyway: `Vec<i64>` is perfectly Sync and `push` still
+        // reallocs it.
+        if (n.kind === "MethodCall") hit(rootOf(n.object), this.mutatesReceiver(n as unknown as Expr));
+        if (n.kind === "Ident" && typeof n.name === "string") hit(n.name, false);
+
+        if (n.kind === "Call" || n.kind === "EnumLit" || n.kind === "MethodCall") {
+          const t = target(n as unknown as Expr);
+          if (isCriticalSection(t)) {
+            // Stop at the boundary: everything the closure argument does is serialized by
+            // the primitive. Its receiver and non-closure args are still ordinary code.
+            for (const k of Object.keys(n)) {
+              if (k === "span" || k === "args") continue;
+              walk(n[k], bound, chain);
+            }
+            for (const a of (n.args as Expr[] | undefined) ?? []) if (a.kind !== "Closure") walk(a, bound, chain);
+            return;
+          }
+          if (t && !done.has(t)) {
+            done.add(t);
+            const f = fns.get(t);
+            if (f && !f.isExtern && f.body) walk(f.body, new Set(f.params.map(p => p.name)), [...chain, t]);
+          }
+        }
+        // A nested closure body runs on the same thread, so the generic descent walks in.
+        for (const k of Object.keys(n)) if (k !== "span") walk(n[k], bound, chain);
+      };
+      walk((closure as Extract<Expr, { kind: "Closure" }>).body, new Set(), []);
+
+      const racy = new Set(touches.filter(t => t.write).map(t => t.name));
+      for (const t of touches) {
+        if (!racy.has(t.name)) continue;
+        // One report per global per thread entry: `g = g + 1` is a read and a write of
+        // the same mistake, and repeating it per mention buries the fix.
+        const key = `${entry}|${t.name}`;
+        if (reported.has(key)) continue;
+        reported.add(key);
+        const where = t.chain.length ? ` (via ${t.chain.map(c => `'${c.replace(/\$/g, ".")}'`).join(" → ")})` : "";
+        this.error(
+          `'${t.name}' is a mutable global, and this code runs on a real OS thread${where}`,
+          t.span,
+          `two threads touching one unsynchronized global is a data race — make '${t.name}' an ` +
+          `atomic from 'std/sync' (AtomicI64/AtomicBool/AtomicI32/AtomicU64), do the mutation inside ` +
+          `'Once.run', or write 'thread_local var ${t.name}' if each thread should get its own copy`,
+        );
+      }
+    };
+
+
+    const atEntry = (call: Expr, entry: string) => {
+      for (const arg of (call as { args?: Expr[] }).args ?? []) {
+        if (arg.kind !== "Closure") continue;
+        for (const cap of this.closureCaptures.get(arg) ?? []) {
+          if (this.isSend(cap.type)) continue;
+          this.error(
+            `cannot send '${cap.name}' of type '${typeName(cap.type)}' across threads — type does not implement Send`,
+            arg.span, this.whyNotSend(cap.type));
+        }
+        scan(arg, entry);
+      }
+    };
+
+    const findCalls = (node: unknown) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const n of node) findCalls(n); return; }
+      const n = node as Record<string, unknown> & { kind?: string };
+      if (n.kind === "Call" || n.kind === "EnumLit") {
+        const t = target(n as unknown as Expr);
+        if (isEntry(t)) atEntry(n as unknown as Expr, t!);
+      }
+      for (const k of Object.keys(n)) if (k !== "span") findCalls(n[k]);
+    };
+    for (const f of fns.values()) if (f.body) findCalls(f.body);
+    for (const g of program.globals) findCalls(g.value);
+  }
+
+  // Which globals does each function transitively write? The aliasing model is keyed to
+  // locals, params and self, so a `var` global mutated inside a callee is invisible to it
+  // and three heap-use-after-frees fell straight through: `for x in G { grow() }` where
+  // grow() pushes to G, the same with `G = Vec.new()`, and plain `use(G[0])` where use()
+  // reallocs G. No threads involved — this is single-threaded aliasing, a different axis
+  // from checkThreadBoundary, but it needs the same summary, so both read this one.
+  // Does this method call mutate its receiver? Built-in collection mutators are a fixed
+  // list; a user method declares it by taking `&mut self`.
+  private mutatesReceiver(call: Expr): boolean {
+    const m = (call as Extract<Expr, { kind: "MethodCall" }>).method;
+    if (MUTATING_COLLECTION_METHODS.has(m)) return true;
+    const t = this.resolvedMethods.get(call) ?? this.rewrittenCalls.get(call);
+    const self = t ? this.functions.get(t)?.params?.[0]?.type : undefined;
+    return !!self && self.tag === "ref" && self.mutable;
+  }
+
+  private globalWriteSummary(fns: Map<string, Function>, mutableGlobals: Set<string>): Map<string, Set<string>> {
+    const rootOf = (e: unknown): string | undefined => {
+      let cur = e as Record<string, unknown> & { kind?: string };
+      while (cur && typeof cur === "object") {
+        if (cur.kind === "Ident") return typeof cur.name === "string" ? cur.name : undefined;
+        if (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") { cur = cur.object as typeof cur; continue; }
+        return undefined;
+      }
+      return undefined;
+    };
+    const target = (e: Expr): string | undefined =>
+      this.rewrittenCalls.get(e) ?? this.staticCalls.get(e) ?? this.resolvedMethods.get(e) ??
+      (e.kind === "Call" && typeof e.func === "string" ? e.func : undefined);
+
+    const writes = new Map<string, Set<string>>();
+    const callees = new Map<string, Set<string>>();
+    for (const [name, f] of fns) {
+      const w = new Set<string>();
+      const c = new Set<string>();
+      const bound = new Set<string>(f.params.map(p => p.name));
+      const walk = (node: unknown) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { for (const n of node) walk(n); return; }
+        const n = node as Record<string, unknown> & { kind?: string; name?: unknown };
+        if ((n.kind === "LetDecl" || n.kind === "VarDecl") && typeof n.name === "string") bound.add(n.name);
+        const note = (r: string | undefined) => { if (r && mutableGlobals.has(r) && !bound.has(r)) w.add(r); };
+        if (n.kind === "Assign") note(rootOf(n.target));
+        if (n.kind === "MethodCall" && this.mutatesReceiver(n as unknown as Expr)) {
+          // `G.push(x)` never appears as an Assign but reallocs G's buffer.
+          note(rootOf(n.object));
+        }
+        if (n.kind === "Call" || n.kind === "EnumLit" || n.kind === "MethodCall") {
+          const t = target(n as unknown as Expr);
+          if (t) c.add(t);
+        }
+        for (const k of Object.keys(n)) if (k !== "span") walk(n[k]);
+      };
+      if (f.body) walk(f.body);
+      writes.set(name, w);
+      callees.set(name, c);
+    }
+    // Least fixpoint over the call graph. Recursion just stops adding on the round where
+    // nothing new propagates, so no explicit cycle guard is needed.
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [name, cs] of callees) {
+        const w = writes.get(name)!;
+        for (const t of cs) {
+          for (const g of writes.get(t) ?? []) if (!w.has(g)) { w.add(g); changed = true; }
+        }
+      }
+    }
+    return writes;
+  }
+
+  // Rejects a call that writes a global while a borrow into that same global is live.
+  // Two shapes, both heap-use-after-free before this: iterating a global while a callee
+  // reallocs or replaces it, and passing a place rooted at a global to a function that
+  // reallocs that global under the reference it was just handed.
+  private checkGlobalBorrowInvalidation(program: Program): void {
+    const mutableGlobals = new Set<string>();
+    for (const g of program.globals) if (g.mutable) mutableGlobals.add(g.name);
+    if (mutableGlobals.size === 0) return;
+    const fns = new Map<string, Function>();
+    for (const f of [...program.functions, ...this.monomorphizedFns]) fns.set(f.name, f);
+    const writes = this.globalWriteSummary(fns, mutableGlobals);
+
+    const rootOf = (e: unknown): string | undefined => {
+      let cur = e as Record<string, unknown> & { kind?: string };
+      while (cur && typeof cur === "object") {
+        if (cur.kind === "Ident") return typeof cur.name === "string" ? cur.name : undefined;
+        if (cur.kind === "FieldAccess" || cur.kind === "IndexAccess") { cur = cur.object as typeof cur; continue; }
+        return undefined;
+      }
+      return undefined;
+    };
+    const target = (e: Expr): string | undefined =>
+      this.rewrittenCalls.get(e) ?? this.staticCalls.get(e) ?? this.resolvedMethods.get(e) ??
+      (e.kind === "Call" && typeof e.func === "string" ? e.func : undefined);
+    const pretty = (n: string) => n.replace(/\$/g, ".");
+    const reported = new Set<string>();
+    const report = (msg: string, span: Span | undefined, hint: string) => {
+      const key = `${span?.line ?? 0}:${span?.col ?? 0}:${msg}`;
+      if (reported.has(key)) return;
+      reported.add(key);
+      this.error(msg, span, hint);
+    };
+
+    for (const f of fns.values()) {
+      if (!f.body) continue;
+      const bound = new Set<string>(f.params.map(p => p.name));
+      // Globals whose storage is borrowed by an enclosing for-in. A loop iterand is a
+      // reference into the container's buffer, so anything that reallocs or replaces the
+      // container leaves it dangling for the rest of the iteration.
+      const walk = (node: unknown, iterated: string[]) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { for (const n of node) walk(n, iterated); return; }
+        const n = node as Record<string, unknown> & { kind?: string; name?: unknown; span?: unknown };
+        const span = n.span as Span | undefined;
+        if ((n.kind === "LetDecl" || n.kind === "VarDecl") && typeof n.name === "string") bound.add(n.name);
+
+        if (n.kind === "ForInStmt") {
+          const g = rootOf(n.iterable);
+          const next = g && mutableGlobals.has(g) && !bound.has(g) ? [...iterated, g] : iterated;
+          walk(n.iterable, iterated);
+          walk(n.body, next);
+          return;
+        }
+
+        if (n.kind === "Call" || n.kind === "EnumLit" || n.kind === "MethodCall") {
+          const t = target(n as unknown as Expr);
+          const w = t ? writes.get(t) : undefined;
+          if (t && w) {
+            for (const g of iterated) {
+              if (!w.has(g)) continue;
+              report(
+                `'${pretty(t)}' writes the global '${g}', which is being iterated here`,
+                span,
+                `the loop variable is a reference into '${g}'s buffer — pushing to it, clearing it, or ` +
+                `reassigning it from inside the loop frees that buffer and leaves the reference dangling. ` +
+                `Iterate a copy ('for x in ${g}.clone()'), or collect the changes and apply them after the loop`,
+              );
+            }
+            // `use(G[0])` — the argument is a reference into G's storage and the callee
+            // reallocs G, so the reference dies before the callee is done with it.
+            for (const a of (n.args as Expr[] | undefined) ?? []) {
+              const g = rootOf(a);
+              if (!g || !mutableGlobals.has(g) || bound.has(g) || !w.has(g)) continue;
+              if (iterated.includes(g)) continue;
+              report(
+                `'${pretty(t)}' writes the global '${g}', and is passed a reference into '${g}' here`,
+                (a.span as Span | undefined) ?? span,
+                `the argument borrows '${g}'s storage, and '${pretty(t)}' can realloc or replace '${g}' ` +
+                `while that borrow is live — pass a copy, or have '${pretty(t)}' take '${g}' by value`,
+              );
+            }
+          }
+        }
+        for (const k of Object.keys(n)) if (k !== "span") walk(n[k], iterated);
+      };
+      walk(f.body, []);
+    }
+  }
+
   private validateAttributes(declName: string, attrs: Attribute[] | undefined, target: "struct" | "enum"): void {
     if (!attrs) return;
     const known = TypeChecker.KNOWN_ATTRS.map(a => `@${a}`).join(", ");
@@ -3743,9 +4088,9 @@ export class TypeChecker {
       // Method attributes were silently dropped before they could be parsed at all;
       // reject the unknown ones here so a typo can't look like it took effect.
       for (const attr of m.attributes ?? []) {
-        if (attr.name !== "pure" && attr.name !== "wrapping") {
+        if (attr.name !== "pure" && attr.name !== "wrapping" && attr.name !== "thread" && attr.name !== "synchronized") {
           this.error(`'@${attr.name}' is not supported on methods — '${typeName}.${m.name}'`, m.span ?? impl.span,
-            `only '@pure' and '@wrapping' apply to a method`);
+            `only '@pure', '@wrapping', '@thread', and '@synchronized' apply to a method`);
         } else if (attr.args.length > 0) {
           this.error(`'@${attr.name}' takes no arguments`, m.span ?? impl.span,
             `write '@${attr.name}' on the line above 'fn ${m.name}'`);
@@ -7836,22 +8181,9 @@ export class TypeChecker {
           const mangledMethod = `${mangled}$${expr.variant}`;
           const paramOffset = this.checkStaticCallArgs(sig, expr, sp);
           this.staticCalls.set(expr, mangledMethod);
-          // Send enforcement: Promise.blocking() runs the closure on a real
-          // OS thread, so all captures must be Send.
-          if (expr.enumName === "Promise" && expr.variant === "blocking" && expr.args.length === 1 && expr.args[0].kind === "Closure") {
-            const captures = this.closureCaptures.get(expr.args[0]);
-            if (captures) {
-              for (const cap of captures) {
-                if (!this.isSend(cap.type)) {
-                  this.error(
-                    `cannot send '${cap.name}' of type '${typeName(cap.type)}' across threads — type does not implement Send`,
-                    expr.args[0].span,
-                    this.whyNotSend(cap.type),
-                  );
-                }
-              }
-            }
-          }
+          // Send enforcement for thread-crossing closures lives in checkThreadBoundary,
+          // driven by `@thread` on the declaration — see the comment there for what the
+          // hardcoded version that used to sit here missed.
           return this.setType(expr, sig.ret);
         }
       }

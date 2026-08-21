@@ -1,0 +1,15 @@
+// No loop at all: the argument borrows G's storage and the callee reallocs G while that
+// borrow is live, so the reference dangles before the callee is done reading it.
+// @error: and is passed a reference into 'G' here
+var G: Vec<i64> = Vec.new()
+
+fn consume(r: &i64): void {
+    G.push(7)
+    print(r)
+}
+
+pub fn main(): i32 {
+    G.push(1)
+    consume(G[0])
+    return 0
+}

@@ -37,6 +37,7 @@ Every doc in this repo starts with a 7-line `<!-- doc-meta ... -->` block. To fi
 | Leave you feedback about the workflow | [docs/feedback/README.md](docs/feedback/README.md) |
 | Sweep recent commits for regressions | skill `/commit-sweep` |
 | Debug an emulator bug (black screen, garbled gfx, freeze) | skill `/emu-debug` |
+| Write or talk about Milo externally (blog, talk, README pitch) | [docs/design-insights.md](docs/design-insights.md) (the arguments, each with its falsifier) |
 | Understand the compiler internals | [CLAUDE.md](CLAUDE.md) §Architecture, [docs/design.md](docs/design.md) |
 | The language spec / grammar | [docs/language-reference.md](docs/language-reference.md) (prose), [docs/spec.md](docs/spec.md) (normative requirements, generated), [docs/grammar.ebnf](docs/grammar.ebnf) (syntax) |
 | Look up a compile error, or see what a rule rejects | [docs/errors.md](docs/errors.md) — every pinned message with the program that provokes it (generated from `tests/errors/`) |

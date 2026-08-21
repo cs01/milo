@@ -1,0 +1,18 @@
+// The aliasing model is keyed to locals, params and self, so a global mutated inside a
+// callee was invisible to it. The local form of this is already rejected
+// (vecPushWhileIterating); the global form was a heap-use-after-free.
+// @error: writes the global 'G', which is being iterated here
+var G: Vec<i64> = Vec.new()
+
+fn grow(): void {
+    G.push(99)
+}
+
+pub fn main(): i32 {
+    G.push(1)
+    for x in G {
+        grow()
+        print(x)
+    }
+    return 0
+}

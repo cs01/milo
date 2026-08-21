@@ -1,0 +1,22 @@
+// `Promise.blocking` runs its closure on a real OS thread, so a borrowing closure hands
+// that thread a raw pointer into a frame that is already gone. This parses as EnumLit,
+// not Call/MethodCall, and checkEscapingClosures only had arms for the latter two: it
+// compiled clean and printed Ok(8421921353) off a dead stack. A `var` capture is what
+// reaches the check, since checkStaticCallArgs auto-promotes a closure whose captures are
+// all immutable to `move`.
+// @error: cannot pass a closure that captures 'n' by reference to 'Promise.blocking', which keeps it
+
+from "std/runtime" import { Promise }
+
+fn mk(): Promise<i64> {
+    var n = 41
+    return Promise.blocking(() => {
+        n = n + 1
+        return n
+    })
+}
+
+fn main() {
+    let p = mk()
+    print(p.await())
+}

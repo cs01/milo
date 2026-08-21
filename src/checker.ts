@@ -3211,6 +3211,27 @@ export class TypeChecker {
           }
           break;
         }
+        case "EnumLit": {
+          // `Promise.blocking(...)`, `Task.spawn(...)`, and every other `Type.method(...)`
+          // parse as EnumLit, not Call/MethodCall, so the two arms below never saw them and
+          // a borrowing closure crossed a real OS thread as a raw pointer into the frame
+          // that wrote it. `var n = 41; Promise.blocking(() => { n = n + 1; return n })`
+          // returned 8421921353 from a dead stack.
+          const args = n.args as Expr[];
+          if (args.length === 0) break;
+          const who = `${n.enumName}.${n.variant}`;
+          const mangled = this.staticCalls.get(node as Expr);
+          for (let i = 0; i < args.length; i++) {
+            // No resolved target means an enum VARIANT constructor (which stores its
+            // payload) or a builtin: treated as retaining, on retainsParam's own rule that
+            // every unknown answers YES because a wrong NO is a use-after-free. The only
+            // args this can reject are closures, so fail-closed costs nothing else.
+            if (mangled && fns.has(mangled) && !this.retainsParam(fns, mangled, i, new Set())) continue;
+            check(args[i]!, bound, names => `cannot pass a closure that captures ${names} by reference to '${who}', which keeps it`,
+              `'${who}'`);
+          }
+          break;
+        }
         case "MethodCall": {
           // The collection-storing methods. A closure passed to `map`/`each`/`sortBy` is
           // called and dropped within the call, so those stay legal — that is the common

@@ -1,0 +1,17 @@
+// Same hole as escapingClosurePromiseBlocking, on the green-task side: the spawned task
+// outlives `mk`'s frame, so its capture of `n` dangles. `Task.spawn` declares its param
+// `move`, but the declaration alone never rejected anything — the escape check has to
+// reach the EnumLit call form for the error to fire.
+// @error: cannot pass a closure that captures 'n' by reference to 'Task.spawn', which keeps it
+
+from "std/runtime" import { Task }
+
+fn mk(): Task {
+    var n = 41
+    return Task.spawn(() => { n = n + 1 })
+}
+
+fn main() {
+    let t = mk()
+    t.join()
+}

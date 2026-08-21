@@ -968,6 +968,85 @@ export class Codegen {
     return false;
   }
 
+  // Does `fnName`'s parameter `idx` outlive the call — is there anything that could still
+  // reach the closure passed to it once the call returns?
+  //
+  // This is what decides who frees a `move` closure's malloc'd environment. An owning fn
+  // type is not Copy, so the call site relinquishes the closure and stops dropping it; the
+  // callee cannot pick the job up either, because the parameter is declared with the
+  // NON-owning `(T) => R` and so is Copy from the checker's point of view — `fn outer(f) {
+  // inner(f) inner(f) }` forwards the same environment twice and no alive flag is cleared.
+  // So the caller keeps ownership and frees after the call, which needs exactly this
+  // question answered: nothing else may be holding the closure by then.
+  //
+  // Fail closed everywhere the answer is not obvious (extern, indirect/interface dispatch,
+  // recursion, a builtin higher-order form): "escapes" means nobody frees, which is the
+  // leak we have today, while a wrong "does not escape" is a double free.
+  // Is this expression a closure whose environment is on the heap, and whose only owner is
+  // whoever holds this value?
+  //
+  // A closure LITERAL cannot be classified by its type alone. The call site's auto-`move`
+  // (checker: "auto-move closure args") sets `isMove` AFTER the literal was typed, so the
+  // recorded type stays the non-owning `(T) => R` even though codegen will malloc an
+  // environment for it. Reading `isMove` here rather than the type is what makes a literal
+  // argument and a `let f = move …` argument agree on who frees.
+  private ownsClosureEnv(e: HIRExpr): boolean {
+    if (e.type.tag !== "fn") return false;
+    if (e.type.owning === true) return true;
+    return e.kind === "Closure" && e.isMove === true && e.captures.length > 0;
+  }
+
+  private closureParamEscapes(fnName: string, idx: number, seen: Set<string> = new Set()): boolean {
+    const key = `${fnName}#${idx}`;
+    const memo = this.closureParamEscapeCache.get(key);
+    if (memo !== undefined) return memo;
+    if (seen.has(key)) return true;
+    seen.add(key);
+    const fn = this.hirFns.get(fnName);
+    const param = fn?.params[idx];
+    if (!fn || fn.isExtern || !param || param.isRef || param.isRefMut) return true;
+    // A parameter declared `move (…) => R` is owning, so the callee already registers it as
+    // a droppable local and frees it at every exit. Treat that as an escape: it is the one
+    // case where somebody else is doing the job, and dropping again in the caller is a
+    // double free (`fn call(f: move () => i64)`, tests/fixtures/closureCapturesDropped).
+    if (param.type.tag === "fn" && param.type.owning === true) return true;
+    let escapes = false;
+    const walk = (node: unknown): void => {
+      if (escapes || !node || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const x of node) walk(x); return; }
+      const n = node as Record<string, unknown> & { kind?: string; name?: string };
+      // A nested closure that CAPTURES it keeps a copy of the {fn, env} pair, and that copy
+      // can outlive this frame (`return move () => f(1)`). The capture is recorded by name,
+      // so walking the nested body alone would miss it when that body only calls it.
+      if (n.kind === "Closure" && Array.isArray(n.captures)
+          && (n.captures as { name: string }[]).some(c => c.name === param.name)) { escapes = true; return; }
+      // `f(…)` hands the closure to nobody: it is called and forgotten.
+      if (n.kind === "ClosureCall") {
+        const callee = n.callee as { kind?: string; name?: string } | undefined;
+        if (!(callee?.kind === "Ident" && callee.name === param.name)) walk(n.callee);
+        walk(n.args);
+        return;
+      }
+      // Forwarding: `fn outer(g) { inner(g) }` keeps `g` only if `inner` does. Without this
+      // a one-line wrapper would be indistinguishable from a store.
+      if (n.kind === "Call" && Array.isArray(n.args)) {
+        const args = n.args as HIRArg[];
+        for (let i = 0; i < args.length; i++) {
+          const e = args[i]?.expr;
+          if (e?.kind === "Ident" && e.name === param.name) {
+            if (this.closureParamEscapes(n.func as string, i, seen)) { escapes = true; return; }
+          } else walk(args[i]);
+        }
+        return;
+      }
+      if (n.kind === "Ident" && n.name === param.name) { escapes = true; return; }
+      for (const k of Object.keys(n)) { if (k !== "span" && k !== "type") walk(n[k]); }
+    };
+    walk(fn.body);
+    this.closureParamEscapeCache.set(key, escapes);
+    return escapes;
+  }
+
   private needsDropCg(t: TypeKind): boolean {
     // An owning closure holds a heap environment. It is droppable exactly because it is
     // not Copy (src/types.ts isCopy): single ownership is what makes running a destructor
@@ -1546,6 +1625,7 @@ export class Codegen {
 
     // register function signatures
     for (const fn of module.functions) {
+      this.hirFns.set(fn.name, fn);
       this.userDeclaredFns.add(fn.name);
       this.fnSigs.set(fn.name, {
         paramTypes: fn.params.map(p => {
@@ -5386,6 +5466,18 @@ export class Codegen {
           argVals.push({ val: fnPtr, type: "ptr" });
         } else {
           argVals.push({ val: av, type: at });
+          // The caller owns a `move` closure's heap environment right up to the call and
+          // then stops dropping it (an owning fn type is not Copy, so passing it is a
+          // move), while the callee's parameter is declared non-owning and never picks the
+          // job up — so free it here, once the call cannot still be using it. Skipped when
+          // the closure outlives the call; see closureParamEscapes.
+          if (this.ownsClosureEnv(arg.expr) && at === "{ ptr, ptr }"
+              && !this.closureParamEscapes(expr.func, i)) {
+            const slot = `%__clarg.${this.scopeCounter++}.addr`;
+            this.entryAllocas.push(`  ${slot} = alloca { ptr, ptr }`);
+            lines.push(`  store { ptr, ptr } ${av}, ptr ${slot}`);
+            this.argTempDrops.push({ addr: slot, type: { ...argTk, owning: true } as TypeKind });
+          }
         }
       }
     }
@@ -12154,6 +12246,8 @@ export class Codegen {
   // call returns, and nothing else will ever free it. Recorded here by
   // genLValueForArg and flushed by the call site that consumed them.
   private argTempDrops: { addr: string; type: TypeKind }[] = [];
+  private hirFns = new Map<string, HIRFunction>();
+  private closureParamEscapeCache = new Map<string, boolean>();
 
   private flushArgTempDrops(lines: string[], mark: number) {
     while (this.argTempDrops.length > mark) {

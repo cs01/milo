@@ -3,7 +3,7 @@ system: language-design
 purpose: the why behind Milo's design decisions — memory model, references, concurrency, error handling
 key-files: docs/language-reference.md, src/checker.ts, std/arena.milo
 update-when: a design decision changes, a deferred feature ships, or a fence/tradeoff is revised
-last-verified: 2026-07-22
+last-verified: 2026-08-21
 -->
 
 # Milo Language Design
@@ -130,6 +130,93 @@ Five compile-time guardrails:
 - **Coercion safe** — no implicit coercions; explicit `as` casts only
 
 Ongoing work on aliasing/invalidation gaps: [safety-roadmap.md](safety-roadmap.md).
+
+## Composition: the seam rule
+
+Milo's safety is enforced by *rules the compiler applies*, not by a type system that
+composes. That trade is deliberate and it is the whole no-ceremony story: no lifetimes
+means no lifetime algebra to make `Option<T>` and borrowing agree on their own. The cost
+is specific enough to name, and naming it here is cheaper than rediscovering it once per
+feature.
+
+**Bugs live at the seams between features, not inside them.** Every memory-safety defect
+found in safe Milo code so far has been a pair, not a part:
+
+| defect | feature A | feature B |
+|--------|-----------|-----------|
+| `Option.map` hands a `&T` into a payload the callback can free | `Option<T>` payload borrow | callback combinators |
+| `reserve` wrapped `count * elemSize`, so `cap` outran the buffer | user-supplied counts | Vec growth |
+| two threads incrementing a global, no `Send`/`Sync` involved | mutable globals | OS threads |
+| a by-reference closure env shipped to a detached thread | by-ref capture | `spawnOsThreadDetached` |
+| `for x in b.items` froze nothing, so pushing to it reallocated mid-loop | for-in freeze | field-access spelling |
+
+Features grow linearly; pairs grow quadratically. Feature N+1 does not add one thing to
+get right, it adds N. That is the real budget, and it is the one nobody plans for. It is
+also why "is the surface area too big?" is the wrong question: the surface is fine, the
+pair count is what bites.
+
+Rust does not have the `Option::map` defect, and not because it is more careful.
+`o.map(|x| { o = None; x })` fails there because the borrow is *in the type*: one
+algorithm over one IR decides it, and `Option` inherits the answer by being an ordinary
+library type. Rust bought that compositionality with ceremony. Milo takes the opposite
+trade on purpose, which means **a guarantee the type system does not carry has to be
+re-established at every seam by hand, and hands forget.** In the combinator family most
+arms remembered to freeze the receiver for the callback's duration and a minority did
+not; nothing distinguished them except which day they were written.
+
+Five rules follow from that. They are design constraints on *new* work, not a description
+of the current implementation.
+
+**1. Every `&T` has a named provenance, and provenance freezes.** Today "second-class" is
+a property of the declaration site: `&T` appears only in params. But a combinator mints a
+`&T` that no param declared, pointing into its receiver, and the rules above have nothing
+to say about it. The commitment is stronger than "params only": anything that produces a
+`&T` names the storage it points into, and that storage is frozen for the reference's
+whole life. This is `placesOf` promoted from an implementation trick to a language rule.
+The design question for any new feature is therefore: *can this produce a `&T`? out of
+what? what freezes it?* If the answer is "the implementation remembers to call freeze",
+the feature is not designed yet.
+
+**2. Combinators belong in `std/`, not in the compiler.** `Vec.map`, `Option.map`,
+`Result.andThen` and their siblings are builtins, so each one is a hand-written arm in
+`checker.ts` and each arm is a fresh chance to forget a rule. Written instead as ordinary
+Milo functions taking `&self`, the existing borrow rules would cover them with no arm to
+forget. This is the same conclusion the derive work reached from the other side (trait
+dispatch and blanket impls beat more template holes). Every combinator that lives in the
+compiler rather than in the language is a permanent per-feature tax, paid on every rule
+that family ever acquires.
+
+**3. Generated code obeys the language's own semantics.** Milo traps `a * b` on overflow,
+with no opt-out, and then codegen emitted a raw `mul i64` for a capacity and wrapped. The
+compiler had quietly exempted itself from its own rule. Stated as an invariant: *if an
+operation traps in Milo, every instance codegen emits traps too, unless codegen can prove
+the bound.* This generalizes well past allocation sizes, and unlike most of this section
+it is mechanically checkable (see `tests/allocChokePoint.test.ts`, and commit `3cf5bf47`
+for the defect that motivated it).
+
+**4. Spend the budget on subsuming, not covering.** The consolidation of eight ad-hoc
+expression walkers into one total `placesOf` added no feature; it deleted inconsistency,
+and an entire family of defects stopped. `emitAllocBytes` did the same for allocation
+sizes. The highest-value language work is usually not feature N+1, it is finding the
+concept that makes several existing rules one rule's special case. Those are the changes
+that make the pair count go *down*, and they should outrank new surface when both are on
+the table.
+
+**5. A rule that needs a list is not a rule.** "You cannot grow a Vec while iterating it"
+is a rule. "...or while a slice of it is live, or inside a callback passed to any of
+these eleven methods, but `Option.map` is fine" is a changelog. When the sentence a user
+would have to learn requires an enumeration, the enumeration is the defect: it means one
+concept got implemented as N cases, and the case that is missing from the list is missing
+from the compiler too.
+
+### The seam review
+
+Every new-feature design carries a **seam review** alongside the roadmap check: list the
+existing features the new one can touch, and for each pair name the existing rule that
+covers it or the new rule it needs. It is a short section, and it is the step that would
+have caught globals crossed with threads, by-ref capture crossed with detached spawn, and
+`Option` crossed with callbacks before any of them shipped. Its value is that it converts
+"be careful at the seams" into a step someone can visibly fail to complete.
 
 ## Resolved Design Decisions
 

@@ -1,5 +1,24 @@
 # Fixtures that exit with no leaked heap. Regenerate: bun scripts/leak-check.ts --write
 # Gate: bun scripts/leak-check.ts --check
+#
+# NOT on this list, and why (2026-08-21): closureCaptureHeap, closureCaptureMutableLocal and
+# resultMap leak the environment of a move-capturing closure passed to a generic fn. The env
+# is malloc'd and nothing frees it.
+#
+# They were listed as clean only because nothing could see the leak. This gate builds at the
+# default -O2, where LLVM deletes an allocation nothing observes. Adding a null check on
+# malloc made the pointer escape into a compare, LLVM kept the allocation, and a leak that had
+# been there all along became visible. Confirmed by building the pre-change commit at -O0.
+#
+# Before trusting either number: the two optimization levels have DIFFERENT blind spots and
+# neither is sound alone. -O2 elides unobserved allocations. -O0 leaves stale pointers in
+# stack slots, which keeps a leaked block reachable so `leaks` stays quiet. resultMap shows
+# both sides: 2 leaks at -O2, none at -O0.
+#
+# Repro:
+#   var built = String.withCapacity(8); built.push('h')
+#   arenaModifyMut(a, h, (b: &mut Box): void => { b.items.push(built) })
+# Re-add all three in the same commit that frees the env.
 addressOf
 aesGcmLengthGuards
 aliasBehindRef
@@ -83,8 +102,6 @@ closureBlock
 closureCapture
 closureCaptureClosure
 closureCaptureDropMatrix
-closureCaptureHeap
-closureCaptureMutableLocal
 closureCapturesDropped
 closureEmptyParams
 closureInferParams
@@ -428,7 +445,6 @@ resultBasic
 resultCombinatorCopyReuse
 resultCombinators
 resultFromConversion
-resultMap
 resultMapErr
 resultOrElse
 resultPropagate

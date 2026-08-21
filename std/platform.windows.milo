@@ -337,7 +337,12 @@ pub extern fn IsThreadAFiber(): i32
 // declared as an extern. Tracking the handle ourselves is the workaround — sound because
 // every switch in the runtime goes through swapcontext below, which is the only thing
 // that can change which fiber is running.
-var currentFiber: i64 = 0
+// Per-thread by definition: this holds the handle ConvertThreadToFiber returned for THIS
+// thread, and a Windows fiber belongs to the thread that converted it. As a shared global,
+// two OS threads parking green tasks overwrote each other's current-fiber handle and
+// swapcontext switched to the wrong stack. thread_local matches what _milo_scheduler
+// already is on the darwin/linux arms.
+thread_local var currentFiber: i64 = 0
 
 pub fn getcontext(ucp: *u8): i32 {
     if IsThreadAFiber() == 0 {

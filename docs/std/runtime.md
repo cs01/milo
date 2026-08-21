@@ -150,11 +150,7 @@ _Undocumented._
 fn Promise.blocking(f: move () => T): Promise<T>
 ```
 
-Run `f` on a real OS thread for CPU-bound work or blocking FFI — anything
-that would otherwise starve the single-threaded cooperative scheduler.
-The caller never blocks here; the result arrives over the channel and is
-collected with await(), like any Promise. Fan out across N cores by
-pushing several Promise.blocking handles into Promise.all.
+_Undocumented._
 
 ### `Promise.channel`
 
@@ -492,10 +488,7 @@ _Undocumented._
 pub fn spawnOsThreadDetached(f: move () => void): void
 ```
 
-Run `f` on a detached OS thread. Detached so its resources are reclaimed at
-thread exit with no join — nothing outlives the worker (the plan's no-leak
-requirement). If main returns first, Go exit semantics abandon it, symmetric
-with an abandoned green task.
+_Undocumented._
 
 ### `sRunHead`
 

@@ -372,8 +372,7 @@ _Undocumented._
 fn Once.run(self: &Once, f: () => void): void
 ```
 
-Run `f` if nobody has yet, otherwise block until whoever did is finished.
-Returns only once the initializer has completed exactly once, process-wide.
+_Undocumented._
 
 ### `WaitGroup.add`
 

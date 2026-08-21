@@ -1,0 +1,14 @@
+// @runtime-error: out of bounds
+
+// Vec.swap GEP'd straight into the buffer and memcpy'd three times without ever loading
+// len, so this was an out-of-bounds read AND write from safe code that exited 0 with a
+// garbage value printed. Every other indexed Vec operation checked; swap was missed.
+
+pub fn main(): i32 {
+    var v: Vec<i64> = Vec.new()
+    v.push(1)
+    v.push(2)
+    v.swap(0, 999999)
+    print(v[0])
+    return 0
+}

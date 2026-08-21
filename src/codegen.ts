@@ -6465,6 +6465,10 @@ export class Codegen {
     lines.push(`${okLabel}:`);
     const payloadPtr = this.nextTemp();
     lines.push(`  ${payloadPtr} = getelementptr ${enumTy}, ptr ${enumAddr}, i32 0, i32 1`);
+    // `Result<void, E>` has no payload to extract, and LLVM rejects `load void` outright
+    // ("void type only allowed for function results"), so a `Promise<void>` failed to
+    // compile at the link step rather than anywhere a diagnostic could point at.
+    if (resultTy === "void") return [lines, "", "void"];
     const result = this.nextTemp();
     lines.push(`  ${result} = load ${resultTy}, ptr ${payloadPtr}`);
     if (this.needsDropCg(expr.type) && expr.operand.kind === "Ident") {
@@ -6593,6 +6597,10 @@ export class Codegen {
     lines.push(`${okLabel}:`);
     const payloadPtr = this.nextTemp();
     lines.push(`  ${payloadPtr} = getelementptr ${enumTy}, ptr ${enumAddr}, i32 0, i32 1`);
+    // `Result<void, E>` has no payload to extract, and LLVM rejects `load void` outright
+    // ("void type only allowed for function results"), so a `Promise<void>` failed to
+    // compile at the link step rather than anywhere a diagnostic could point at.
+    if (resultTy === "void") return [lines, "", "void"];
     const result = this.nextTemp();
     lines.push(`  ${result} = load ${resultTy}, ptr ${payloadPtr}`);
     if (this.needsDropCg(expr.type) && expr.operand.kind === "Ident") {
@@ -7940,6 +7948,22 @@ export class Codegen {
     const [bLines, bVal] = this.genExpr(expr.indexB);
     lines.push(...bLines);
 
+    // Both indices are bounds-checked. This GEP'd straight into the buffer and memcpy'd
+    // three times with no length load at all, so `v.swap(0, 999999)` was an out-of-bounds
+    // read AND write from safe code that exited 0. Every other indexed Vec operation
+    // checks; this one was simply missed.
+    const lenPtrB = this.nextTemp();
+    lines.push(`  ${lenPtrB} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 1`);
+    const lenB = this.nextTemp();
+    lines.push(`  ${lenB} = load i64, ptr ${lenPtrB}`);
+    const len32B = this.nextTemp();
+    lines.push(`  ${len32B} = trunc i64 ${lenB} to i32`);
+    for (const idx of [aVal, bVal]) {
+      const i32 = this.nextTemp();
+      lines.push(`  ${i32} = trunc i64 ${idx} to i32`);
+      this.emitBoundsCheck(lines, i32, len32B, expr.span);
+    }
+
     const dataPtr = this.nextTemp();
     lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 0`);
     const data = this.nextTemp();
@@ -8483,7 +8507,7 @@ export class Codegen {
 
   // Grow `vecPtr`'s buffer so it holds at least `needCap` elements. Leaves the
   // %Vec's data/cap fields updated; len is the caller's business.
-  private emitVecEnsureCapacity(lines: string[], vecPtr: string, needCap: string, elemSize: number, tag: string) {
+  private emitVecEnsureCapacity(lines: string[], vecPtr: string, needCap: string, elemSize: number, tag: string, span?: Span) {
     this.needsMalloc = true;
     this.needsFree = true;
     this.needsMemcpy = true;
@@ -8508,10 +8532,41 @@ export class Codegen {
     lines.push(`  ${useDbl} = icmp ugt i64 ${dbl}, ${needCap}`);
     const newCap = this.nextTemp();
     lines.push(`  ${newCap} = select i1 ${useDbl}, i64 ${dbl}, i64 ${needCap}`);
+    // newCap * elemSize was a plain `mul`, so a large enough request wrapped: malloc got a
+    // small byte count while `cap` was stored as the huge value, and every later push wrote
+    // past the buffer. Reachable from safe code via `v.reserve(n)`. Trap instead, using the
+    // same cold out-of-line handler as checked arithmetic.
+    this.needsOverflowCheck = true;
+    const mulIntrinsic = "@llvm.umul.with.overflow.i64";
+    this.usedOverflowIntrinsics.add(`declare {i64, i1} ${mulIntrinsic}(i64, i64)`);
+    const mulRes = this.nextTemp();
+    lines.push(`  ${mulRes} = call {i64, i1} ${mulIntrinsic}(i64 ${newCap}, i64 ${elemSize})`);
     const bytes = this.nextTemp();
-    lines.push(`  ${bytes} = mul i64 ${newCap}, ${elemSize}`);
+    lines.push(`  ${bytes} = extractvalue {i64, i1} ${mulRes}, 0`);
+    const mulOvf = this.nextTemp();
+    lines.push(`  ${mulOvf} = extractvalue {i64, i1} ${mulRes}, 1`);
+    const capOkLabel = this.nextLabel(`${tag}.capok`);
+    const capOvfLabel = this.nextLabel(`${tag}.capovf`);
+    lines.push(`  br i1 ${mulOvf}, label %${capOvfLabel}, label %${capOkLabel}`);
+    lines.push(`${capOvfLabel}:`);
+    const capFilePtr = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call void @__milo_overflow_fail(ptr ${capFilePtr}, i32 ${span?.line ?? 0})`);
+    lines.push(`  unreachable`);
+    lines.push(`${capOkLabel}:`);
     const newBuf = this.nextTemp();
     lines.push(`  ${newBuf} = call ptr @malloc(i64 ${bytes})`);
+    // A failed malloc returned null and the memcpy below wrote through it. Abort at the
+    // allocation instead of faulting one instruction later with no explanation.
+    const gotBuf = this.nextTemp();
+    lines.push(`  ${gotBuf} = icmp ne ptr ${newBuf}, null`);
+    const allocOkLabel = this.nextLabel(`${tag}.allocok`);
+    const allocBadLabel = this.nextLabel(`${tag}.allocbad`);
+    lines.push(`  br i1 ${gotBuf}, label %${allocOkLabel}, label %${allocBadLabel}`);
+    lines.push(`${allocBadLabel}:`);
+    const oomFilePtr = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call void @__milo_overflow_fail(ptr ${oomFilePtr}, i32 ${span?.line ?? 0})`);
+    lines.push(`  unreachable`);
+    lines.push(`${allocOkLabel}:`);
     const oldBuf = this.nextTemp();
     lines.push(`  ${oldBuf} = load ptr, ptr ${dataPtr}`);
     const len = this.nextTemp();
@@ -8562,7 +8617,7 @@ export class Codegen {
     lines.push(`  ${dstLen} = load i64, ptr ${lenPtr}`);
     const need = this.nextTemp();
     lines.push(`  ${need} = add i64 ${dstLen}, ${srcLen}`);
-    this.emitVecEnsureCapacity(lines, dstPtr, need, elemSize, "vecext");
+    this.emitVecEnsureCapacity(lines, dstPtr, need, elemSize, "vecext", expr.span);
 
     const dataPtr = this.nextTemp();
     lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${dstPtr}, i32 0, i32 0`);
@@ -8687,7 +8742,7 @@ export class Codegen {
     // hand is almost always how many they are about to push, not the final total.
     const need = this.nextTemp();
     lines.push(`  ${need} = add i64 ${len}, ${nRaw}`);
-    this.emitVecEnsureCapacity(lines, vecPtr, need, elemSize, "vecrsv");
+    this.emitVecEnsureCapacity(lines, vecPtr, need, elemSize, "vecrsv", expr.span);
     return [lines, "0", "void"];
   }
 

@@ -1,0 +1,13 @@
+// @runtime-error: overflow
+
+// Growing the buffer multiplied newCap by the element size with a plain `mul`, so a large
+// enough reserve wrapped: malloc received a small byte count while cap was stored as the
+// huge value, and every later push wrote past the allocation.
+
+pub fn main(): i32 {
+    var v: Vec<i64> = Vec.new()
+    v.reserve(2305843009213693952)
+    v.push(1)
+    print(v[0])
+    return 0
+}

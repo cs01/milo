@@ -1,24 +1,20 @@
 # Fixtures that exit with no leaked heap. Regenerate: bun scripts/leak-check.ts --write
 # Gate: bun scripts/leak-check.ts --check
 #
-# NOT on this list, and why (2026-08-21): closureCaptureHeap, closureCaptureMutableLocal and
-# resultMap leak the environment of a move-capturing closure passed to a generic fn. The env
-# is malloc'd and nothing frees it.
+# NOT on this list, and why (2026-08-21): resultMap. Its remaining leak is NOT the closure
+# environment this commit fixed and not the ok-payload the previous one fixed — it is the
+# Err payload of a DISCARDED temporary:
 #
-# They were listed as clean only because nothing could see the leak. This gate builds at the
-# default -O2, where LLVM deletes an allocation nothing observes. Adding a null check on
-# malloc made the pointer escape into a compare, LLVM kept the allocation, and a leak that had
-# been there all along became visible. Confirmed by building the pre-change commit at -O0.
+#   print(err3.map((n) => n * 10).unwrapOr(0))   // "boom-nope" is never freed
+#
+# unwrapOr reads one variant's payload out of the receiver and nothing drops the other,
+# which for a receiver that is itself a temporary leaves the Err string owned by nobody.
+# Re-add it in the same commit that drops the unconsumed payload of a temporary receiver.
 #
 # Before trusting either number: the two optimization levels have DIFFERENT blind spots and
-# neither is sound alone. -O2 elides unobserved allocations. -O0 leaves stale pointers in
-# stack slots, which keeps a leaked block reachable so `leaks` stays quiet. resultMap shows
-# both sides: 2 leaks at -O2, none at -O0.
-#
-# Repro:
-#   var built = String.withCapacity(8); built.push('h')
-#   arenaModifyMut(a, h, (b: &mut Box): void => { b.items.push(built) })
-# Re-add all three in the same commit that frees the env.
+# neither is sound alone. This gate builds at the default -O2, which elides allocations
+# nothing observes; -O0 leaves stale pointers in stack slots, which keeps a leaked block
+# reachable so `leaks` stays quiet. resultMap shows both sides: it leaks at -O2, not at -O0.
 addressOf
 aesGcmLengthGuards
 aliasBehindRef
@@ -97,11 +93,14 @@ checkedDivRem
 checkedNeg
 cLayout
 cLayoutOpaque
+closureArgEnvOwnership
 closureBasic
 closureBlock
 closureCapture
 closureCaptureClosure
 closureCaptureDropMatrix
+closureCaptureHeap
+closureCaptureMutableLocal
 closureCapturesDropped
 closureEmptyParams
 closureInferParams

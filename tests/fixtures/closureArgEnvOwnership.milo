@@ -1,0 +1,77 @@
+// @expect: hello
+// @expect: hello
+// @expect: hi
+// @expect: 5
+// @expect: 5
+// Who frees the heap environment of a `move` closure passed as an argument.
+//
+// The caller does, right after the call, because neither side otherwise can: an owning fn
+// type is not Copy, so passing the closure ends the caller's own drop of it, and the
+// callee's parameter is declared with the non-owning `(T) => R`, which the checker treats
+// as Copy — so a callee that forwarded it twice would free the same environment twice.
+// That is why the caller keeps ownership and the rule is "free after the call unless the
+// closure can outlive it" (codegen: closureParamEscapes).
+//
+// Each shape below is one arm of that rule. The leak side is pinned by tests/leak-clean.txt
+// (closureCaptureHeap, closureCaptureMutableLocal); the double-free side is pinned here,
+// because a second free of an environment is a crash, not a wrong number.
+pub struct Holder {
+    f: move (i64) => void
+}
+
+fn callIt(f: (i64) => void) {
+    f(1)
+}
+
+// Forwards TWICE. Both calls hand off the same {fn, env} pair, so nothing here may free it.
+fn forwardTwice(f: (i64) => void) {
+    callIt(f)
+    callIt(f)
+}
+
+// A parameter declared `move` IS owning: this callee registers it as a droppable local and
+// frees it at exit, so the caller must not.
+fn ownsIt(f: move () => i64): i64 {
+    return f()
+}
+
+// Keeps it past the call — the caller cannot free it either. Declaring the field (and so
+// the parameter) `move` is what hands the job to Holder's own drop glue; leave either one
+// non-owning and this environment is leaked, not double freed.
+fn hold(f: move (i64) => void): Holder {
+    return Holder {
+        f: f
+    }
+}
+
+pub fn main(): i32 {
+    var greeting = String.withCapacity(8)
+    greeting.pushStr("hello")
+    forwardTwice(move(n: i64): void => {
+        print(greeting)
+    }
+    )
+
+    var short = String.withCapacity(4)
+    short.pushStr("hi")
+    let h = hold(move(n: i64): void => {
+        print(short)
+    }
+    )
+    h.f(1)
+
+    var body = String.withCapacity(8)
+    body.pushStr("count")
+    let f = move(): i64 => {
+        return body.len
+    }
+    print(ownsIt(f))
+
+    var other = String.withCapacity(8)
+    other.pushStr("count")
+    print(ownsIt(move(): i64 => {
+        return other.len
+    }
+    ))
+    return 0
+}

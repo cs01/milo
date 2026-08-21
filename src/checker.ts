@@ -511,6 +511,11 @@ export class TypeChecker {
     // in milojs, 55 in examples/ at the census that shipped it. Default-on before the sweep
     // would bury every real warning under it. Flip it on once those reach zero.
     if (!config.denied.has("single-variant-match") && !config.expected?.has("single-variant-match")) config.allowed.add("single-variant-match");
+    // opaque-call-on-thread is OFF until the thread-boundary scan resolves function values
+    // with a statically known target. Every hit in the tree today (rg.milo, the Once
+    // fixture) is a callback that touches no global, so on-by-default would be two false
+    // positives and no true ones. Flip it on once the scan can see through `let f = bump`.
+    if (!config.denied.has("opaque-call-on-thread") && !config.expected?.has("opaque-call-on-thread")) config.allowed.add("opaque-call-on-thread");
     // index-clone is ON by default. It was off on the theory that most hits are working
     // code paying a cost the author accepted, but the lint does not fire on the cases
     // where that is true: `isCopy` skips register copies, so a `Vec<Pod>` bind is silent
@@ -3577,6 +3582,26 @@ export class TypeChecker {
         if (n.kind === "MethodCall") hit(rootOf(n.object), this.mutatesReceiver(n as unknown as Expr));
         if (n.kind === "Ident" && typeof n.name === "string") hit(n.name, false);
 
+        // A call through a value (closure, fn-typed param, C function pointer) has no static
+        // target, so the walk cannot see whether it touches a global: the check below is
+        // incomplete exactly here. The @pure walker errors in this situation, but doing that
+        // rejected `rg.milo` and the Once fixture (a callback that touches nothing), so this
+        // is an off-by-default warning until fn values with a statically known target are
+        // resolved through. Skipped entirely when the program has no mutable globals, since
+        // then an opaque call cannot reach one.
+        if (mutableGlobals.size > 0 && n.kind === "Call"
+            && (this.closureCalls.has(n as unknown as Expr) || this.cfnCalls.has(n as unknown as Expr))) {
+          const key = `${entry}|indirect|${span?.line ?? 0}:${span?.col ?? 0}`;
+          if (!reported.has(key)) {
+            reported.add(key);
+            this.warn("opaque-call-on-thread",
+              `cannot tell whether this call touches a mutable global, and it runs on a real OS thread`,
+              span,
+              `a call through a function value has no static target, so nothing here can see what it does. ` +
+              `Call a named function instead, or make the globals it may touch atomics from 'std/sync'`,
+            );
+          }
+        }
         if (n.kind === "Call" || n.kind === "EnumLit" || n.kind === "MethodCall") {
           const t = target(n as unknown as Expr);
           if (isCriticalSection(t)) {

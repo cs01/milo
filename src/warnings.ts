@@ -24,6 +24,10 @@ export const WARNINGS: WarningInfo[] = [
   { name: "manual-option-default" },
   { name: "missing-interpolation" },
   { name: "nan-comparison" },
+  // The thread-boundary global check cannot see through a call to a function value, so it
+  // is incomplete there. Off by default: every occurrence in the tree today is a callback
+  // that touches nothing, and an on-by-default warning nobody can act on is noise.
+  { name: "opaque-call-on-thread", offByDefault: true },
   { name: "shadows-stdlib-override" },
   { name: "single-variant-match", offByDefault: true },
   { name: "unused-import", offByDefault: true },

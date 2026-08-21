@@ -5776,10 +5776,7 @@ export class Codegen {
     // malloc(cap * elemSize); empty (len=0) but pre-sized so pushes up to
     // cap don't realloc. cap==0 still allocates 0 bytes — harmless, matches
     // the "buffer or null" invariant push checks (null only when cap==0).
-    const bytes = this.nextTemp();
-    lines.push(`  ${bytes} = mul i64 ${capVal}, ${elemSize}`);
-    const buf = this.nextTemp();
-    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+    const { buf: buf, bytes: bytes } = this.emitAllocBytes(lines, capVal, elemSize, "veccap", expr.span);
     const v0 = this.nextTemp();
     lines.push(`  ${v0} = insertvalue %Vec undef, ptr ${buf}, 0`);
     const v1 = this.nextTemp();
@@ -5799,10 +5796,7 @@ export class Codegen {
     this.emitNonNegativeCheck(lines, cntVal, "length", expr.span);
     const [valLines, valVal] = this.genExpr(expr.value);
     lines.push(...valLines);
-    const bytes = this.nextTemp();
-    lines.push(`  ${bytes} = mul i64 ${cntVal}, ${elemSize}`);
-    const buf = this.nextTemp();
-    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+    const { buf: buf, bytes: bytes } = this.emitAllocBytes(lines, cntVal, elemSize, "vecrep", expr.span);
     // fill loop: for i in 0..count { buf[i] = value }
     const idxSlot = this.nextTemp();
     lines.push(`  ${idxSlot} = alloca i64`);
@@ -7187,10 +7181,7 @@ export class Codegen {
     const doubled = this.nextTemp();
     lines.push(`  ${doubled} = mul i64 ${cap}, 2`);
     lines.push(`  ${newCap} = select i1 ${isZero}, i64 ${initialCap}, i64 ${doubled}`);
-    const newBytes = this.nextTemp();
-    lines.push(`  ${newBytes} = mul i64 ${newCap}, ${elemSize}`);
-    const newBuf = this.nextTemp();
-    lines.push(`  ${newBuf} = call ptr @malloc(i64 ${newBytes})`);
+    const { buf: newBuf, bytes: newBytes } = this.emitAllocBytes(lines, newCap, elemSize, "vecgrow", expr.span);
 
     // copy old data if any
     const dataPtr = this.nextTemp();
@@ -7358,10 +7349,7 @@ export class Codegen {
     this.needsMalloc = true;
 
     // allocate result buffer: malloc(len * elemSize)
-    const bufSize = this.nextTemp();
-    lines.push(`  ${bufSize} = mul i64 ${len}, ${resultElemSize}`);
-    const buf = this.nextTemp();
-    lines.push(`  ${buf} = call ptr @malloc(i64 ${bufSize})`);
+    const { buf: buf, bytes: bufSize } = this.emitAllocBytes(lines, len, resultElemSize, "vecmap", expr.span);
 
     const idxAddr = `%__map_idx.${this.scopeCounter++}.addr`;
     this.entryAllocas.push(`  ${idxAddr} = alloca i64`);
@@ -7422,10 +7410,7 @@ export class Codegen {
     this.needsMalloc = true;
 
     // allocate result buffer with capacity = source len (worst case all match)
-    const bufSize = this.nextTemp();
-    lines.push(`  ${bufSize} = mul i64 ${len}, ${elemSize}`);
-    const buf = this.nextTemp();
-    lines.push(`  ${buf} = call ptr @malloc(i64 ${bufSize})`);
+    const { buf: buf, bytes: bufSize } = this.emitAllocBytes(lines, len, elemSize, "vecfilt", expr.span);
 
     const idxAddr = `%__filter_idx.${this.scopeCounter++}.addr`;
     const outIdxAddr = `%__filter_out.${this.scopeCounter++}.addr`;
@@ -8041,10 +8026,7 @@ export class Codegen {
     lines.push(`  ${doubled} = mul i64 ${cap}, 2`);
     const newCap = this.nextTemp();
     lines.push(`  ${newCap} = select i1 ${isZero}, i64 8, i64 ${doubled}`);
-    const newBytes = this.nextTemp();
-    lines.push(`  ${newBytes} = mul i64 ${newCap}, ${elemSize}`);
-    const newBuf = this.nextTemp();
-    lines.push(`  ${newBuf} = call ptr @malloc(i64 ${newBytes})`);
+    const { buf: newBuf, bytes: newBytes } = this.emitAllocBytes(lines, newCap, elemSize, "vecgrow2", expr.span);
     const dataPtr = this.nextTemp();
     lines.push(`  ${dataPtr} = getelementptr %Vec, ptr ${vecPtr}, i32 0, i32 0`);
     const oldBuf = this.nextTemp();
@@ -8505,6 +8487,62 @@ export class Codegen {
     return [lines, result, slot.enumTy];
   }
 
+  // The one place a heap buffer is sized and allocated. `count * elemSize` was written
+  // longhand at 15 sites and not one of them checked the product, so any site reachable
+  // with a user-controlled count under-allocated on overflow (malloc got the wrapped byte
+  // count while the capacity field kept the huge one) and every later write ran past the
+  // buffer. `v.reserve(2305843009213693952)` did it from safe code.
+  //
+  // Both checks live here rather than at the call sites for the reason placesOf exists: a
+  // rule restated per site is a rule the next site forgets. tests/allocChokePoint.test.ts
+  // holds `call ptr @malloc` to this function.
+  private emitAllocBytes(lines: string[], count: string, elemSize: string | number, tag: string, span?: Span): { buf: string; bytes: string } {
+    this.needsMalloc = true;
+    const bothConst = /^\d+$/.test(String(count)) && /^\d+$/.test(String(elemSize));
+    let bytes: string;
+    if (bothConst) {
+      // A product of two literals is folded here; it cannot overflow at runtime.
+      bytes = String(BigInt(String(count)) * BigInt(String(elemSize)));
+    } else if (String(elemSize) === "1") {
+      bytes = String(count);
+    } else {
+      this.needsOverflowCheck = true;
+      const intrinsic = "@llvm.umul.with.overflow.i64";
+      this.usedOverflowIntrinsics.add(`declare {i64, i1} ${intrinsic}(i64, i64)`);
+      const res = this.nextTemp();
+      lines.push(`  ${res} = call {i64, i1} ${intrinsic}(i64 ${count}, i64 ${elemSize})`);
+      const prod = this.nextTemp();
+      lines.push(`  ${prod} = extractvalue {i64, i1} ${res}, 0`);
+      const ovf = this.nextTemp();
+      lines.push(`  ${ovf} = extractvalue {i64, i1} ${res}, 1`);
+      const ok = this.nextLabel(`${tag}.szok`);
+      const bad = this.nextLabel(`${tag}.szovf`);
+      lines.push(`  br i1 ${ovf}, label %${bad}, label %${ok}`);
+      lines.push(`${bad}:`);
+      const fp = this.emitCheckFilePtr(lines, span);
+      lines.push(`  call void @__milo_overflow_fail(ptr ${fp}, i32 ${span?.line ?? 0})`);
+      lines.push(`  unreachable`);
+      lines.push(`${ok}:`);
+      bytes = prod;
+    }
+    const buf = this.nextTemp();
+    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+    // A failed malloc returned null and the memcpy that follows every one of these sites
+    // wrote through it. Abort at the allocation instead of faulting with no explanation.
+    this.needsOverflowCheck = true;
+    const got = this.nextTemp();
+    lines.push(`  ${got} = icmp ne ptr ${buf}, null`);
+    const aok = this.nextLabel(`${tag}.aok`);
+    const abad = this.nextLabel(`${tag}.abad`);
+    lines.push(`  br i1 ${got}, label %${aok}, label %${abad}`);
+    lines.push(`${abad}:`);
+    const fp2 = this.emitCheckFilePtr(lines, span);
+    lines.push(`  call void @__milo_overflow_fail(ptr ${fp2}, i32 ${span?.line ?? 0})`);
+    lines.push(`  unreachable`);
+    lines.push(`${aok}:`);
+    return { buf, bytes };
+  }
+
   // Grow `vecPtr`'s buffer so it holds at least `needCap` elements. Leaves the
   // %Vec's data/cap fields updated; len is the caller's business.
   private emitVecEnsureCapacity(lines: string[], vecPtr: string, needCap: string, elemSize: number, tag: string, span?: Span) {
@@ -8532,41 +8570,7 @@ export class Codegen {
     lines.push(`  ${useDbl} = icmp ugt i64 ${dbl}, ${needCap}`);
     const newCap = this.nextTemp();
     lines.push(`  ${newCap} = select i1 ${useDbl}, i64 ${dbl}, i64 ${needCap}`);
-    // newCap * elemSize was a plain `mul`, so a large enough request wrapped: malloc got a
-    // small byte count while `cap` was stored as the huge value, and every later push wrote
-    // past the buffer. Reachable from safe code via `v.reserve(n)`. Trap instead, using the
-    // same cold out-of-line handler as checked arithmetic.
-    this.needsOverflowCheck = true;
-    const mulIntrinsic = "@llvm.umul.with.overflow.i64";
-    this.usedOverflowIntrinsics.add(`declare {i64, i1} ${mulIntrinsic}(i64, i64)`);
-    const mulRes = this.nextTemp();
-    lines.push(`  ${mulRes} = call {i64, i1} ${mulIntrinsic}(i64 ${newCap}, i64 ${elemSize})`);
-    const bytes = this.nextTemp();
-    lines.push(`  ${bytes} = extractvalue {i64, i1} ${mulRes}, 0`);
-    const mulOvf = this.nextTemp();
-    lines.push(`  ${mulOvf} = extractvalue {i64, i1} ${mulRes}, 1`);
-    const capOkLabel = this.nextLabel(`${tag}.capok`);
-    const capOvfLabel = this.nextLabel(`${tag}.capovf`);
-    lines.push(`  br i1 ${mulOvf}, label %${capOvfLabel}, label %${capOkLabel}`);
-    lines.push(`${capOvfLabel}:`);
-    const capFilePtr = this.emitCheckFilePtr(lines, span);
-    lines.push(`  call void @__milo_overflow_fail(ptr ${capFilePtr}, i32 ${span?.line ?? 0})`);
-    lines.push(`  unreachable`);
-    lines.push(`${capOkLabel}:`);
-    const newBuf = this.nextTemp();
-    lines.push(`  ${newBuf} = call ptr @malloc(i64 ${bytes})`);
-    // A failed malloc returned null and the memcpy below wrote through it. Abort at the
-    // allocation instead of faulting one instruction later with no explanation.
-    const gotBuf = this.nextTemp();
-    lines.push(`  ${gotBuf} = icmp ne ptr ${newBuf}, null`);
-    const allocOkLabel = this.nextLabel(`${tag}.allocok`);
-    const allocBadLabel = this.nextLabel(`${tag}.allocbad`);
-    lines.push(`  br i1 ${gotBuf}, label %${allocOkLabel}, label %${allocBadLabel}`);
-    lines.push(`${allocBadLabel}:`);
-    const oomFilePtr = this.emitCheckFilePtr(lines, span);
-    lines.push(`  call void @__milo_overflow_fail(ptr ${oomFilePtr}, i32 ${span?.line ?? 0})`);
-    lines.push(`  unreachable`);
-    lines.push(`${allocOkLabel}:`);
+    const { buf: newBuf } = this.emitAllocBytes(lines, newCap, elemSize, tag, span);
     const oldBuf = this.nextTemp();
     lines.push(`  ${oldBuf} = load ptr, ptr ${dataPtr}`);
     const len = this.nextTemp();
@@ -8814,8 +8818,7 @@ export class Codegen {
     lines.push(`  ${doubled} = mul i64 ${cap}, 2`);
     const newCap = this.nextTemp();
     lines.push(`  ${newCap} = select i1 ${isZero}, i64 16, i64 ${doubled}`);
-    const newBuf = this.nextTemp();
-    lines.push(`  ${newBuf} = call ptr @malloc(i64 ${newCap})`);
+    const { buf: newBuf } = this.emitAllocBytes(lines, newCap, 1, "strgrow", undefined);
 
     const dataPtr = this.nextTemp();
     lines.push(`  ${dataPtr} = getelementptr %String, ptr ${strPtr}, i32 0, i32 0`);
@@ -8920,8 +8923,7 @@ export class Codegen {
     lines.push(`  ${doubleFits} = icmp ugt i64 ${doubled}, ${need}`);
     const newCap = this.nextTemp();
     lines.push(`  ${newCap} = select i1 ${doubleFits}, i64 ${doubled}, i64 ${need}`);
-    const newBuf = this.nextTemp();
-    lines.push(`  ${newBuf} = call ptr @malloc(i64 ${newCap})`);
+    const { buf: newBuf } = this.emitAllocBytes(lines, newCap, 1, "strrsv", undefined);
     const hasData = this.nextTemp();
     lines.push(`  ${hasData} = icmp ne ptr ${oldBuf}, null`);
     const copyLabel = this.nextLabel("strs.copy");
@@ -9712,10 +9714,7 @@ export class Codegen {
     lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
     const entrySizeI = this.nextTemp();
     lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
-    const totalSize = this.nextTemp();
-    lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, 8`);
-    const dataPtr = this.nextTemp();
-    lines.push(`  ${dataPtr} = call ptr @malloc(i64 ${totalSize})`);
+    const { buf: dataPtr, bytes: totalSize } = this.emitAllocBytes(lines, entrySizeI, 8, "hmnew", expr.span);
     // zero the memory
     this.needsMemset = true;
     lines.push(`  call ptr @memset(ptr ${dataPtr}, i32 0, i64 ${totalSize})`);
@@ -9834,10 +9833,7 @@ export class Codegen {
     lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
     const entrySizeI = this.nextTemp();
     lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
-    const newTotalSize = this.nextTemp();
-    lines.push(`  ${newTotalSize} = mul i64 ${entrySizeI}, ${newCap}`);
-    const newData = this.nextTemp();
-    lines.push(`  ${newData} = call ptr @malloc(i64 ${newTotalSize})`);
+    const { buf: newData, bytes: newTotalSize } = this.emitAllocBytes(lines, entrySizeI, newCap, "hmresize", expr.span);
     this.needsMemset = true;
     lines.push(`  call ptr @memset(ptr ${newData}, i32 0, i64 ${newTotalSize})`);
     // rehash all occupied entries from old data
@@ -10352,10 +10348,7 @@ export class Codegen {
     lines.push(`  ${entrySize} = getelementptr ${entryTy}, ptr null, i32 1`);
     const entrySizeI = this.nextTemp();
     lines.push(`  ${entrySizeI} = ptrtoint ptr ${entrySize} to i64`);
-    const totalSize = this.nextTemp();
-    lines.push(`  ${totalSize} = mul i64 ${entrySizeI}, ${cap}`);
-    const dataPtr = this.nextTemp();
-    lines.push(`  ${dataPtr} = call ptr @malloc(i64 ${totalSize})`);
+    const { buf: dataPtr, bytes: totalSize } = this.emitAllocBytes(lines, entrySizeI, cap, "hmwith", expr.span);
     lines.push(`  call ptr @memset(ptr ${dataPtr}, i32 0, i64 ${totalSize})`);
 
     const s0 = this.nextTemp();
@@ -10496,10 +10489,7 @@ export class Codegen {
     lines.push(`  ${len} = extractvalue %HashMap ${ov}, 1`);
     const cap = this.nextTemp();
     lines.push(`  ${cap} = extractvalue %HashMap ${ov}, 2`);
-    const bytes = this.nextTemp();
-    lines.push(`  ${bytes} = mul i64 ${len}, ${elemSize}`);
-    const buf = this.nextTemp();
-    lines.push(`  ${buf} = call ptr @malloc(i64 ${bytes})`);
+    const { buf: buf, bytes: bytes } = this.emitAllocBytes(lines, len, elemSize, "hmvals", expr.span);
 
     const iAddr = this.nextTemp();
     lines.push(`  ${iAddr} = alloca i64`);
@@ -11675,10 +11665,7 @@ export class Codegen {
       lines.push(`  br i1 ${isEmpty}, label %${endLabel}, label %${allocLabel}`);
 
       lines.push(`${allocLabel}:`);
-      const bytes = this.nextTemp();
-      lines.push(`  ${bytes} = mul i64 ${vecLen}, ${elemSize}`);
-      const newBuf = this.nextTemp();
-      lines.push(`  ${newBuf} = call ptr @malloc(i64 ${bytes})`);
+      const { buf: newBuf, bytes: bytes } = this.emitAllocBytes(lines, vecLen, elemSize, "vecclone", undefined);
       lines.push(`  store ptr ${newBuf}, ptr ${newBufAddr}`);
 
       if (this.needsDropCg(typeKind.element)) {
@@ -11807,10 +11794,7 @@ export class Codegen {
       lines.push(`  ${entrySizePtr} = getelementptr ${entryTy}, ptr null, i32 1`);
       const entrySize = this.nextTemp();
       lines.push(`  ${entrySize} = ptrtoint ptr ${entrySizePtr} to i64`);
-      const bytes = this.nextTemp();
-      lines.push(`  ${bytes} = mul i64 ${cap}, ${entrySize}`);
-      const newBuf = this.nextTemp();
-      lines.push(`  ${newBuf} = call ptr @malloc(i64 ${bytes})`);
+      const { buf: newBuf, bytes: bytes } = this.emitAllocBytes(lines, cap, entrySize, "hmclone", undefined);
       lines.push(`  call ptr @memcpy(ptr ${newBuf}, ptr ${srcData}, i64 ${bytes})`);
 
       if (this.needsDropCg(keyType) || this.needsDropCg(valueType)) {

@@ -3,7 +3,7 @@ system: breaking-changes
 purpose: source-level breaks users have to act on, with the migration and the reason a compat shim was impossible
 key-files: std/platform.*.milo, std/mem.milo, std/os.milo, std/string.milo, std/strconv.milo, std/uuid.milo, std/ws.milo, std/fetch.milo, std/zstd.milo, std/base64.milo, std/base32.milo, std/hex.milo, std/csv.milo
 update-when: a public stdlib name moves, is renamed, or changes signature
-last-verified: 2026-08-14
+last-verified: 2026-08-22
 -->
 
 # Breaking changes
@@ -16,6 +16,30 @@ Below 1.0 the MINOR is the breaking position: everything in this file shipped in
 `"milo": "^0.1.0"` in its `milo.json` (see
 [the package manager plan](plans/package-manager.md#the-milo-constraint)). A release
 marker is added here each time a version is cut.
+
+## `std/net.gSigpipeIgnored` is no longer public (2026-08-22)
+
+**The `gSigpipeIgnored` global is now private to `std/net`.** Nothing outside that module
+referenced it, so the migration for almost everyone is nothing.
+
+It was never a useful thing to reach: reading it told you only whether some earlier call
+had already installed the SIGPIPE handler, and writing it could suppress the install
+entirely. `ignoreSigpipe()` remains public and is the whole supported surface. If you were
+reading the flag to decide whether to call `ignoreSigpipe()`, just call it; it is a
+one-shot and the repeat calls are free.
+
+It went private as part of fixing a real race. The old guard was
+
+```milo
+if gSigpipeIgnored { return }
+gSigpipeIgnored = true
+```
+
+which is a read-modify-write that two threads can both pass. `TcpStream.connect` calls it,
+and `connect` is reachable from a `Promise.blocking` worker, so this was reachable
+concurrently in practice (milojs gets there through `fetch`). It is now a
+compare-and-swap, and a mutable global that must only be touched atomically has no
+business being public.
 
 ## `std/sysinfo`'s identity calls return u32 MAX on Windows, not 0 (2026-08-16)
 

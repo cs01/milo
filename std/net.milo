@@ -250,14 +250,25 @@ impl Drop for TcpListener {
 // status 141 and nothing logged. Every runtime that serves connections ignores
 // it and deals with the EPIPE that write() returns instead. Called when a
 // listener or a stream is created, so any program doing socket IO is covered.
-pub var gSigpipeIgnored: bool = false
+// One-shot, done with an atomic compare-and-swap rather than `if flag { return };
+// flag = true`. That read-modify-write is not atomic, and connect() is reachable from
+// a Promise.blocking worker (milojs reaches it through fetch), so two OS threads could
+// both fall through the guard.
+//
+// Not std/sync's Once, deliberately: a Once owns a malloc'd control block, so it needs
+// an initializer that RUNS, and a `--no-entry` object (milojs embeds one) has no entry
+// point to run global initializers in. A bool with a constant initializer works in both
+// builds, and the CAS is the whole synchronization this needs.
+var gSigpipeIgnored: bool = false
 
 pub fn ignoreSigpipe(): void {
-    if gSigpipeIgnored {
-        return
-    }
-    gSigpipeIgnored = true
     unsafe {
+        // The CAS returns the value that WAS there (std/sync's AtomicBool.cas
+        // documents the same convention), so false means this caller is the one
+        // that claimed the flag and true means somebody already had.
+        if _atomicCasBool((gSigpipeIgnored.addrOf()) as *u8, false, true) {
+            return
+        }
         // SIGPIPE is 13 on both darwin and linux; SIG_IGN is the handler value 1
         let _prev = signal(13, 1 as *u8)
     }

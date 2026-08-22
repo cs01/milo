@@ -1,0 +1,49 @@
+// @expect: borrowed fd=3
+// @expect: field fd=4
+// @expect: taken fd=5
+// @expect: close(3)
+// @expect: close(4)
+// @expect: close(5)
+// The spellings that stay legal for a Drop element, so the rule above is a redirect
+// rather than a wall: borrow it, read one field of it, or take it out for real.
+struct Fd {
+    fd: i32,
+}
+
+impl Drop for Fd {
+    fn drop(self: &mut Self): void {
+        if self.fd > 0 {
+            print("close(" + self.fd.toString() + ")")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    var v: Vec<Fd> = Vec.new()
+    v.push(Fd {
+        fd: 3
+    }
+    )
+    v.push(Fd {
+        fd: 4
+    }
+    )
+    v.push(Fd {
+        fd: 5
+    }
+    )
+
+    // borrow: binds by reference, copies nothing
+    for f in v {
+        print("borrowed fd=" + f.fd.toString())
+        break
+    }
+
+    // field read: materialises no element
+    print("field fd=" + v[1].fd.toString())
+
+    // take it out for real: the container gives up its owner
+    let taken = v.pop()!
+    print("taken fd=" + taken.fd.toString())
+    return 0
+}

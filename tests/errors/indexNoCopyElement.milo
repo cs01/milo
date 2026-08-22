@@ -1,0 +1,22 @@
+// @error: cannot take 'Texture' out of a container by index: it carries @noCopy
+// docs/language-reference.md says of @noCopy handles that "releasing twice, or using
+// after release, is a compile error". Through the index spelling it was not: this
+// program released texture 7 twice and only warned.
+@noCopy
+struct Texture {
+    id: u32,
+}
+
+fn release(t: Texture): void {
+    print("glDeleteTextures " + t.id.toString())
+}
+
+pub fn main(): i32 {
+    var v: Vec<Texture> = Vec.new()
+    v.push(Texture { id: 7 })
+    let a = v[0]
+    let b = v[0]
+    release(a)
+    release(b)
+    return 0
+}

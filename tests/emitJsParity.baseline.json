@@ -108,6 +108,7 @@
   "httpFetchCoexist.milo": "noEmit",
   "httpMiddleware.milo": "noEmit",
   "httpRenderResponse.milo": "noEmit",
+  "indexResourceAllowed.milo": "noEmit",
   "intLiteral64.milo": "mismatch",
   "intMinLiteral.milo": "mismatch",
   "ioFileStream.milo": "noEmit",

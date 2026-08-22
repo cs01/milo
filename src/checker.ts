@@ -741,7 +741,38 @@ export class TypeChecker {
   // `Vec<i64>` costs nothing, `Vec<Mark>` costs an allocation per heap field, per row,
   // per iteration. `for m in v` binds by reference and clones nothing, so the cheap
   // spelling already exists — it is just undiscoverable at the moment it matters.
+  // A struct whose duplication has a MEANING beyond copying bytes: a Drop impl that
+  // releases something, or `@noCopy` on a handle. Returns which, for the diagnostic.
+  private resourceKind(ty: TypeKind): "Drop" | "@noCopy" | null {
+    if (ty.tag !== "struct") return null;
+    if (this.dropImpls.has(ty.name)) return "Drop";
+    return this.structs.get(ty.name)?.noCopy ? "@noCopy" : null;
+  }
+
   private lintIndexClone(value: Expr, ty: TypeKind, span?: Span) {
+    // Taking a Drop or @noCopy element out of a container by INDEX is an error, not a
+    // lint, and the check sits above the allow-gate because `--allow=index-clone`
+    // silences a cost, not a double release.
+    //
+    // The index path copies memberwise and consults neither mechanism, so both ways of
+    // saying "this handle has exactly one owner" were bypassed by one spelling:
+    // `let a = v[0]` on a `Vec<Fd>` closed the same descriptor twice, and on a
+    // `@noCopy` handle released it twice, each with only a warning. The field spelling
+    // of the same operation already errors. This makes the two agree.
+    if (value.kind === "IndexAccess" && ty.tag !== "ref") {
+      const res = this.resourceKind(ty);
+      if (res) {
+        this.error(
+          `cannot take '${typeName(ty)}' out of a container by index: it carries ${res}`,
+          span,
+          `indexing copies the element memberwise, so the copy and the container's own ` +
+          `element would each release it. Borrow it instead ('for x in <container>', or ` +
+          `read one field: 'v[i].n'), or take it out for real with 'v.remove(i)' or ` +
+          `'v.pop()' so the container gives up its owner.`,
+        );
+        return;
+      }
+    }
     if (this.warningConfig.allowed.has("index-clone")) return;
     // Fork tails count: `if c { v[0] } else { v[1] }` clones whichever arm runs, and the
     // reader has no more reason to expect an allocation there than in the direct form.

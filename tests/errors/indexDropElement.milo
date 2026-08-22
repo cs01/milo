@@ -1,0 +1,24 @@
+// @error: cannot take 'Fd' out of a container by index: it carries Drop
+// Indexing copies an element memberwise and consults neither Drop nor @noCopy, so
+// `let a = v[0]` on a Vec<Fd> made a second owner of the same descriptor and closed
+// it twice — printed close(3) twice, with only a warning. std/io's File, std/net's
+// TcpStream and std/http's Socket are all this shape.
+struct Fd {
+    fd: i32,
+}
+
+impl Drop for Fd {
+    fn drop(self: &mut Self): void {
+        if self.fd > 0 {
+            print("close(" + self.fd.toString() + ")")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    var v: Vec<Fd> = Vec.new()
+    v.push(Fd { fd: 3 })
+    let a = v[0]
+    print("got " + a.fd.toString())
+    return 0
+}

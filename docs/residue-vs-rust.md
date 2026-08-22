@@ -62,9 +62,10 @@ argument is the move checker that already shipped, plus `@noCopy` on the window,
 same window to two workers is a compile error rather than a race.
 
 Measured on a 10-core machine, 20M `f64`, 4 workers, against the C program doing the banned thing
-(pthreads over one shared buffer): Milo 3 ms / 170.9 MB, C 4 ms / 161.4 MB, Milo sequential
-6 ms / 161.4 MB. The copy tax is gone; what remains is a flat 9.5 MB of worker stacks, the same
-9.5 MB at 40M elements.
+(pthreads over one shared buffer): Milo 3 ms / 163.0 MiB, C 3 ms / 154.0 MiB, Milo sequential
+6 ms / 153.9 MiB. Times at this size are bandwidth-bound and move around in the 3-7 ms band run to
+run; the memory figures are stable to a tenth of a MiB. The copy tax is gone; what remains is a flat 9.1 MiB of worker stacks, the same
+fixed cost at 40M elements. Reproduce with `sh benchmarks/shard/run.sh`.
 
 What does NOT close: `weld` verifies at RUNTIME that every window came back, because a window is a
 pointer into the owner's buffer and dropping the owner early is a use-after-free nothing here

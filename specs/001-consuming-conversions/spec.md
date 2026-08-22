@@ -325,16 +325,16 @@ match or beat on equal hardware.
 
 - **SC-001**: A parallel elementwise transform over a large array uses no more peak memory than the
   sequential version of the same program, within 5%, where today it uses roughly twice as much.
-  **MEASURED 2026-08-22 (10-core, 20M f64, 4 workers, --release): 170.9 MB against 161.4 MB
+  **MEASURED 2026-08-22 (10-core, 20M f64, 4 workers, --release): 163.0 MiB against 153.9 MiB
   sequential, which is +5.9% and MISSES the 5% budget as written.** The overshoot is not element
-  copies: the delta is a flat 9.5 MB, and it is the same 9.5 MB at 40M elements, where it comes to
+  copies: the delta is a flat 9.1 MiB, and it is the same fixed cost at 40M elements, where it comes to
   +3.0% and passes. It is the worker stacks and the promise machinery, a fixed cost the criterion
   did not account for. The claim the criterion was really making does hold: the copy tax is gone,
   where the approach this replaces roughly doubled peak memory.
 - **SC-002**: That same parallel transform completes within 1.3x of the equivalent C program using
   threads over one shared buffer, on the same hardware, where today it is roughly 5x slower.
-  **MEASURED 2026-08-22: 3 ms against C pthreads at 4 ms on the same machine, with identical
-  checksums; sequential Milo is 6 ms.** Met, and at parity rather than merely within 1.3x. Note the
+  **MEASURED 2026-08-22 via `sh benchmarks/shard/run.sh`: 3 ms against C pthreads at 3 ms on the
+  same machine, with identical checksums; sequential Milo is 6 ms.** Met, and at parity rather than merely within 1.3x. Note the
   Milo `Vec` must be built with `Vec.withCapacity` to compare fairly: growing one by pushing peaks
   at roughly 2.7x the final size during the doubling reallocs, which is a Vec construction cost
   unrelated to this feature and dwarfs it.

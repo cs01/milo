@@ -74,3 +74,21 @@ malloc, recoverable by linking mimalloc/snmalloc if it ever matters.
 Hylo runs only fib: its stdlib has no `Movable` conformance for `Float64`, so `Array<Float64>`
 does not instantiate, and there is no float `print`. The 5.7× on fib is a debug-build `hc`
 (there is no release distribution) emitting unoptimized calls, not a claim about the language.
+
+## shard: parallelism that does not copy
+
+`sh benchmarks/shard/run.sh` is separate from `run.sh` above because it reports peak
+memory as well as time, and hyperfine does not measure memory. Memory is the whole
+claim there: the move-only route to parallelism used to force a copy per worker, and
+`std/shard` exists so that it does not.
+
+| | time | peak memory |
+|---|---|---|
+| milo sequential, in place | 6 ms | 153.9 MiB |
+| milo shatter/weld, 4 workers | 3 ms | 163.0 MiB |
+| c pthreads over one shared buffer | 3 ms | 154.0 MiB |
+
+20M `f64`, `a[i] = a[i] * 1.0000001 + 0.5`, best of 3, Apple M-series, `--release`.
+The loop is memory-bandwidth-bound, so the times sit in a 3-7 ms band run to run and
+four workers buy well under 4x. The memory numbers are stable: the 9.1 MiB the
+parallel row adds is worker stacks, a fixed cost that does not grow with n.

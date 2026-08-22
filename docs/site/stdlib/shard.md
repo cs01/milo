@@ -93,11 +93,17 @@ Measured on a 10-core machine, 20M `f64`, `a[i] = a[i] * 1.0000001 + 0.5`, 4 wor
 
 | | time | peak memory |
 |---|---|---|
-| sequential, in place | 6 ms | 161.4 MB |
-| shatter/weld, 4 workers | 3 ms | 170.9 MB |
-| C, pthreads over one shared buffer | 4 ms | 161.4 MB |
+| sequential, in place | 6 ms | 153.9 MiB |
+| shatter/weld, 4 workers | 3 ms | 163.0 MiB |
+| C, pthreads over one shared buffer | 3 ms | 154.0 MiB |
 
-The point is the memory column. The copying approach this replaces roughly doubles peak memory; shatter/weld adds a flat 9.5 MB, which is the worker stacks and is the same 9.5 MB at 40M elements. As a percentage that is 5.9% at 20M and 3.0% at 40M.
+Reproduce with `sh benchmarks/shard/run.sh`.
+
+Read the time column loosely: this loop is memory-bandwidth-bound, so at 20M elements every row
+lands somewhere in 3-7 ms run to run and four workers buy less than four times anything. The memory
+column is the stable number and it is the one being claimed.
+
+The point is the memory column. The copying approach this replaces roughly doubles peak memory; shatter/weld adds a flat 9.1 MiB, which is the worker stacks and is the same fixed cost at 40M elements. As a percentage that is 5.9% at 20M and 3.0% at 40M.
 
 Build the `Vec` with `Vec.withCapacity` if you know the size. Growing one by pushing peaks at roughly 2.7x the final size during the doubling reallocs, which dwarfs anything this module does.
 

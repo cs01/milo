@@ -1,0 +1,25 @@
+// Sequential in-place transform: the baseline the parallel version must not cost
+// more memory than. Vec.withCapacity, not push-and-grow, so the measurement is the
+// transform rather than the doubling reallocs of building the buffer.
+from "std/time" import {
+    epochMillis
+}
+
+pub fn main(): i32 {
+    let n: i64 = 20000000
+    var v: Vec<f64> = Vec.withCapacity(n)
+    var i: i64 = 0
+    while i < n {
+        v.push(1.0)
+        i = i + 1
+    }
+    let t0 = epochMillis()
+    var j: i64 = 0
+    while j < n {
+        v[j] = v[j] * 1.0000001 + 0.5
+        j = j + 1
+    }
+    let t1 = epochMillis()
+    print("seq ms=" + (t1 - t0).toString() + " check=" + (v[0] + v[n - 1]).toString())
+    return 0
+}

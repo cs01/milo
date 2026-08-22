@@ -1,0 +1,71 @@
+// @expect: len=27
+// @expect: name
+// @expect: milo
+// @expect: eq-keyword=true
+// @expect: eq-wrong=false
+// @expect: eqSpan=true
+// @expect: holds-foreign=false
+// @expect: bytes=4
+// @expect: unsealed=27
+from "std/seal" import {
+    Sealed, Span, seal
+}
+
+struct Token {
+    kind: i64,
+    at: Span,
+}
+
+pub fn main(): i32 {
+    var buf: string = "{\"name\":\"milo\",\"name\":\"x\"}"
+    buf.push('!')
+    let src = seal(buf)
+    print("len=" + src.len().toString())
+
+    // Spans stored in a struct, in a Vec, outliving the expression that made
+    // them. No reference is stored and nothing is copied.
+    var toks: Vec<Token> = Vec.new()
+    toks.push(Token {
+        kind: 1, at: Span {
+            start: 2, len: 4
+        }
+    }
+    )
+    toks.push(Token {
+        kind: 2, at: Span {
+            start: 9, len: 4
+        }
+    }
+    )
+    toks.push(Token {
+        kind: 1, at: Span {
+            start: 16, len: 4
+        }
+    }
+    )
+
+    print(src.text(toks[0].at))
+    print(src.text(toks[1].at))
+
+    // The comparison a scanner actually wants: no allocation.
+    print("eq-keyword=" + src.eq(toks[0].at, "name").toString())
+    print("eq-wrong=" + src.eq(toks[1].at, "name").toString())
+    print("eqSpan=" + src.eqSpan(toks[0].at, toks[2].at).toString())
+
+    // A span that does not fit is rejected rather than read.
+    let foreign: Span = Span {
+        start: 100, len: 4
+    }
+    print("holds-foreign=" + src.holds(foreign).toString())
+
+    var n = 0
+    src.each(toks[1].at, (b: u8): void => {
+        n = n + 1
+    }
+    )
+    print("bytes=" + n.toString())
+
+    let back = src.unseal()
+    print("unsealed=" + back.len.toString())
+    return 0
+}

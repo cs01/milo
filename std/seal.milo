@@ -1,0 +1,211 @@
+// std/seal — stored zero-copy: keep views into an input buffer without storing references.
+//
+// The problem this solves: a lexer, parser or deserializer wants to hold on to
+// many small pieces of a large input. Copying each piece into its own string is
+// an allocation per piece (3M of them, in the benchmark this module was written
+// against). Milo cannot store a `&string` instead, because references are
+// second-class. The usual workaround is to keep (start, len) offsets into a
+// buffer you also keep, which works right up until something mutates or
+// reallocates the buffer under the offsets, and nothing stops that.
+//
+// So remove the mutation rather than check for it:
+//
+//     var buf = readFile("input.json")!
+//     let src = seal(buf)          // consumes buf; `buf` is moved
+//     // buf.push(...)             // does not compile: `buf` was moved
+//     // src.push(...)             // does not compile: Sealed has no such method
+//
+//     var tokens: Vec<Token> = Vec.new()
+//     tokens.push(Token { kind: TokenKind.Str, at: Span { start: 12, len: 5 } })
+//     let text = src.text(tokens[0].at)     // materialise ONE piece, on demand
+//
+// A Span is two integers. It is Copy, it holds no pointer, it can live in a
+// struct field, a Vec, a map key, or a serialised record, and it costs nothing
+// to keep. It touches memory only when you resolve it against a Sealed.
+//
+// What makes the offsets safe is not care, it is that `Sealed` exposes no
+// operation that could invalidate them. There is no check to forget and no
+// unsafe block in this file.
+//
+// The honest gap, stated before you find it: a Span carries no record of WHICH
+// buffer it came from. Resolve one against the wrong Sealed and you get the
+// wrong bytes, or a bounds abort if the range does not fit. That is a logic
+// error, deterministic, never memory-unsafety. Tying a span to one buffer at
+// compile time needs a lifetime or a brand to carry the tie, and neither exists
+// under this language's axiom. See docs/residue-vs-rust.md.
+
+// A start and a length, in bytes. Plain data: copy it, store it, serialise it.
+// Meaningful only against the Sealed it was measured from.
+@derive(Eq)
+pub struct Span {
+    start: i64,
+    len: i64,
+}
+
+// One past the last byte. The half-open end, which is what substr wants.
+pub fn spanEnd(s: Span): i64 {
+    return s.start + s.len
+}
+
+pub fn spanIsEmpty(s: Span): bool {
+    return s.len <= 0
+}
+
+// An immutable byte buffer. Produced by consuming a string with `seal`; the
+// only way back to a mutable buffer is `unseal`, which consumes this.
+//
+// Every method here reads. That is the whole design: mutation is not rejected
+// by a check, it is absent from the type.
+pub struct Sealed {
+    data: string,
+}
+
+// Consume a buffer and return it sealed. O(1): the bytes are moved, not copied.
+pub fn seal(s: string): Sealed {
+    var out: Sealed = Sealed {
+        data: s
+    }
+    return out
+}
+
+// Hand the buffer back, mutable again. Consumes the Sealed, so no span holder
+// can still be relying on it through THIS binding.
+//
+// Spans measured against it are of course still just integers, and will read a
+// buffer that is now free to change. That is the same offsets-by-convention
+// situation this module exists to replace, so unseal is the point at which the
+// guarantee ends, deliberately and visibly.
+pub fn unseal(s: Sealed): string {
+    return s.data
+}
+
+pub fn sealedLen(s: &Sealed): i64 {
+    return s.data.len
+}
+
+// A span covering the whole buffer.
+pub fn sealedSpan(s: &Sealed): Span {
+    var sp: Span = Span {
+        start: 0, len: s.data.len
+    }
+    return sp
+}
+
+// Whether `sp` fits inside this buffer. Cheap; use it when a span from an
+// untrusted source might not belong here.
+pub fn sealedHolds(s: &Sealed, sp: Span): bool {
+    if sp.start < 0 || sp.len < 0 {
+        return false
+    }
+    return sp.start + sp.len <= s.data.len
+}
+
+pub fn sealedByteAt(s: &Sealed, i: i64): u8 {
+    assert(i >= 0 && i < s.data.len, "sealed: byte index out of range")
+    return s.data[i]
+}
+
+// Materialise the span as an owned string. THIS is the allocation, and it is
+// the only one: naming it `text` rather than hiding it behind indexing is the
+// point, so a reader can see where the copies are.
+pub fn sealedText(s: &Sealed, sp: Span): string {
+    assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
+    return s.data.substr(sp.start, sp.start + sp.len)
+}
+
+// Compare a span against a string WITHOUT materialising it. This is what keeps
+// a scanner's keyword checks off the allocator: the common operation on a
+// retained piece is comparing it, not owning it.
+pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
+    if !sealedHolds(s, sp) {
+        return false
+    }
+    if sp.len != other.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < sp.len {
+        if s.data[sp.start + i] != other[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Whether two spans name equal bytes in this buffer, again without copying.
+pub fn sealedEqSpan(s: &Sealed, a: Span, b: Span): bool {
+    if !sealedHolds(s, a) || !sealedHolds(s, b) {
+        return false
+    }
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if s.data[a.start + i] != s.data[b.start + i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Read the span's bytes one at a time without materialising it. The borrowing
+// form: `f` sees each byte, nothing is allocated.
+pub fn sealedEach(s: &Sealed, sp: Span, f: (u8) => void): void {
+    assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
+    var i: i64 = 0
+    while i < sp.len {
+        f(s.data[sp.start + i])
+        i = i + 1
+    }
+}
+
+impl Sealed {
+    // Bytes held.
+    fn len(self: &Self): i64 {
+        return sealedLen(self)
+    }
+
+    // A span over the whole buffer.
+    fn span(self: &Self): Span {
+        return sealedSpan(self)
+    }
+
+    // Whether `sp` fits here. Branch on this for a span you did not measure
+    // yourself; `text` aborts instead.
+    fn holds(self: &Self, sp: Span): bool {
+        return sealedHolds(self, sp)
+    }
+
+    // The byte at `i`, bounds-checked.
+    fn byteAt(self: &Self, i: i64): u8 {
+        return sealedByteAt(self, i)
+    }
+
+    // Materialise `sp` as an owned string. The allocation lives here.
+    fn text(self: &Self, sp: Span): string {
+        return sealedText(self, sp)
+    }
+
+    // Compare `sp` to a string without materialising it.
+    fn eq(self: &Self, sp: Span, other: &string): bool {
+        return sealedEq(self, sp, other)
+    }
+
+    // Compare two spans in this buffer without materialising either.
+    fn eqSpan(self: &Self, a: Span, b: Span): bool {
+        return sealedEqSpan(self, a, b)
+    }
+
+    // Visit each byte of `sp` without materialising it.
+    fn each(self: &Self, sp: Span, f: (u8) => void): void {
+        sealedEach(self, sp, f)
+    }
+
+    // Give the buffer back, mutable. Consumes this Sealed.
+    fn unseal(self: Self): string {
+        return unseal(self)
+    }
+}

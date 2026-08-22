@@ -69,6 +69,7 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/regex.windows](./regex.windows.md)
 - [std/rng](./rng.md)
 - [std/runtime](./runtime.md)
+- [std/seal](./seal.md)
 - [std/select](./select.md)
 - [std/set](./set.md)
 - [std/sha1](./sha1.md)

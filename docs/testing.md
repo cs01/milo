@@ -72,6 +72,20 @@ while the driver can still run them by explicit path.
 
 Add a test by dropping a `.milo` file in the right directory with the right annotation. That's it. (<!-- stat:fixtures -->652<!-- /stat --> fixtures, <!-- stat:error-fixtures -->284<!-- /stat --> error cases, <!-- stat:runtime-error-fixtures -->22<!-- /stat --> runtime-error cases.)
 
+**One caveat to "that's it", and it costs a red CI run every time it is forgotten.** A new fixture
+also enters the JS backend's conformance corpus, and that gate does NOT run locally by default, so
+a fixture the JS backend cannot compile (anything reaching FFI, threads, pointers, `addrOf`, or a
+`Drop` impl — which includes anything using `std/arena` or `std/shard`) is green on your machine and
+red in CI. Check it before pushing, and add the fixture to `tests/emitJsParity.baseline.json` if it
+legitimately cannot emit:
+
+```
+MILO_JS_PARITY=1 bun test tests/emitJsParity.test.ts
+```
+
+The baseline may shrink but never grow on its own: an entry is a claim that this fixture is outside
+the supported subset, not a way to silence a real mismatch.
+
 There's also `tests/runtime-errors/` for programs that compile but must fail at runtime.
 
 ## Examples as smoke tests

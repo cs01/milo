@@ -395,6 +395,15 @@ match or beat on equal hardware.
   design in `seal-span.md` that User Story 2 deliberately simplified to a single owner. That is the
   next unit of work, and rg is its proof workload. The boundary case (a match spanning two windows)
   is real and is handled by scanning the seams after the workers join, not by overlapping windows.
+  **RESOLVED 2026-08-22, and more cheaply than that.** Refcounting was not needed: a scanner only
+  READS, so `shatterStr` hands out read-only windows over a string the owner keeps, reached through
+  `cstr()` with no `Vec<u8>` conversion and no copy. Because nothing writes, windows may legitimately
+  OVERLAP, which disposes of the seam problem outright: `windows(needle.len - 1)` finds a match
+  straddling a boundary without any second pass. Measured over 51.3 MiB
+  (`sh benchmarks/strscan/run.sh`): sequential 35 ms, 8 windows 10 ms, with every windowing checked
+  against the sequential occurrence count. Dropping the overlap makes the 8-window run report one
+  fewer match, so the check has teeth. Refcounted `Sealed` remains the answer for readers that must
+  outlive the owner's scope; nothing measured so far needs it.
 
 - **The delivered archive is the whole input.** Its four documents, eight prototype programs, and
   benchmark scorecard are treated as the requirement source; nothing outside it is assumed.

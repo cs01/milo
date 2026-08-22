@@ -8922,8 +8922,20 @@ export class Codegen {
     lines.push(`  ${isZero} = icmp eq i64 ${cap}, 0`);
     const doubled = this.nextTemp();
     lines.push(`  ${doubled} = mul i64 ${cap}, 2`);
+    const baseCap = this.nextTemp();
+    lines.push(`  ${baseCap} = select i1 ${isZero}, i64 16, i64 ${doubled}`);
+    // Doubling alone is not enough, and neither is the 16-byte floor: a string
+    // whose buffer is a static literal carries cap 0, so the floor was taken for
+    // a buffer of ANY length and the memcpy below then wrote `len` bytes into 16.
+    // `var s = "<15 or more bytes>"` followed by s.push(c) was a heap overflow in
+    // safe code. Demand room for the bytes we are about to copy, the byte being
+    // pushed, and the terminator.
+    const wantCap = this.nextTemp();
+    lines.push(`  ${wantCap} = add i64 ${len}, 2`);
+    const capTooSmall = this.nextTemp();
+    lines.push(`  ${capTooSmall} = icmp ult i64 ${baseCap}, ${wantCap}`);
     const newCap = this.nextTemp();
-    lines.push(`  ${newCap} = select i1 ${isZero}, i64 16, i64 ${doubled}`);
+    lines.push(`  ${newCap} = select i1 ${capTooSmall}, i64 ${wantCap}, i64 ${baseCap}`);
     const { buf: newBuf } = this.emitAllocBytes(lines, newCap, 1, "strgrow", undefined);
 
     const dataPtr = this.nextTemp();

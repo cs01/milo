@@ -1,0 +1,27 @@
+// @expect: 16 aaaaaaaaaaaaaaa!
+// @expect: 27 {"name":"milo","name":"x"}!
+// @expect: 101 a
+// A string literal is stored with capacity 0, because its bytes are static. The
+// first push therefore takes the grow path, and that path used to allocate a
+// flat 16 bytes without consulting the length before memcpy'ing `len` bytes in.
+// Any literal of 15 bytes or more was a heap-buffer-overflow on first push, in
+// safe code with no unsafe block. Sizes below straddle the old 14/15 boundary.
+pub fn main(): i32 {
+    var short: string = "aaaaaaaaaaaaaaa"
+    short.push('!')
+    print(short.len.toString() + " " + short)
+
+    var json: string = "{\"name\":\"milo\",\"name\":\"x\"}"
+    json.push('!')
+    print(json.len.toString() + " " + json)
+
+    var big: string = ""
+    var i: i64 = 0
+    while i < 100 {
+        big.push('a')
+        i = i + 1
+    }
+    big.push('a')
+    print(big.len.toString() + " " + big.substr(0, 1))
+    return 0
+}

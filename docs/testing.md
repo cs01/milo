@@ -70,7 +70,7 @@ while the driver can still run them by explicit path.
 - `tests/fixtures/*.milo` — **compiled + executed.** stdout must match the `// @expect: <line>` annotations, one per expected output line.
 - `tests/errors/*.milo` — **must fail type-check.** Error output must contain the `// @error: <substring>` annotation.
 
-Add a test by dropping a `.milo` file in the right directory with the right annotation. That's it. (<!-- stat:fixtures -->648<!-- /stat --> fixtures, <!-- stat:error-fixtures -->283<!-- /stat --> error cases, <!-- stat:runtime-error-fixtures -->22<!-- /stat --> runtime-error cases.)
+Add a test by dropping a `.milo` file in the right directory with the right annotation. That's it. (<!-- stat:fixtures -->649<!-- /stat --> fixtures, <!-- stat:error-fixtures -->283<!-- /stat --> error cases, <!-- stat:runtime-error-fixtures -->22<!-- /stat --> runtime-error cases.)
 
 There's also `tests/runtime-errors/` for programs that compile but must fail at runtime.
 

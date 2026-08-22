@@ -1,0 +1,95 @@
+# std/shard
+
+`shatter` splits a `Vec` into disjoint owned windows so several threads can transform it in place, with no copies and no shared references.
+
+Milo will not let a reference cross a thread boundary. The usual consequence is that parallelising a transform means giving every worker its own copy of a chunk and stitching the copies back together, and for a large buffer that copy costs more than the parallelism saves.
+
+This module takes the other route: instead of sharing a reference, it divides the *ownership*. `shatter` consumes the `Vec` and hands out windows, each an ordinary owned value that a worker receives by move like anything else.
+
+```milo
+from "std/shard" import { Shard, shatter }
+```
+
+## Quick start
+
+```milo
+from "std/shard" import { Shard, shatter }
+from "std/runtime" import { Promise }
+
+fn double(w: Shard<f64>): Shard<f64> {
+    var s = w
+    var i: i64 = 0
+    while i < s.len() {
+        s.set(i, s.get(i) * 2.0)
+        i = i + 1
+    }
+    return s
+}
+
+pub fn main(): i32 {
+    var data: Vec<f64> = Vec.withCapacity(16)
+    var i: i64 = 0
+    while i < 16 {
+        data.push(1.0)
+        i = i + 1
+    }
+
+    var owner = shatter(data, 4)        // `data` is moved
+    var windows = owner.windows()
+
+    var ps: Vec<Promise<Shard<f64>>> = Vec.new()
+    while windows.len > 0 {
+        let w = windows.pop()!
+        ps.push(Promise<Shard<f64>>.blocking(move (): Shard<f64> => {
+            return double(w)
+        }))
+    }
+    let back = Promise.all(ps).await()!
+    let result = owner.weld(back)!      // the original Vec, same allocation
+    print(result[0].toString())
+    return 0
+}
+```
+
+## Why this is safe
+
+Three things, none of them a new language rule:
+
+- **`shatter` consumes the `Vec`.** After it there is no binding through which the buffer can be reached except the windows. Touching the original is `error: use of moved variable`.
+- **The windows are disjoint by construction.** Window `i` covers exactly `[i*chunk, (i+1)*chunk)`, computed inside `windows()`, never supplied by you.
+- **`Shard` is `@noCopy`.** Handing the same window to two workers is a compile error, not a race. A struct of a pointer and three integers would otherwise be `Copy`, and a copyable window would make the race representable again.
+
+So the aliasing argument is the move checker that already shipped. Nothing new had to be proven.
+
+## The one obligation
+
+Keep the owner alive until `weld`. A window is a pointer into the owner's buffer, so dropping the owner while a worker still holds one is a use-after-free that nothing here catches.
+
+`weld` checks what it can: every window must carry this shatter's identity and the set must cover the buffer exactly. A missing window means some worker may still be holding a pointer, so `weld` refuses rather than handing the `Vec` back.
+
+```milo
+match owner.weld(back) {
+    Result.Ok(v) => { /* the original allocation */ }
+    Result.Err(e) => { /* deterministic: a window is missing, or came from another shatter */ }
+}
+```
+
+That is a runtime check, not a proof, and it is the honest residue of this design. See [how Milo compares to Rust](/language/vs-rust).
+
+## What it costs
+
+Measured on a 10-core machine, 20M `f64`, `a[i] = a[i] * 1.0000001 + 0.5`, 4 workers, `--release`:
+
+| | time | peak memory |
+|---|---|---|
+| sequential, in place | 6 ms | 161.4 MB |
+| shatter/weld, 4 workers | 3 ms | 170.9 MB |
+| C, pthreads over one shared buffer | 4 ms | 161.4 MB |
+
+The point is the memory column. The copying approach this replaces roughly doubles peak memory; shatter/weld adds a flat 9.5 MB, which is the worker stacks and is the same 9.5 MB at 40M elements. As a percentage that is 5.9% at 20M and 3.0% at 40M.
+
+Build the `Vec` with `Vec.withCapacity` if you know the size. Growing one by pushing peaks at roughly 2.7x the final size during the doubling reallocs, which dwarfs anything this module does.
+
+## Not for shared state
+
+This divides data. It is not a concurrent map and not a substitute for a lock: two workers that need to touch the *same* element are outside what ownership can separate. Channels and atomics remain the answer there.

@@ -75,6 +75,7 @@ Generated from `std/**/*.milo` doc-comments — do not edit by hand.
 - [std/sha1](./sha1.md)
 - [std/sha256](./sha256.md)
 - [std/sha512](./sha512.md)
+- [std/shard](./shard.md)
 - [std/signal](./signal.md)
 - [std/smt](./smt.md)
 - [std/sort](./sort.md)

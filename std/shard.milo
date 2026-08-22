@@ -1,0 +1,233 @@
+// std/shard — in-place parallelism by dividing OWNERSHIP, not by sharing references.
+//
+// The problem: applying a transform to a large Vec across several cores. Milo
+// will not let a reference cross a thread boundary, so the safe route has been to
+// give every worker its own copy of a chunk and stitch the copies back together.
+// For a 20M-element buffer that copy costs more than the parallelism saves.
+//
+// The way out is not to weaken the reference rules, it is to make ownership
+// divisible. `shatter` CONSUMES a Vec and returns an owner holding it, from which
+// you take disjoint windows. Each window is an ordinary owned value, so a worker
+// receives it by move like any other value, and the aliasing argument is the move
+// checker that already shipped:
+//
+//     var data: Vec<f64> = Vec.filled(n, 1.0)
+//     var owner = shatter(data, 4)     // `data` is moved; nothing else can reach it
+//     let windows = owner.windows()!   // 4 disjoint Shard<f64>
+//     ... hand each window to a worker by move, transform in place ...
+//     let back = owner.weld(returned)! // the original Vec, same allocation
+//
+// Three things make that safe, and none of them is a new language rule:
+//
+//   - `shatter` consumes the Vec, so after it there is no binding through which
+//     the buffer can be reached except the windows.
+//   - the windows are disjoint BY CONSTRUCTION: window i covers exactly
+//     [i*chunk, (i+1)*chunk), computed here, never supplied by the caller.
+//   - `Shard` is @noCopy, so handing the same window to two workers is
+//     `error: use of moved variable`, not a race.
+//
+// What is NOT proven, and is checked at runtime instead: that every window comes
+// back to `weld`. A window is a raw pointer into the owner's buffer, so a program
+// that drops the owner while a worker still holds one has a use-after-free that
+// nothing here catches. `weld` verifies that the windows it is handed all came
+// from this shatter and cover it exactly, and fails deterministically otherwise.
+// Keep the owner alive until weld: that is the one obligation this module asks of
+// you, and it is the residue that stays honest in docs/residue-vs-rust.md.
+
+from "std/os" import {
+    free, malloc
+}
+
+// A disjoint, owned window over part of one Vec's storage.
+//
+// @noCopy is doing real work here: a struct of a pointer and three integers would
+// otherwise be Copy, and a Copy window could be handed to two workers at once,
+// which is exactly the race the design claims to make unrepresentable.
+@noCopy
+pub struct Shard<T> {
+    base: *T,
+    len: i64,
+    shatterId: i64,
+    index: i64,
+}
+
+// Fixed-size window: no push, no pop, no resize. The buffer's identity has to
+// survive until weld, and a window that could reallocate would break that.
+impl Shard<T> {
+    // Elements in this window.
+    fn len(self: &Self): i64 {
+        return self.len
+    }
+
+    // Which window of the shatter this is, counting from 0.
+    fn index(self: &Self): i64 {
+        return self.index
+    }
+
+    fn get(self: &Self, i: i64): T {
+        assert(i >= 0 && i < self.len, "shard: index out of range")
+        unsafe {
+            return self.base[i]
+        }
+    }
+
+    fn set(self: &mut Self, i: i64, val: T): void {
+        assert(i >= 0 && i < self.len, "shard: index out of range")
+        unsafe {
+            self.base[i] = val
+        }
+    }
+
+    fn swap(self: &mut Self, a: i64, b: i64): void {
+        assert(a >= 0 && a < self.len, "shard: index out of range")
+        assert(b >= 0 && b < self.len, "shard: index out of range")
+        unsafe {
+            let tmp = self.base[a]
+            self.base[a] = self.base[b]
+            self.base[b] = tmp
+        }
+    }
+}
+
+// Safety: the windows a shatter hands out are pairwise disjoint by construction,
+// the Vec they cover was consumed by that shatter so no other binding reaches it,
+// and @noCopy means a window has exactly one owner at a time. What crosses the
+// thread boundary is therefore a pointer into memory nothing else can touch for
+// as long as the window is alive.
+unsafe
+
+impl Send for Shard {
+}
+
+pub enum WeldError {
+    // A window from a different shatter, or a hand-built one.
+    Foreign(string),
+    // The count is right but the coverage is not: a duplicate and a gap.
+    NotCovered(string),
+    // Wrong number of windows handed back.
+    CountMismatch(string),
+}
+
+// Owns the buffer while it is divided. Hold this until weld.
+pub struct Shards<T> {
+    buf: Vec<T>,
+    count: i64,
+    shatterId: i64,
+    handedOut: bool,
+}
+
+// Per-process shatter identity, so a window cannot be welded into the wrong owner.
+// Allocated atomically because shatter can run on a Promise.blocking worker.
+var nextShatterId: i64 = 1
+
+// Consume a Vec and return an owner that can hand out `n` disjoint windows over
+// its storage. O(1): nothing is copied, and the Vec's buffer is untouched.
+//
+// `n` is clamped to at least 1 and at most the element count, so a caller asking
+// for more windows than elements gets one window per element rather than a pile
+// of empty ones aliasing the same address.
+pub fn shatter<T>(v: Vec<T>, n: i64): Shards<T> {
+    var id: i64 = 0
+    unsafe {
+        id = _atomicAddI64((nextShatterId.addrOf()) as *u8, 1)
+    }
+    var wanted = n
+    if wanted < 1 {
+        wanted = 1
+    }
+    if v.len > 0 && wanted > v.len {
+        wanted = v.len
+    }
+    var s: Shards<T> = Shards {
+        buf: v,
+        count: wanted,
+        shatterId: id,
+        handedOut: false,
+    }
+    return s
+}
+
+impl Shards<T> {
+    // How many windows this shatter divides into.
+    fn count(self: &Self): i64 {
+        return self.count
+    }
+
+    // Elements across all windows.
+    fn len(self: &Self): i64 {
+        return self.buf.len
+    }
+
+    // The windows, once. A second call returns an empty Vec rather than a second
+    // set of pointers to the same storage, which would hand out aliases and defeat
+    // the whole design.
+    fn windows(self: &mut Self): Vec<Shard<T>> {
+        var out: Vec<Shard<T>> = Vec.new()
+        if self.handedOut {
+            return out
+        }
+        self.handedOut = true
+        let total = self.buf.len
+        let chunk = total / self.count
+        var i: i64 = 0
+        unsafe {
+            let p = self.buf.ptr()
+            while i < self.count {
+                let lo = i * chunk
+                var hi = lo + chunk
+                if i == self.count - 1 {
+                    hi = total
+                }
+                var sh: Shard<T> = Shard {
+                    base: ((p as i64) + lo * sizeOf<T>()) as *T,
+                    len: hi - lo,
+                    shatterId: self.shatterId,
+                    index: i,
+                }
+                out.push(sh)
+                i = i + 1
+            }
+        }
+        return out
+    }
+
+    // Reassemble: consume the owner and the windows, and hand back the original
+    // Vec with its original allocation.
+    //
+    // The checks are what keep a mistake a logic error instead of corruption: every
+    // window must carry this shatter's identity, and the set must cover every index
+    // exactly once. A missing window would mean some worker still holds a pointer
+    // into this buffer, and returning the Vec then would be the use-after-free this
+    // module exists to avoid.
+    fn weld(self: Self, returned: Vec<Shard<T>>): Result<Vec<T>, WeldError> {
+        if returned.len != self.count {
+            return Result.Err(WeldError.CountMismatch("weld: expected " + self.count.toString() + " windows, got " + returned.len.toString()))
+        }
+        var seen: Vec<bool> = Vec.new()
+        var i: i64 = 0
+        while i < self.count {
+            seen.push(false)
+            i = i + 1
+        }
+        for w in returned {
+            if w.shatterId != self.shatterId {
+                return Result.Err(WeldError.Foreign("weld: window " + w.index.toString() + " came from a different shatter"))
+            }
+            if w.index < 0 || w.index >= self.count {
+                return Result.Err(WeldError.Foreign("weld: window index " + w.index.toString() + " is outside this shatter"))
+            }
+            if seen[w.index] {
+                return Result.Err(WeldError.NotCovered("weld: window " + w.index.toString() + " was handed back twice"))
+            }
+            seen[w.index] = true
+        }
+        var j: i64 = 0
+        while j < self.count {
+            if !seen[j] {
+                return Result.Err(WeldError.NotCovered("weld: window " + j.toString() + " never came back"))
+            }
+            j = j + 1
+        }
+        return Result.Ok(self.buf)
+    }
+}

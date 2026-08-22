@@ -3813,10 +3813,44 @@ export class TypeChecker {
             }
             // `use(G[0])` — the argument is a reference into G's storage and the callee
             // reallocs G, so the reference dies before the callee is done with it.
-            for (const a of (n.args as Expr[] | undefined) ?? []) {
+            //
+            // Two things have to be true for that to dangle, and checking only that the
+            // argument MENTIONS the global rejected two safe shapes that a real program
+            // (milojs) is built out of:
+            //
+            //   - the path has to reach the global's HEAP interior. `G` and `G.field`
+            //     name storage at the global's own fixed address, which no realloc moves
+            //     and which reassigning G overwrites in place; only an index step reaches
+            //     a buffer that can be freed under the reference.
+            //   - the PARAMETER has to be a reference. A by-value parameter materialises
+            //     its argument before the callee runs, so nothing of the global's is
+            //     still borrowed while the callee writes.
+            const callee = fns.get(t);
+            const callArgs = (n.args as Expr[] | undefined) ?? [];
+            // A method call carries its receiver as params[0]; anything that does not
+            // line up leaves paramOffset -1 and the check stays fail-closed.
+            const paramOffset = !callee ? -1
+              : callee.params.length === callArgs.length ? 0
+              : callee.params.length === callArgs.length + 1 ? 1
+              : -1;
+            const reachesHeapInterior = (e: unknown): boolean => {
+              let cur = e as Record<string, unknown> & { kind?: string };
+              while (cur && typeof cur === "object") {
+                if (cur.kind === "IndexAccess") return true;
+                if (cur.kind === "FieldAccess") { cur = cur.object as typeof cur; continue; }
+                return false;
+              }
+              return false;
+            };
+            for (const [argIdx, a] of callArgs.entries()) {
               const g = rootOf(a);
               if (!g || !mutableGlobals.has(g) || bound.has(g) || !w.has(g)) continue;
               if (iterated.includes(g)) continue;
+              if (!reachesHeapInterior(a)) continue;
+              if (paramOffset >= 0) {
+                const prm = callee!.params[argIdx + paramOffset];
+                if (prm && prm.type && !prm.type.isRef && !prm.type.isRefMut) continue;
+              }
               report(
                 `'${pretty(t)}' writes the global '${g}', and is passed a reference into '${g}' here`,
                 (a.span as Span | undefined) ?? span,

@@ -1,0 +1,73 @@
+// @expect: byValue 1
+// @expect: field 2
+// @expect: whole 3
+// The three shapes the global-borrow-argument rule must NOT reject. Each passes
+// something rooted at a mutable global to a function that writes that same
+// global, and none of them can dangle:
+//
+//   byValue — the parameter is by value, so the argument is materialised before
+//             the callee runs and nothing of G's is still borrowed.
+//   field   — G.n names storage at G's own fixed address. A realloc inside G
+//             does not move it, and reassigning G overwrites it in place.
+//   whole   — same, for G itself.
+//
+// Rejecting these is not hypothetical: it broke every entry point in milojs,
+// whose interpreter state is a mutable global passed to functions that also
+// write it. The reject case stays covered by tests/errors/globalBorrowArgRealloc.milo.
+struct Id {
+    index: i64
+}
+
+struct Holder {
+    n: i64, ids: Vec<Id>
+}
+
+var G: Vec<Id> = Vec.new()
+var H: Holder = Holder {
+    n: 0, ids: Vec.new()
+}
+var log: i64 = 0
+
+fn byValue(id: Id): void {
+    G.push(Id {
+        index: 99
+    }
+    )
+    log = id.index
+}
+
+fn takesField(n: i64): void {
+    H.ids.push(Id {
+        index: 7
+    }
+    )
+    log = n
+}
+
+fn takesWhole(v: &mut Vec<Id>): void {
+    G.push(Id {
+        index: 5
+    }
+    )
+    v.push(Id {
+        index: 6
+    }
+    )
+}
+
+pub fn main(): i32 {
+    G.push(Id {
+        index: 1
+    }
+    )
+    byValue(G[0])
+    print("byValue " + log.toString())
+
+    H.n = 2
+    takesField(H.n)
+    print("field " + log.toString())
+
+    takesWhole(G)
+    print("whole 3")
+    return 0
+}

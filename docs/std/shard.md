@@ -89,8 +89,8 @@ Elements across all windows.
 fn Shards.weld(self: Shards, returned: Vec<Shard<T>>): Result<Vec<T>, WeldError>
 ```
 
-Reassemble: consume the owner and the windows, and hand back the original
-Vec with its original allocation.
+ESCAPE HATCH (see `shatter`). Reassemble: consume the owner and the windows, and
+hand back the original Vec with its original allocation.
 
 The checks are what keep a mistake a logic error instead of corruption: every
 window must carry this shatter's identity, and the set must cover every index
@@ -104,15 +104,19 @@ module exists to avoid.
 fn Shards.windows(self: &mut Shards): Vec<Shard<T>>
 ```
 
-The windows, once. A second call returns an empty Vec rather than a second
-set of pointers to the same storage, which would hand out aliases and defeat
-the whole design.
+ESCAPE HATCH (see `shatter`). The windows, once. A second call returns an empty
+Vec rather than a second set of pointers to the same storage, which would hand
+out aliases and defeat the whole design.
 
 ### `shatter`
 
 ```milo
 pub fn shatter<T>(v: Vec<T>, n: i64): Shards<T>
 ```
+
+ESCAPE HATCH. Prefer `parallelMap`, which is this whole cycle in one call and the
+form in which `weld` cannot fail. Reach here only when the workers must differ from
+each other, or when you want the windows for something other than one task each.
 
 Consume a Vec and return an owner that can hand out `n` disjoint windows over
 its storage. O(1): nothing is copied, and the Vec's buffer is untouched.
@@ -128,6 +132,10 @@ pub fn shatterStr(s: string, n: i64): StrShards
 ```
 
 Consume a string and return an owner that hands out `n` read-only windows.
+
+Unlike the Vec side there is no one-call form to prefer: `parallelMap` is map-shaped
+(Vec<T> in, Vec<T> out) and a scan returns something else entirely, so this IS the
+supported way to divide a string across workers.
 
 ### `StrShard.byteAt`
 

@@ -57,10 +57,20 @@ Three things, none of them a new language rule:
 
 So the aliasing argument is the move checker that already shipped. Nothing new had to be proven.
 
-## Doing it by hand
+## The escape hatch
 
-Reach for `shatter` / `windows` / `weld` directly only when the workers need to differ
-from each other, or when you want the windows for something other than one task each:
+`shatter` / `windows` / `weld` are public and supported, but they are not the path you
+should be on by default, and the compiler will say so:
+
+```
+warning: this shatters and welds by hand
+  hint: 'parallelMap(v, workers, f)' is the same cycle in one call, and the form in
+        which weld cannot fail — nothing between making the windows and welding them
+        is your code.
+```
+
+Reach for them when the workers need to differ from each other, or when you want the
+windows for something other than one task each:
 
 ```milo
 from "std/shard" import { Shard, shatter }
@@ -165,6 +175,21 @@ and does not exist yet.
 The point is the memory column. The copying approach this replaces roughly doubles peak memory; shatter/weld adds a flat 9.1 MiB, which is the worker stacks and is the same fixed cost at 40M elements. As a percentage that is 5.9% at 20M and 3.0% at 40M.
 
 Build the `Vec` with `Vec.withCapacity` if you know the size. Growing one by pushing peaks at roughly 2.7x the final size during the doubling reallocs, which dwarfs anything this module does.
+
+## Scanning a string
+
+`parallelMap` is map-shaped: a `Vec<T>` goes in and a `Vec<T>` comes back. A scan is a
+different shape — it reads and returns counts, offsets, or whatever you accumulate — so
+there is no one-call form for it, and `shatterStr` is the supported way to divide a
+string across workers rather than an escape hatch.
+
+Because nothing writes, its windows may overlap: `windows(needle.len - 1)` finds a match
+straddling a boundary without a second pass over the seams. Count only matches that
+BEGIN inside a window's own range, or two neighbours will both claim one.
+
+See `benchmarks/strscan/` for the worked example: 51.3 MiB, 35 ms sequential against
+10 ms on eight windows, with the runner failing if any windowing disagrees with the
+sequential count.
 
 ## Not for shared state
 

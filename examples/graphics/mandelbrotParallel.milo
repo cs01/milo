@@ -21,10 +21,7 @@
 // a window's own indices run 0..len, and `start() + i` is the position in the
 // original buffer, from which the x/y of the pixel falls out.
 from "std/shard" import {
-    Shard, shatter
-}
-from "std/runtime" import {
-    Promise
+    Shard, parallelMap
 }
 from "std/png" import {
     encodePng
@@ -97,29 +94,11 @@ pub fn main(): i32 {
 
     let t0 = epochMillis()
 
-    var owner = shatter(pixels, windowCount)
-    var windows = owner.windows()
-    var ps: Vec<Promise<Shard<u32>>> = Vec.new()
-    while windows.len > 0 {
-        let w = windows.pop()!
-        ps.push(Promise<Shard<u32>>.blocking(move(): Shard<u32> => {
-            return renderWindow(w)
-        }
-        ))
-    }
-    let done = Promise.all(ps).await()!
+    // The whole divide/run/reassemble cycle. Also the form in which weld cannot
+    // fail: every window is made, handed out, awaited and welded inside this one
+    // call, so there is no code of ours in between to get wrong.
+    let out = parallelMap(pixels, windowCount, renderWindow)!
 
-    // weld refuses unless every window came back, so a worker that quietly kept one
-    // is an error here rather than a use-after-free later.
-    let out = match owner.weld(done) {
-        Result.Ok(v) => {
-            v
-        }
-        Result.Err(_e) => {
-            print("weld refused: a window did not come back")
-            return 1
-        }
-    }
     let t1 = epochMillis()
 
     var raw: string = ""

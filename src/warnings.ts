@@ -22,6 +22,7 @@ export const WARNINGS: WarningInfo[] = [
   { name: "index-clone" },
   { name: "large-stack-array", offByDefault: true },
   { name: "manual-option-default" },
+  { name: "manual-shatter-cycle" },
   { name: "missing-interpolation" },
   { name: "nan-comparison" },
   // The thread-boundary global check cannot see through a call to a function value, so it

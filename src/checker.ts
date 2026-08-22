@@ -2386,6 +2386,7 @@ export class TypeChecker {
     // Needs the finished call-resolution maps too: the global-write summary is a fixpoint
     // over the call graph, so every callee has to be resolvable before it runs.
     this.checkGlobalBorrowInvalidation(program);
+    this.lintManualShatterCycle(program);
 
     // An expectation that never fired means the code it excused was fixed and the
     // suppression outlived its cause. Reported here, after every warning has had its
@@ -3772,6 +3773,51 @@ export class TypeChecker {
       }
     }
     return writes;
+  }
+
+  // `shatter` … `weld` written out by hand, where `parallelMap` does the whole cycle.
+  //
+  // This is a readability lint with a safety edge. Both spellings are correct, but the
+  // manual one carries an obligation the one-call form does not: a window is a pointer
+  // into the owner's buffer, so dropping the owner while a worker still holds one is a
+  // use-after-free, and `weld` can only catch the miss AFTER the fact. `parallelMap`
+  // makes every window, hands out every window, awaits them and welds them itself, so
+  // there is no caller code in between to get wrong. Pointing at the safer form is the
+  // whole reason this fires rather than leaving both equally discoverable.
+  //
+  // Deliberately coarse: any function that both shatters and welds. A function doing
+  // the cycle across a helper boundary is exactly the case where `parallelMap` helps
+  // most, but it is also where a caller may genuinely need the windows apart, so the
+  // narrow shape is the one worth naming.
+  private lintManualShatterCycle(program: Program): void {
+    if (this.warningConfig.allowed.has("manual-shatter-cycle")) return;
+    for (const f of program.functions) {
+      if (!f.body) continue;
+      // std/shard implements the cycle; parallelMap IS this pattern.
+      if (f.sourceFile?.includes("std/shard")) continue;
+      let shatterSpan: Span | undefined;
+      let welds = false;
+      const walk = (node: unknown) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { for (const n of node) walk(n); return; }
+        const n = node as Record<string, unknown> & { kind?: string; func?: unknown; method?: unknown; span?: unknown };
+        if (n.kind === "Call" && typeof n.func === "string" && (n.func === "shatter" || n.func === "shatterStr")) {
+          shatterSpan ??= n.span as Span | undefined;
+        }
+        if (n.kind === "MethodCall" && n.method === "weld") welds = true;
+        for (const k of Object.keys(n)) if (k !== "span") walk(n[k]);
+      };
+      walk(f.body);
+      if (shatterSpan && welds) {
+        this.warn("manual-shatter-cycle",
+          `this shatters and welds by hand`,
+          shatterSpan,
+          `'parallelMap(v, workers, f)' is the same cycle in one call, and the form in ` +
+          `which weld cannot fail — nothing between making the windows and welding them ` +
+          `is your code. Keep the manual form only if the workers must differ, or you ` +
+          `want the windows for something other than one task each.`);
+      }
+    }
   }
 
   // Rejects a call that writes a global while a borrow into that same global is live.

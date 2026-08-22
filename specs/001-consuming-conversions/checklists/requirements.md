@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain
+- [x] No [NEEDS CLARIFICATION] markers remain
 - [x] Requirements are testable and unambiguous
 - [x] Success criteria are measurable
 - [x] Success criteria are technology-agnostic (no implementation details)
@@ -32,10 +32,14 @@
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
-- **Two open markers, both scope questions, both in the "Scope decisions requiring confirmation"
-  block (FR-027, FR-028).** They do not block planning of User Stories 1 to 3, which are fully
-  specified; they decide whether the follow-on phases and the public blog post belong to this
-  feature or a later one. Answer them with `/speckit-clarify`, or state the answer directly.
+- **Both scope markers resolved 2026-08-22** by taking the defaults: FR-027 (Phase 2 conveniences)
+  and FR-028 (per-core runtime, static fork-join primitive, blog post) are out of scope for this
+  feature. Recorded in the spec rather than deleted, so the decision is visible to whoever picks up
+  the follow-on.
+- **One requirement was added during implementation**, FR-014a: the read-only arena conversion is
+  refused for an arena that ever released a slot, and the refusal returns the arena. This was not in
+  the source material, which assumed every handle minted before the conversion is live. That
+  assumption only holds if nothing was ever released, and the spec now says so.
 - **Audience note on "written for non-technical stakeholders":** the product here is a programming
   language, so the stakeholder is a Milo programmer. Requirements are stated as observable program
   outcomes (what compiles, what fails and how, what the program costs) rather than as internal

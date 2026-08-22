@@ -1,0 +1,16 @@
+// @error: use of moved variable 'a'
+// freeze() consumes the arena. Reaching for the old binding afterwards is the
+// compile-time half of the guarantee: no path survives through which a slot
+// could be freed after the freeze, so a frozen handle cannot go stale.
+from "std/arena" import {
+    Arena, FrozenArena
+}
+
+pub fn main(): i32 {
+    var a: Arena<i64> = Arena<i64>.new()
+    let h = a.alloc(1)
+    let frozen = a.freeze()!
+    let more = a.alloc(2)
+    print(frozen.get(h).toString())
+    return 0
+}

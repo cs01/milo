@@ -11,6 +11,8 @@
 //     a.free(h)                                // bumps generation → old h now stale
 //     a.clear()                                // drops everything, frees storage,
 //                                              // invalidates every outstanding handle
+//     let f = a.freeze()!                      // build phase over: `a` is moved and
+//     let n2 = f.get(h)                        // `get` is now infallible, no Option
 //
 // Reach for this over &T for graph/cyclic data: handles can live in struct fields
 // and be returned, and each slot's generation counter turns a use-after-free into
@@ -24,6 +26,12 @@
 // for its AST and measured +4.4% on a loop benchmark against generational handles
 // (`docs/milojs-arena-safety.md`). Generational checking answers "is this slot still
 // the one I meant?", and an append-only pool has already answered that.
+//
+// If the shape is append-only-then-read rather than append-only-forever, there is
+// now a third option that keeps the arena API during the build and drops the check
+// afterwards: `a.freeze()` consumes the arena and returns a FrozenArena<T> whose
+// `get` returns T, not Option<T>. See FrozenArena below. It is refused for an arena
+// that ever freed, which is exactly the condition that makes the check pointless.
 //
 // Worth knowing what handles do NOT answer: they catch a STALE reference, not a
 // MISSING ROOT. If you build a collector on top of an arena, a value reachable only
@@ -385,6 +393,139 @@ pub fn arenaHandles<T>(arena: &Arena<T>): Vec<Handle<T>> {
     return result
 }
 
+// ---------------------------------------------------------------------------
+// FrozenArena — an arena whose build phase is over.
+// ---------------------------------------------------------------------------
+
+// A read-only Arena<T>: no alloc, no free, no clear, ever. You get one by
+// consuming an arena with `freeze()`:
+//
+//     var a = Arena<Node>.new()
+//     let root = a.alloc(Node { ... })      // build phase: alloc freely
+//     let tree = a.freeze()!                // `a` is moved; build phase over
+//     let n = tree.get(root)                // Node, not Option<Node>
+//
+// Staleness is not representable here, so `get` returns T directly instead of
+// Option<T> and there is no failure path to plumb through every call site.
+// That is not a promise the type makes on its honour: the conversion CONSUMES
+// the arena, so the move checker rejects any later use of the source binding,
+// and no path survives through which a slot could be freed after the freeze.
+//
+// The generation counters are not carried over because nothing can bump them.
+pub struct FrozenArena<T> {
+    id: i64,
+    data: Vec<T>,
+}
+
+// Why a refused freeze does not eat the arena: `freeze` consumes its input, so
+// a plain `Result<FrozenArena<T>, string>` would drop the caller's whole arena
+// on the failure path with no way to get it back. The rejection carries the
+// arena home instead.
+pub struct FreezeRejected<T> {
+    // The arena, untouched. Take it back and keep using it.
+    arena: Arena<T>,
+    // The first slot found to have been freed.
+    slot: i64,
+}
+
+// Whether `freeze` would succeed, without consuming anything. Cheap enough to
+// call before deciding, O(n) in slots.
+pub fn arenaFreezable<T>(a: &Arena<T>): bool {
+    var i: i64 = 0
+    while i < a.gens.len {
+        if a.gens[i] != 1 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Consume an arena and hand back a read-only view of the same storage. O(n) in
+// slots to check the precondition; no element is copied.
+//
+// Refused when the source arena ever freed a slot, and the refusal returns the
+// arena. That refusal is the whole reason `get` can skip the generation check:
+// a slot that was freed and then reallocated leaves stale handles naming a LIVE
+// slot that now holds a DIFFERENT value, and an unchecked `get` would hand that
+// value back as though it were the right one. Silently returning the wrong
+// value is worse than any rejection, so the freeze is refused instead and the
+// caller keeps the generation-checked arena.
+//
+// A slot's generation is 1 from birth and only `free` ever moves it (to a
+// negative value, or to 0 when the slot retires), so `gens[i] != 1` is exactly
+// the test for "this slot was freed at some point".
+pub fn arenaFreeze<T>(a: Arena<T>): Result<FrozenArena<T>, FreezeRejected<T>> {
+    var bad: i64 = -1
+    var i: i64 = 0
+    while i < a.gens.len {
+        if a.gens[i] != 1 {
+            bad = i
+            i = a.gens.len
+        } else {
+            i = i + 1
+        }
+    }
+    if bad >= 0 {
+        var r: FreezeRejected<T> = FreezeRejected {
+            arena: a, slot: bad
+        }
+        return Result.Err(r)
+    }
+    var f: FrozenArena<T> = FrozenArena {
+        id: a.id, data: a.data
+    }
+    return Result.Ok(f)
+}
+
+// Whether `h` names a slot in THIS frozen arena. False for a handle minted by a
+// different arena. Use it when a foreign handle is a possibility you want to
+// branch on rather than abort over.
+pub fn frozenHolds<T>(a: &FrozenArena<T>, h: Handle<T>): bool {
+    if h.arenaId != a.id {
+        return false
+    }
+    let idx = h.index as i64
+    return idx >= 0 && idx < a.data.len
+}
+
+// The value at `h`. Infallible for any handle this arena's source minted.
+//
+// The two checks that remain are not liveness checks, they are confusion
+// checks: a handle from ANOTHER arena, or an index outside this arena's
+// storage, has nothing to do with staleness and must not be allowed to read
+// unrelated memory. Both abort with a named message rather than return a
+// plausible-looking value.
+pub fn frozenGet<T>(a: &FrozenArena<T>, h: Handle<T>): T {
+    assert(h.arenaId == a.id, "frozen arena: handle was minted by a different arena")
+    let idx = h.index as i64
+    assert(idx >= 0, "frozen arena: handle index is negative")
+    assert(idx < a.data.len, "frozen arena: handle index is past the end of this arena")
+    // Routed through Option for the same reason arenaGet is: returning the
+    // element directly trips the `index-clone` lint AT THIS DEFINITION, where a
+    // reader of a user program can do nothing about it. The copy is this
+    // accessor's whole contract (see `read` for the borrowing form), so the
+    // warning has no actionable target here. Cost is identical to arenaGet's.
+    let copied: Option<T> = Option.Some(a.data[idx])
+    return copied!
+}
+
+// Borrow the value at `h` instead of copying it. Prefer this to `get` when T
+// owns heap storage, since `get` hands back a copy.
+pub fn frozenRead<T>(a: &FrozenArena<T>, h: Handle<T>, f: (&T) => void): void {
+    assert(h.arenaId == a.id, "frozen arena: handle was minted by a different arena")
+    let idx = h.index as i64
+    assert(idx >= 0, "frozen arena: handle index is negative")
+    assert(idx < a.data.len, "frozen arena: handle index is past the end of this arena")
+    f(a.data[idx])
+}
+
+// Slots held. Every one is live, so unlike Arena.len this is also the storage
+// count.
+pub fn frozenLen<T>(a: &FrozenArena<T>): i64 {
+    return a.data.len
+}
+
 // Method API — same functionality, nicer syntax.
 //
 // These are the forms you will actually write, so each carries its own doc: the
@@ -484,5 +625,45 @@ impl Arena<T> {
     // allocs after it do not appear in it.
     fn handles(self: &Self): Vec<Handle<T>> {
         return arenaHandles(self)
+    }
+    // End the build phase: consume this arena and hand back a FrozenArena<T>
+    // whose `get` returns T rather than Option<T>. `self` is moved, so any
+    // later use of this binding is a compile error.
+    //
+    // Errs if this arena ever freed a slot; see arenaFreeze for why that is
+    // refused rather than papered over.
+    fn freeze(self: Self): Result<FrozenArena<T>, FreezeRejected<T>> {
+        return arenaFreeze(self)
+    }
+
+    // Whether `freeze` would succeed. Ask before committing the move if you
+    // would rather branch than unpack a rejection.
+    fn freezable(self: &Self): bool {
+        return arenaFreezable(self)
+    }
+}
+
+impl FrozenArena<T> {
+    // The value at `h`, with no Option to unwrap. Aborts only on a handle from
+    // another arena or an out-of-range index, neither of which is staleness.
+    fn get(self: &Self, h: Handle<T>): T {
+        return frozenGet(self, h)
+    }
+
+    // Borrow the value at `h` rather than copying it. Prefer this when T owns
+    // heap storage.
+    fn read(self: &Self, h: Handle<T>, f: (&T) => void): void {
+        frozenRead(self, h, f)
+    }
+
+    // Whether `h` names a slot here. Branch on this instead of `get` when a
+    // foreign handle is a case you expect rather than a bug.
+    fn holds(self: &Self, h: Handle<T>): bool {
+        return frozenHolds(self, h)
+    }
+
+    // Slots held; every one is live.
+    fn len(self: &Self): i64 {
+        return frozenLen(self)
     }
 }

@@ -1,0 +1,68 @@
+// @expect: root 1
+// @expect: leaf 2
+// @expect: len=2
+// @expect: holds=true
+// @expect: foreign=false
+// @expect: freezable=false
+// @expect: refused: freed
+// @expect: ok after refusal: 7
+from "std/arena" import {
+    Arena, FrozenArena, Handle
+}
+
+struct Node {
+    name: string, n: i64
+}
+
+pub fn main(): i32 {
+    // Build phase, then freeze: lookups stop returning Option.
+    var a: Arena<Node> = Arena<Node>.new()
+    let h1 = a.alloc(Node {
+        name: "root", n: 1
+    }
+    )
+    let h2 = a.alloc(Node {
+        name: "leaf", n: 2
+    }
+    )
+    let tree = a.freeze()!
+
+    let n1 = tree.get(h1)
+    print(n1.name + " " + n1.n.toString())
+    tree.read(h2, (v: &Node): void => {
+        print(v.name + " " + v.n.toString())
+    }
+    )
+    print("len=" + tree.len().toString())
+    print("holds=" + tree.holds(h1).toString())
+
+    // A handle minted by a different arena is not held here. `get` would abort;
+    // `holds` is the branchable form.
+    var other: Arena<Node> = Arena<Node>.new()
+    let foreign = other.alloc(Node {
+        name: "elsewhere", n: 3
+    }
+    )
+    print("foreign=" + tree.holds(foreign).toString())
+
+    // An arena that ever freed a slot cannot be frozen: a stale handle would
+    // name a live slot holding a different value, and the frozen `get` has no
+    // generation check left to catch it.
+    var churn: Arena<i64> = Arena<i64>.new()
+    let c1 = churn.alloc(7)
+    let c2 = churn.alloc(8)
+    churn.free(c2)
+    print("freezable=" + churn.freezable().toString())
+    match churn.freeze() {
+        Result.Ok(_f) => {
+            print("WRONG: froze an arena that freed")
+        }
+        Result.Err(rej) => {
+            // The refusal hands the arena back, so nothing is lost.
+            print("refused: freed")
+            var recovered = rej.arena
+            print("ok after refusal: " + recovered.get(c1)!.toString())
+        }
+    }
+    return 0
+}

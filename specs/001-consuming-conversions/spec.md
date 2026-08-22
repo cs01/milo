@@ -244,8 +244,18 @@ repository and obtains the published numbers within the stated tolerance on the 
 
 - **FR-014**: A programmer MUST be able to consume an arena and receive a read-only arena on which no
   operation removes, clears, reuses, or allocates storage.
+- **FR-014a** (added during implementation, 2026-08-22): The conversion MUST be refused for an arena
+  that ever released a slot, and the refusal MUST return the arena to the caller rather than
+  consuming it. Rationale: a released-then-reused slot leaves handles that name a live slot now
+  holding a different value, and FR-015 removes the check that would catch them, so an unrefused
+  conversion would turn a caught staleness error into a silently wrong value. Refusing is what makes
+  FR-015 safe to state. Callers MUST also have a non-consuming way to ask whether the conversion
+  would succeed.
 - **FR-015**: Lookup on a read-only arena MUST return the value directly, with no optional wrapper
   and no generation or liveness check, for any handle minted from that arena before conversion.
+  Checks for a handle from a different arena and for an index outside the arena's storage MUST
+  remain, since neither concerns staleness; both MUST fail with a named message rather than read
+  unrelated memory.
 - **FR-016**: A handle minted from a different arena MUST be rejected: at compile time where the
   element types differ, and at runtime with a named deterministic error where they do not.
 - **FR-017**: A slot index outside the arena's storage MUST fail with a named bounds error.
@@ -278,18 +288,18 @@ repository and obtains the published numbers within the stated tolerance on the 
   results; the existing arena, vector, and concurrency surfaces MUST keep their current behaviour
   for callers that do not opt in.
 
-**Scope decisions requiring confirmation**
+**Scope decisions (resolved 2026-08-22, defaults taken so work could proceed)**
 
-- **FR-027**: Convenience wrappers that hide the divide-and-reassemble cycle behind a single
-  parallel-transform call, dynamic load balancing over a work queue of windows, a reusable worker
-  pool behind blocking promises, an append-only middle tier for arenas, and an offsets mode for
-  generated deserializers are [NEEDS CLARIFICATION: in scope for this feature, or deferred to a
-  follow-on feature? The source material lists them as "Phase 2" of each plan].
-- **FR-028**: The per-core scheduler runtime, the strictly static fork-join borrow primitive, and the
-  public blog post are [NEEDS CLARIFICATION: in scope, or explicitly excluded? The source material
-  labels the first two as later phases and a research track, and the third as an outline whose own
-  pre-publish checklist blocks it until numbers are re-measured on multi-core hardware by an
-  independent party].
+- **FR-027**: Out of scope for this feature, deferred to a follow-on: convenience wrappers that hide
+  the divide-and-reassemble cycle behind a single parallel-transform call, dynamic load balancing
+  over a work queue of windows, a reusable worker pool behind blocking promises, an append-only
+  middle tier for arenas, and an offsets mode for generated deserializers. The source material calls
+  these "Phase 2" of each plan, and each presupposes its Phase 1 has shipped and been measured.
+- **FR-028**: Out of scope, explicitly: the per-core scheduler runtime, the strictly static fork-join
+  borrow primitive, and the public blog post. The first two are labelled later phases and a research
+  track by the source material itself. The blog post is blocked by its own pre-publish checklist,
+  which requires every number re-measured on multi-core hardware and reproduced by someone other
+  than the implementer; it cannot be written honestly until the three mechanisms ship.
 
 ### Key Entities
 

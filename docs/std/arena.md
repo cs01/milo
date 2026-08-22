@@ -33,6 +33,28 @@ False if `h` was already stale — so a double free is a no-op, not a fault.
 Does NOT shrink the arena, and does not chase handles held INSIDE the
 freed value; a cyclic graph still needs a sweep you write.
 
+### `Arena.freezable`
+
+```milo
+fn Arena.freezable(self: &Arena): bool
+```
+
+Whether `freeze` would succeed. Ask before committing the move if you
+would rather branch than unpack a rejection.
+
+### `Arena.freeze`
+
+```milo
+fn Arena.freeze(self: Arena): Result<FrozenArena<T>, FreezeRejected<T>>
+```
+
+End the build phase: consume this arena and hand back a FrozenArena<T>
+whose `get` returns T rather than Option<T>. `self` is moved, so any
+later use of this binding is a compile error.
+
+Errs if this arena ever freed a slot; see arenaFreeze for why that is
+refused rather than papered over.
+
 ### `Arena.get`
 
 ```milo
@@ -165,6 +187,36 @@ pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool
 Free a slot, bumping its generation so stale handles are detected. A slot at
 maximum generation is retired rather than wrapped back onto an old handle.
 
+### `arenaFreezable`
+
+```milo
+pub fn arenaFreezable<T>(a: &Arena<T>): bool
+```
+
+Whether `freeze` would succeed, without consuming anything. Cheap enough to
+call before deciding, O(n) in slots.
+
+### `arenaFreeze`
+
+```milo
+pub fn arenaFreeze<T>(a: Arena<T>): Result<FrozenArena<T>, FreezeRejected<T>>
+```
+
+Consume an arena and hand back a read-only view of the same storage. O(n) in
+slots to check the precondition; no element is copied.
+
+Refused when the source arena ever freed a slot, and the refusal returns the
+arena. That refusal is the whole reason `get` can skip the generation check:
+a slot that was freed and then reallocated leaves stale handles naming a LIVE
+slot that now holds a DIFFERENT value, and an unchecked `get` would hand that
+value back as though it were the right one. Silently returning the wrong
+value is worse than any rejection, so the freeze is refused instead and the
+caller keeps the generation-checked arena.
+
+A slot's generation is 1 from birth and only `free` ever moves it (to a
+negative value, or to 0 when the slot retires), so `gens[i] != 1` is exactly
+the test for "this slot was freed at some point".
+
 ### `arenaGet`
 
 ```milo
@@ -274,3 +326,80 @@ Read via borrow — no copy. The &T flows into `f` as a second-class ref:
 valid only inside the closure, never stored or returned. Returns None (and
 does not call f) if the handle is stale. This is the zero-copy alternative
 to arenaGet for large T — read just the field(s) you need inside f.
+
+### `FrozenArena.get`
+
+```milo
+fn FrozenArena.get(self: &FrozenArena, h: Handle<T>): T
+```
+
+The value at `h`, with no Option to unwrap. Aborts only on a handle from
+another arena or an out-of-range index, neither of which is staleness.
+
+### `FrozenArena.holds`
+
+```milo
+fn FrozenArena.holds(self: &FrozenArena, h: Handle<T>): bool
+```
+
+Whether `h` names a slot here. Branch on this instead of `get` when a
+foreign handle is a case you expect rather than a bug.
+
+### `FrozenArena.len`
+
+```milo
+fn FrozenArena.len(self: &FrozenArena): i64
+```
+
+Slots held; every one is live.
+
+### `FrozenArena.read`
+
+```milo
+fn FrozenArena.read(self: &FrozenArena, h: Handle<T>, f: (&T) => void): void
+```
+
+Borrow the value at `h` rather than copying it. Prefer this when T owns
+heap storage.
+
+### `frozenGet`
+
+```milo
+pub fn frozenGet<T>(a: &FrozenArena<T>, h: Handle<T>): T
+```
+
+The value at `h`. Infallible for any handle this arena's source minted.
+
+The two checks that remain are not liveness checks, they are confusion
+checks: a handle from ANOTHER arena, or an index outside this arena's
+storage, has nothing to do with staleness and must not be allowed to read
+unrelated memory. Both abort with a named message rather than return a
+plausible-looking value.
+
+### `frozenHolds`
+
+```milo
+pub fn frozenHolds<T>(a: &FrozenArena<T>, h: Handle<T>): bool
+```
+
+Whether `h` names a slot in THIS frozen arena. False for a handle minted by a
+different arena. Use it when a foreign handle is a possibility you want to
+branch on rather than abort over.
+
+### `frozenLen`
+
+```milo
+pub fn frozenLen<T>(a: &FrozenArena<T>): i64
+```
+
+Slots held. Every one is live, so unlike Arena.len this is also the storage
+count.
+
+### `frozenRead`
+
+```milo
+pub fn frozenRead<T>(a: &FrozenArena<T>, h: Handle<T>, f: (&T) => void): void
+```
+
+Borrow the value at `h` instead of copying it. Prefer this to `get` when T
+owns heap storage, since `get` hands back a copy.

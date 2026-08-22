@@ -2,8 +2,8 @@
 system: positioning
 purpose: honest account of where Rust genuinely wins over Milo, and the claims Milo may and may not make
 key-files: docs/ownership-model.md, docs/memory-safety-vs-rust.md, docs/design.md
-update-when: the residue changes — a feature lands that closes one of the three gaps, or the safe-claim boundary moves
-last-verified: 2026-07-29
+update-when: the residue changes (a feature lands that closes one of the three gaps, or the safe-claim boundary moves)
+last-verified: 2026-08-22
 -->
 
 # The residue: where Rust genuinely wins
@@ -15,6 +15,23 @@ Milo's axiom is that **values are closed**: nothing aliases in, nothing escapes 
 ## 1. Compile-time rejection of stale stored references
 
 Rust proves at compile time that a stored reference never outlives its referent. Milo forbids storing references at all, so the question never arises for references — but the *need* doesn't vanish. Graph-shaped, stored, or long-lived data goes through pool indices and generational handles ([SlotMap](std/) is the blessed collection). A stale handle is caught **at runtime** as a deterministic error, never as silent aliasing or UB.
+
+**The build-then-read majority now gets the compile-time answer** (2026-08-22). `Arena.freeze()`
+consumes an arena and returns a `FrozenArena<T>` on which `alloc`, `free` and `clear` do not exist.
+Every handle the arena minted is therefore still live, so `get` returns `T` rather than
+`Option<T>`: no generation check, no liveness check, nothing to unwrap at the call site. The proof
+is the move checker that already shipped, not a new rule. Touching the old arena binding afterwards
+is `error: use of moved variable 'a'`.
+
+The scope of that claim is exact. `freeze` is **refused** for an arena that ever freed a slot, and
+the refusal hands the arena back (`FreezeRejected<T>`). It has to be: a freed-then-reallocated slot
+leaves stale handles naming a live slot that now holds a different value, and a `get` with no
+generation check would return that value as though it were right. Arenas that genuinely free and
+reuse keep their generational checks and stay exactly as described above. So the residue does not
+close here, it splits: build-then-read is now compile-time, free-and-reuse is still runtime-checked
+and still waiting on the contracts profile. Two checks also survive `freeze` and are not about
+staleness at all, a handle from a different arena and an index past the end; both abort with a named
+message rather than read unrelated memory.
 
 For most code, runtime-deterministic is fine. For TLS session state, kernel objects, or a DB engine's page table — where a stale-handle panic in production is itself unacceptable — Rust's compile-time rejection is genuinely stronger. Milo's answer to that tier is the contracts profile (see [verification-roadmap](verification-roadmap.md)): prove `pool.contains(h)` statically and the runtime check is elided. Until a given call is proven, it runs checked. That is graceful degradation Rust's all-or-nothing signature can't offer — but the *default* is a runtime check, and honesty requires saying so.
 

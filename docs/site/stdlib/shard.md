@@ -68,9 +68,20 @@ Keep the owner alive until `weld`. A window is a pointer into the owner's buffer
 `weld` checks what it can: every window must carry this shatter's identity and the set must cover the buffer exactly. A missing window means some worker may still be holding a pointer, so `weld` refuses rather than handing the `Vec` back.
 
 ```milo
-match owner.weld(back) {
-    Result.Ok(v) => { /* the original allocation */ }
-    Result.Err(e) => { /* deterministic: a window is missing, or came from another shatter */ }
+var data: Vec<i64> = Vec.withCapacity(4)
+data.push(1)
+data.push(2)
+var owner = shatter(data, 2)
+var windows = owner.windows()
+
+match owner.weld(windows) {
+    Result.Ok(v) => {
+        print("welded " + v.len.toString())
+    }
+    Result.Err(_e) => {
+        // Deterministic: a window is missing, or came from another shatter.
+        print("weld refused")
+    }
 }
 ```
 

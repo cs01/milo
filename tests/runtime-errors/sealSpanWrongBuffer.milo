@@ -1,0 +1,25 @@
+// @runtime-error: span was measured against a different buffer
+
+// A Span carries the identity of the buffer it was measured from. Without that brand
+// this program returned "GOODB" and reported nothing: the span is in bounds for the
+// wrong buffer, so neither the bounds check nor anything else had a reason to object.
+//
+// Rust rules this out at compile time with an invariant lifetime. With no lifetimes to
+// carry the tie, the brand is the honest substitute — it does not reject the program,
+// it converts a wrong answer into a named failure, which is the demotion discipline in
+// docs/residue-vs-rust.md applied to this module's own gap.
+from "std/seal" import {
+    Sealed, Span, seal
+}
+
+pub fn main(): i32 {
+    let a = seal("hello world aaaa")
+    let b = seal("GOODBYE EARTH bb")
+
+    let spA = a.spanOf(0, 5)
+    print(a.text(spA))
+
+    // Same length, perfectly in bounds for b. Different buffer.
+    print(b.text(spA))
+    return 0
+}

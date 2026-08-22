@@ -34,12 +34,24 @@
 // compile time needs a lifetime or a brand to carry the tie, and neither exists
 // under this language's axiom. See docs/residue-vs-rust.md.
 
-// A start and a length, in bytes. Plain data: copy it, store it, serialise it.
-// Meaningful only against the Sealed it was measured from.
+// A start, a length, and the identity of the buffer it was measured from.
+//
+// The brand is what stops the one silent failure this design had: a span resolved
+// against a DIFFERENT sealed buffer used to read wrong-but-in-bounds bytes and report
+// nothing. Rust prevents that with an invariant lifetime; with no lifetimes to carry
+// the tie, a runtime tag is the honest substitute, and it demotes a wrong answer to a
+// named error — the claim discipline in docs/residue-vs-rust.md, applied to itself.
+//
+// It costs nothing in space: `len` narrowed to i32 to make room, so a Span is the same
+// 16 bytes it was. That caps one span at 2GB, which is a span, not a buffer.
+//
+// Make them with `src.span(start, len)`; a hand-built Span carries brand 0, which no
+// buffer ever has, so it fails closed rather than reading something plausible.
 @derive(Eq)
 pub struct Span {
     start: i64,
-    len: i64,
+    len: i32,
+    brand: i32,
 }
 
 // An immutable byte buffer. Produced by consuming a string with `seal`; the
@@ -49,12 +61,21 @@ pub struct Span {
 // by a check, it is absent from the type.
 pub struct Sealed {
     data: string,
+    brand: i32,
 }
+
+// Brands start at 1 so that a zero-valued Span (hand-built, or a zeroed struct field)
+// never matches a real buffer.
+var nextSealBrand: i64 = 1
 
 // Consume a buffer and return it sealed. O(1): the bytes are moved, not copied.
 pub fn seal(s: string): Sealed {
+    var b: i64 = 0
+    unsafe {
+        b = _atomicAddI64((nextSealBrand.addrOf()) as *u8, 1)
+    }
     var out: Sealed = Sealed {
-        data: s
+        data: s, brand: b as i32
     }
     return out
 }
@@ -78,7 +99,16 @@ pub fn sealedLen(s: &Sealed): i64 {
 // A span covering the whole buffer.
 pub fn sealedSpan(s: &Sealed): Span {
     var sp: Span = Span {
-        start: 0, len: s.data.len
+        start: 0, len: s.data.len as i32, brand: s.brand
+    }
+    return sp
+}
+
+// Measure a span against THIS buffer. The only way to get a span that resolves:
+// a hand-built Span carries brand 0, which no buffer ever has.
+pub fn sealedSpanOf(s: &Sealed, start: i64, len: i64): Span {
+    var sp: Span = Span {
+        start: start, len: len as i32, brand: s.brand
     }
     return sp
 }
@@ -86,10 +116,13 @@ pub fn sealedSpan(s: &Sealed): Span {
 // Whether `sp` fits inside this buffer. Cheap; use it when a span from an
 // untrusted source might not belong here.
 pub fn sealedHolds(s: &Sealed, sp: Span): bool {
+    if sp.brand != s.brand {
+        return false
+    }
     if sp.start < 0 || sp.len < 0 {
         return false
     }
-    return sp.start + sp.len <= s.data.len
+    return sp.start + (sp.len as i64) <= s.data.len
 }
 
 // The byte at `i`, bounds-checked. For a whole range prefer `text` or, to avoid the
@@ -103,8 +136,9 @@ pub fn sealedByteAt(s: &Sealed, i: i64): u8 {
 // the only one: naming it `text` rather than hiding it behind indexing is the
 // point, so a reader can see where the copies are.
 pub fn sealedText(s: &Sealed, sp: Span): string {
+    assert(sp.brand == s.brand, "sealed: span was measured against a different buffer")
     assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
-    return s.data.substr(sp.start, sp.start + sp.len)
+    return s.data.substr(sp.start, sp.start + (sp.len as i64))
 }
 
 // Compare a span against a string WITHOUT materialising it. This is what keeps
@@ -114,11 +148,11 @@ pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
     if !sealedHolds(s, sp) {
         return false
     }
-    if sp.len != other.len {
+    if (sp.len as i64) != other.len {
         return false
     }
     var i: i64 = 0
-    while i < sp.len {
+    while i < (sp.len as i64) {
         if s.data[sp.start + i] != other[i] {
             return false
         }
@@ -130,9 +164,10 @@ pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
 // Read the span's bytes one at a time without materialising it. The borrowing
 // form: `f` sees each byte, nothing is allocated.
 pub fn sealedEach(s: &Sealed, sp: Span, f: (u8) => void): void {
+    assert(sp.brand == s.brand, "sealed: span was measured against a different buffer")
     assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
     var i: i64 = 0
-    while i < sp.len {
+    while i < (sp.len as i64) {
         f(s.data[sp.start + i])
         i = i + 1
     }
@@ -147,6 +182,12 @@ impl Sealed {
     // A span over the whole buffer.
     fn span(self: &Self): Span {
         return sealedSpan(self)
+    }
+
+    // Measure a span against this buffer. Use this rather than building a Span by
+    // hand: a hand-built one carries brand 0 and will not resolve anywhere.
+    fn spanOf(self: &Self, start: i64, len: i64): Span {
+        return sealedSpanOf(self, start, len)
     }
 
     // Whether `sp` fits here. Branch on this for a span you did not measure

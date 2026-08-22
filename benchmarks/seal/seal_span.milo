@@ -29,10 +29,7 @@ pub fn main(): i32 {
             while j < src.len() && src.byteAt(j) != 34 {
                 j = j + 1
             }
-            kept.push(Span {
-                start: i + 1, len: j - i - 1
-            }
-            )
+            kept.push(src.spanOf(i + 1, j - i - 1))
             i = j + 1
         } else {
             i = i + 1
@@ -40,7 +37,7 @@ pub fn main(): i32 {
     }
     var total: i64 = 0
     for k in kept {
-        total = total + k.len
+        total = total + (k.len as i64)
     }
     let t1 = epochMillis()
     print("span ms=" + (t1 - t0).toString() + " kept=" + kept.len.toString() + " bytes=" + total.toString())

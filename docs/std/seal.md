@@ -59,6 +59,15 @@ fn Sealed.span(self: &Sealed): Span
 
 A span over the whole buffer.
 
+### `Sealed.spanOf`
+
+```milo
+fn Sealed.spanOf(self: &Sealed, start: i64, len: i64): Span
+```
+
+Measure a span against this buffer. Use this rather than building a Span by
+hand: a hand-built one carries brand 0 and will not resolve anywhere.
+
 ### `Sealed.text`
 
 ```milo
@@ -127,6 +136,15 @@ pub fn sealedSpan(s: &Sealed): Span
 ```
 
 A span covering the whole buffer.
+
+### `sealedSpanOf`
+
+```milo
+pub fn sealedSpanOf(s: &Sealed, start: i64, len: i64): Span
+```
+
+Measure a span against THIS buffer. The only way to get a span that resolves:
+a hand-built Span carries brand 0, which no buffer ever has.
 
 ### `sealedText`
 

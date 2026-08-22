@@ -19,7 +19,7 @@ pub fn main(): i32 {
     var buf: string = "{\"name\":\"milo\"}"
     let src = seal(buf)              // buf is moved; it cannot be changed again
 
-    let name: Span = Span { start: 9, len: 4 }
+    let name: Span = src.spanOf(9, 4)      // measured against src, and branded with it
 
     print(src.text(name))            // "milo" — this is the allocation
     print(src.eq(name, "milo").toString())   // "true" — this one allocates nothing
@@ -36,6 +36,36 @@ Two things are true at once, and together they are the whole guarantee:
 
 So there is no path, safe or otherwise, that changes the bytes a span points at while the `Sealed` is alive.
 
+## Spans are branded
+
+A `Span` carries the identity of the buffer it was measured from, so resolving one
+against a *different* `Sealed` fails loudly instead of returning wrong-but-in-bounds
+bytes:
+
+```milo
+from "std/seal" import { seal }
+
+pub fn main(): i32 {
+    let a = seal("hello world aaaa")
+    let b = seal("GOODBYE EARTH bb")
+    let sp = a.spanOf(0, 5)
+
+    print(a.text(sp))                      // "hello"
+    print(b.holds(sp).toString())          // "false" — not this buffer's span
+    // b.text(sp) aborts: "span was measured against a different buffer"
+    return 0
+}
+```
+
+Before the brand that last line returned `"GOODBYE"[0..5]` and said nothing. It is
+still not what Rust does — Rust rejects it at compile time with an invariant lifetime,
+and with no lifetimes to carry the tie a runtime brand is the honest substitute. What
+it buys is the demotion this project's claim discipline asks for: a wrong answer
+becomes a named failure.
+
+Build spans with `src.spanOf(start, len)`. A hand-built `Span` carries brand 0, which
+no buffer ever has, so it fails closed rather than resolving somewhere plausible.
+
 ## Span is plain data
 
 ```milo
@@ -47,7 +77,7 @@ struct Token {
 }
 ```
 
-A `Span` is two integers. No pointer, no hidden state, `Copy`. Put it in a struct field, a `Vec`, a map key, or a serialised record. It costs nothing to keep and it touches memory only when you resolve it against a `Sealed`.
+A `Span` is three integers packed into 16 bytes: a start, a length, and its buffer's brand. No pointer, no hidden state, `Copy`. Put it in a struct field, a `Vec`, a map key, or a serialised record. It costs nothing to keep and it touches memory only when you resolve it against a `Sealed`.
 
 ## Compare without copying
 
@@ -59,7 +89,7 @@ from "std/seal" import { Sealed, Span, seal }
 pub fn main(): i32 {
     var buf: string = "let x = 1"
     let src = seal(buf)
-    let word: Span = Span { start: 0, len: 3 }
+    let word: Span = src.spanOf(0, 3)
 
     print(src.eq(word, "let").toString())    // true, no allocation
     print(src.text(word))                    // "let", one allocation

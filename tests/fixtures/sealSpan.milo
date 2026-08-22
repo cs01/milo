@@ -25,21 +25,15 @@ pub fn main(): i32 {
     // them. No reference is stored and nothing is copied.
     var toks: Vec<Token> = Vec.new()
     toks.push(Token {
-        kind: 1, at: Span {
-            start: 2, len: 4
-        }
+        kind: 1, at: src.spanOf(2, 4)
     }
     )
     toks.push(Token {
-        kind: 2, at: Span {
-            start: 9, len: 4
-        }
+        kind: 2, at: src.spanOf(9, 4)
     }
     )
     toks.push(Token {
-        kind: 1, at: Span {
-            start: 16, len: 4
-        }
+        kind: 1, at: src.spanOf(16, 4)
     }
     )
 
@@ -51,9 +45,7 @@ pub fn main(): i32 {
     print("eq-wrong=" + src.eq(toks[1].at, "name").toString())
 
     // A span that does not fit is rejected rather than read.
-    let foreign: Span = Span {
-        start: 100, len: 4
-    }
+    let foreign: Span = src.spanOf(100, 4)
     print("holds-foreign=" + src.holds(foreign).toString())
 
     var n = 0

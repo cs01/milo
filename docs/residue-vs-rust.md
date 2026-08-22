@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: positioning
 purpose: honest account of where Rust genuinely wins over Milo, and the claims Milo may and may not make
-key-files: docs/ownership-model.md, docs/memory-safety-vs-rust.md, docs/design.md
+key-files: docs/ownership-model.md, docs/memory-safety-vs-rust.md, docs/design.md, std/arena.milo, std/seal.milo, std/shard.milo
 update-when: the residue changes (a feature lands that closes one of the three gaps, or the safe-claim boundary moves)
 last-verified: 2026-08-22
 -->
@@ -11,6 +11,21 @@ last-verified: 2026-08-22
 This document exists so every later design decision stays honest about what Milo is and isn't trying to be. Users will find these gaps themselves. Naming them first is cheaper than being caught denying them.
 
 Milo's axiom is that **values are closed**: nothing aliases in, nothing escapes out. References are second-class (see [ownership-model](ownership-model.md)). That axiom buys a great deal — no lifetimes, structural disjointness, cheap proofs. It also has a residue: three workloads where Rust's ability to *keep* references safely is a real advantage Milo does not match. These are not bugs. They are the price of the axiom.
+
+**Where this stands as of 2026-08-22.** All three residues have had their most common workload
+taken out of them by the same idea, and none of it needed a new language rule. Where Rust proves a
+property of a reference, Milo removes the operation that could violate the property, and the move
+checker proves the removal:
+
+| Residue | Rust proves | Milo removes | Mechanism |
+|---|---|---|---|
+| 1 staleness | a stored reference never goes stale | removal (`free`/`clear` do not exist) | `Arena.freeze` |
+| 2 aliasing | disjoint `&mut` borrows | aliasing (ownership divides) | `shatter` / `weld` |
+| 3 invalidation | a borrow outlives its referent | mutation (no mutating method exists) | `seal` + `Span` |
+
+Each section below says what its mechanism closed and, at more length, what it did not. The residue
+did not disappear; it split into a compile-time half and a smaller runtime-checked half, and naming
+that second half is what these sections are now for.
 
 ## 1. Compile-time rejection of stale stored references
 
@@ -39,11 +54,43 @@ For most code, runtime-deterministic is fine. For TLS session state, kernel obje
 
 `par_iter_mut`, scoped threads carving one array into disjoint mutable slices, work-stealing over shared state — Rust checks these safe. Milo **bans the workload** rather than checking it. There is no `&mut [T]` split into aliasing-free sub-slices across threads (see backlog: mutable slice split). Multicore scaling is Node-style: processes, message passing, `Promise.blocking` workers that move-capture their inputs.
 
+**Divisible ownership now covers the in-place case** (2026-08-22, `std/shard`). Rust proves that
+several `&mut` slices into one buffer are disjoint. Milo does not prove it, because it makes the
+ownership itself divisible: `shatter` CONSUMES a `Vec` and yields disjoint owned windows, each of
+which a worker receives by move like any other value. No reference crosses a thread. The aliasing
+argument is the move checker that already shipped, plus `@noCopy` on the window, so handing the
+same window to two workers is a compile error rather than a race.
+
+Measured on a 10-core machine, 20M `f64`, 4 workers, against the C program doing the banned thing
+(pthreads over one shared buffer): Milo 3 ms / 170.9 MB, C 4 ms / 161.4 MB, Milo sequential
+6 ms / 161.4 MB. The copy tax is gone; what remains is a flat 9.5 MB of worker stacks, the same
+9.5 MB at 40M elements.
+
+What does NOT close: `weld` verifies at RUNTIME that every window came back, because a window is a
+pointer into the owner's buffer and dropping the owner early is a use-after-free nothing here
+catches. Rust's borrow checker rejects the equivalent mistake at compile time. Keeping the owner
+alive until `weld` is an obligation on the programmer. Stencils with overlapping halos, true 2D
+tiles, and long-lived contended shared state all remain outside what dividing ownership can do.
+
 For a parser, CLI, or service this is the right trade and often faster to reason about. For a physics kernel, an ECS inner loop, or a tiled image filter that must share one buffer across cores, Rust does the thing Milo won't. Don't pretend the process model covers it — it covers throughput, not shared-memory data parallelism.
 
 ## 3. Stored zero-copy
 
 Borrowed ASTs, zero-copy deserializers, a `struct` holding `&str` slices into an input buffer — Rust stores those borrows and proves them valid. Milo can't store a reference, so its zero-copy story is **offset pairs into an owned buffer**: hold the buffer, carry `(start, len)`, resolve on access. Views (`&[T]`/`&str`, second-class) delete the *transient* clones — passing a sub-slice down a call — but a structure that must *retain* a view over a buffer it doesn't own is the stored-borrow case again, and the answer is offsets.
+
+**Consuming the buffer into an immutable type covers the retained-view case** (2026-08-22,
+`std/seal`). A stored view is dangerous for exactly one reason: the buffer can change under it. So
+`seal` consumes a buffer into a `Sealed` on which no mutating operation exists. Offsets kept
+against it (`Span`: two integers, `Copy`, storable anywhere) cannot be invalidated, because no
+operation that could invalidate them exists. Mutation is not rejected by a check that might have a
+hole in it; it is absent from the type. There is no `unsafe` in the module.
+
+What does NOT close: a `Span` carries no record of WHICH buffer it was measured from. Resolving one
+against the wrong `Sealed` reads wrong-but-in-bounds bytes, or fails the bounds check. That is a
+deterministic logic error, never memory-unsafety, and it is precisely what Rust's lifetimes reject
+outright. Binding a span to one buffer at compile time needs a lifetime or a brand to carry the
+tie, and neither exists under the axiom. Buffers that must keep mutating while views are held (an
+editor's rope, an incremental parser's live text) stay on offsets-by-convention.
 
 ## The claim discipline
 

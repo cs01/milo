@@ -6,6 +6,7 @@
   "arenaBasic.milo": "noEmit",
   "arenaContracts.milo": "noEmit",
   "arenaCrossArena.milo": "noEmit",
+  "arenaFreeze.milo": "noEmit",
   "arenaHandles.milo": "noEmit",
   "arenaMemCoexist.milo": "noEmit",
   "arenaMethod.milo": "noEmit",

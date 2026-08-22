@@ -37,6 +37,17 @@ for dir in "$ROOT"/*/; do
     [ -z "$FILTER" ] || [ "$FILTER" = "$name" ] || continue
     [ -d "$dir/tests" ] || continue
 
+    # A suite whose imports go through the package manager needs its deps on disk
+    # first. Without this the suite fails to RESOLVE, and the gate reported that as
+    # a package failure — three red suites in milo-json-rpc that were really just an
+    # un-run `milo install`. A setup problem must not read as a test result, so the
+    # install is reported on its own line and the suites still run either way.
+    if [ -f "$dir/tests/milo.json" ]; then
+        if ! (cd "$dir/tests" && "$MILO" install >/dev/null 2>&1); then
+            echo "WARN $name — 'milo install' in tests/ failed; suites below may fail to resolve"
+        fi
+    fi
+
     for t in "$dir"tests/*_test.milo; do
         [ -f "$t" ] || continue
         base=$(basename "$t")

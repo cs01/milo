@@ -47,6 +47,13 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 
 # benchmark artifacts
+benchmarks/shard/shard_seq
+benchmarks/shard/shard_par
+benchmarks/shard/shard_c
+benchmarks/freeze/freeze_gen
+benchmarks/freeze/freeze_frozen
+benchmarks/seal/seal_owned
+benchmarks/seal/seal_span
 benchmarks/fib/fib_milo
 benchmarks/fib/fib_c
 benchmarks/fib/fib_go

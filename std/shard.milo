@@ -47,6 +47,7 @@ from "std/os" import {
 pub struct Shard<T> {
     base: *T,
     len: i64,
+    start: i64,
     shatterId: i64,
     index: i64,
 }
@@ -62,6 +63,14 @@ impl Shard<T> {
     // Which window of the shatter this is, counting from 0.
     fn index(self: &Self): i64 {
         return self.index
+    }
+
+    // Where this window begins in the ORIGINAL buffer. Without it a worker can only
+    // do position-independent work: a filter that needs to know which pixel, row or
+    // sample it is looking at has no way to find out, because a window's own indices
+    // all start at 0. Global position of element `i` is `start() + i`.
+    fn start(self: &Self): i64 {
+        return self.start
     }
 
     fn get(self: &Self, i: i64): T {
@@ -181,6 +190,7 @@ impl Shards<T> {
                 var sh: Shard<T> = Shard {
                     base: ((p as i64) + lo * sizeOf<T>()) as *T,
                     len: hi - lo,
+                    start: lo,
                     shatterId: self.shatterId,
                     index: i,
                 }

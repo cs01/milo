@@ -89,6 +89,10 @@ claim there: the move-only route to parallelism used to force a copy per worker,
 | c pthreads over one shared buffer | 3 ms | 154.0 MiB |
 
 20M `f64`, `a[i] = a[i] * 1.0000001 + 0.5`, best of 3, Apple M-series, `--release`.
+
+`sh benchmarks/shard/scale.sh` measures the other claim, speedup, on a compute-bound
+kernel where the memory bus is not the limit: 292 ms on 1 worker, 146 on 2 (2.00x),
+82 on 4 (3.56x), 60 on 8 (4.87x), 58 on 10 (5.03x).
 The loop is memory-bandwidth-bound, so the times sit in a 3-7 ms band run to run and
 four workers buy well under 4x. The memory numbers are stable: the 9.1 MiB the
 parallel row adds is worker stacks, a fixed cost that does not grow with n.

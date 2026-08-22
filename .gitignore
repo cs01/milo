@@ -46,6 +46,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
+mandelbrot.png
+benchmarks/shard/shard_scale
+
 # benchmark artifacts
 benchmarks/shard/shard_seq
 benchmarks/shard/shard_par

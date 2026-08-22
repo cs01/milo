@@ -1,0 +1,151 @@
+// @run: 8
+// Mandelbrot rendered across N cores by dividing the pixel buffer's OWNERSHIP.
+//
+//   milo run examples/graphics/mandelbrotParallel.milo 16     # 16 windows
+//   milo run examples/graphics/mandelbrotParallel.milo 1      # same work, one core
+//
+// The argument is the number of WINDOWS, and one task runs per window. Measured on a
+// 10-core M-series: 1 window 108ms, 4 windows 57ms, 8 windows 36ms, 16 windows 26ms,
+// 64 windows 19ms. Note it keeps improving well past the core count, which is the
+// interesting part and is explained at the bottom of this file.
+//
+// This is the shape `std/shard` exists for: a big buffer, per-element work that is
+// independent, and no desire to copy the buffer N times to get it onto N cores.
+//
+// `shatter` consumes the Vec, so after it there is no binding through which the
+// pixels can be reached except the windows, and the windows are disjoint by
+// construction. Each worker receives one BY MOVE — no reference crosses a thread.
+// `Shard` is @noCopy, so handing the same window to two workers would not compile.
+//
+// Each worker needs to know WHICH pixels it owns, which is what `start()` is for:
+// a window's own indices run 0..len, and `start() + i` is the position in the
+// original buffer, from which the x/y of the pixel falls out.
+from "std/shard" import {
+    Shard, shatter
+}
+from "std/runtime" import {
+    Promise
+}
+from "std/png" import {
+    encodePng
+}
+from "std/fs" import {
+    writeFile
+}
+from "std/time" import {
+    epochMillis
+}
+from "std/args" import {
+    args
+}
+from "std/strconv" import {
+    parseInt
+}
+
+let width: i64 = 900
+let height: i64 = 600
+let maxIter: i64 = 400
+
+// Escape-time iteration count for one pixel, as a packed RGBA word. Packing a whole
+// pixel into one element is what keeps a window boundary on a pixel boundary: shatter
+// divides by element, so a Vec<u8> could hand a worker two thirds of a pixel.
+fn shade(px: i64, py: i64): u32 {
+    let x0 = -2.2 + (px as f64) * (3.0 / (width as f64))
+    let y0 = -1.2 + (py as f64) * (2.4 / (height as f64))
+    var x: f64 = 0.0
+    var y: f64 = 0.0
+    var i: i64 = 0
+    while i < maxIter && x * x + y * y <= 4.0 {
+        let xt = x * x - y * y + x0
+        y = 2.0 * x * y + y0
+        x = xt
+        i = i + 1
+    }
+    var v: u32 = 0
+    if i < maxIter {
+        v = ((i * 255) / maxIter) as u32
+    }
+    return v | (v << 8) | (v << 16) | (255 << 24)
+}
+
+// Fill one window. The worker owns these pixels outright for the duration.
+fn renderWindow(w: Shard<u32>): Shard<u32> {
+    var s = w
+    let base = s.start()
+    var i: i64 = 0
+    while i < s.len() {
+        let p = base + i
+        s.set(i, shade(p % width, p / width))
+        i = i + 1
+    }
+    return s
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    var windowCount: i64 = 16
+    if argv.len > 1 {
+        windowCount = parseInt(argv[1].clone()) ?? 16
+    }
+
+    var pixels: Vec<u32> = Vec.withCapacity(width * height)
+    var i: i64 = 0
+    while i < width * height {
+        pixels.push(0)
+        i = i + 1
+    }
+
+    let t0 = epochMillis()
+
+    var owner = shatter(pixels, windowCount)
+    var windows = owner.windows()
+    var ps: Vec<Promise<Shard<u32>>> = Vec.new()
+    while windows.len > 0 {
+        let w = windows.pop()!
+        ps.push(Promise<Shard<u32>>.blocking(move(): Shard<u32> => {
+            return renderWindow(w)
+        }
+        ))
+    }
+    let done = Promise.all(ps).await()!
+
+    // weld refuses unless every window came back, so a worker that quietly kept one
+    // is an error here rather than a use-after-free later.
+    let out = match owner.weld(done) {
+        Result.Ok(v) => {
+            v
+        }
+        Result.Err(_e) => {
+            print("weld refused: a window did not come back")
+            return 1
+        }
+    }
+    let t1 = epochMillis()
+
+    var raw: string = ""
+    for px in out {
+        raw.push((px & 255) as u8)
+        raw.push(((px >> 8) & 255) as u8)
+        raw.push(((px >> 16) & 255) as u8)
+        raw.push(((px >> 24) & 255) as u8)
+    }
+    let png = encodePng(raw, width, height, 4)!
+    writeFile("mandelbrot.png", png)!
+
+    print("windows=" + windowCount.toString() + " render=" + (t1 - t0).toString() + "ms -> mandelbrot.png")
+    return 0
+}
+
+// Why more windows than cores makes this faster
+//
+// Mandelbrot costs wildly different amounts per pixel: a point inside the set runs
+// all `maxIter` iterations, a point well outside escapes almost immediately. Windows
+// are equal-SIZED, not equal-WORK, so with one window per core the worker holding the
+// black interior is still grinding long after the others have finished and gone idle.
+// Splitting into several windows per core does not fix the imbalance, it just makes
+// each unit small enough that the finishing times even out.
+//
+// The honest caveat: one task per window means 64 windows spawn 64 blocking tasks,
+// which is more OS threads than this machine has cores. It works here because each is
+// short-lived, but it is oversubscription, and a worker pool that pulls windows off a
+// queue is the better answer. That pool does not exist yet.

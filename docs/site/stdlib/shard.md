@@ -101,7 +101,41 @@ Reproduce with `sh benchmarks/shard/run.sh`.
 
 Read the time column loosely: this loop is memory-bandwidth-bound, so at 20M elements every row
 lands somewhere in 3-7 ms run to run and four workers buy less than four times anything. The memory
-column is the stable number and it is the one being claimed.
+column is the stable number and it is the one being claimed here.
+
+## What it actually buys on more cores
+
+The table above measures the absence of a copy, not speedup. For speedup you need work per element
+high enough that the memory bus is not the limit. `sh benchmarks/shard/scale.sh`, 2M `f64` with 200
+rounds of arithmetic each, on a 10-core M-series:
+
+| workers | time | speedup |
+|---|---|---|
+| 1 | 292 ms | 1.00x |
+| 2 | 146 ms | 2.00x |
+| 4 | 82 ms | 3.56x |
+| 8 | 60 ms | 4.87x |
+| 10 | 58 ms | 5.03x |
+
+Linear to 2, close to it at 4, then flattening as the efficiency cores take a share.
+
+**Equal-sized windows are not equal-work windows.** `examples/graphics/mandelbrotParallel.milo`
+renders the Mandelbrot set, where a pixel inside the set costs the full iteration budget and one
+outside escapes almost at once. With one window per core the worker holding the black interior is
+still grinding while the rest sit idle:
+
+| windows | time |
+|---|---|
+| 1 | 108 ms |
+| 4 | 57 ms |
+| 8 | 36 ms |
+| 16 | 26 ms |
+| 64 | 19 ms |
+
+It keeps improving well past the core count, because smaller units even out the finishing times.
+The caveat is that one task per window means 64 windows spawn 64 blocking tasks, which is more OS
+threads than the machine has cores. A worker pool pulling windows off a queue is the better answer
+and does not exist yet.
 
 The point is the memory column. The copying approach this replaces roughly doubles peak memory; shatter/weld adds a flat 9.1 MiB, which is the worker stacks and is the same fixed cost at 40M elements. As a percentage that is 5.9% at 20M and 3.0% at 40M.
 

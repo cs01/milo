@@ -3,7 +3,7 @@ system: stdlib-design
 purpose: normative API-shape and error conventions for a coherent, predictable Milo standard library
 key-files: std/, src/main.ts, docs/breaking-changes.md
 update-when: a public stdlib API is added or a convention proves insufficient in real use
-last-verified: 2026-07-30
+last-verified: 2026-08-22
 -->
 
 # Standard Library Design
@@ -34,6 +34,23 @@ multi-branch recovery protocol for rare distinctions.
 
 These rules deliberately favor one unsurprising path over multiple equivalent
 spellings.
+
+## What earns a public entry
+
+The bar is **ergonomic, capable, and sensible**, in that order of scrutiny; a lean
+surface is the consequence of applying it, not the goal.
+
+- A **capability gap** justifies new surface: if the thing cannot be done at all
+  without it (or only at a cost that defeats the point, like copying a buffer to
+  scan it), it belongs, even when it widens the API.
+- A **duplicate never does**. A second way to ask a question the API already
+  answers is clutter, however small (`freezable()` next to a `freeze()` whose
+  refusal already hands the arena back was cut for exactly this).
+- A **zero-use convenience waits for its consumer**. If it is trivially composable
+  from what exists, land it the day a real program shows the pattern repeatedly,
+  as a small diff. Pre-building it produces API whose only caller is its own test.
+- Every public entry ships with a test and a doc comment, however obvious. An
+  untested public API is a claim nobody checked.
 
 ## API shape
 

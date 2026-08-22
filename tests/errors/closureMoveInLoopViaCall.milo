@@ -1,0 +1,34 @@
+// @error: cannot move 'needle' out of a loop
+// A `move` closure built inside a loop takes its captures with it, so the second
+// iteration has nothing left to capture. That was already rejected when the body
+// USED the capture directly (`needle.len`), and silently accepted when the body
+// passed it to a function instead — one operation, two spellings, two answers.
+//
+// Accepted, it did not merely compile: every iteration after the first captured an
+// empty string and the program printed 4, 0, 0. A wrong answer with no diagnostic is
+// the worst outcome available, which is what makes this an error fixture rather than
+// a lint.
+from "std/runtime" import {
+    Promise
+}
+
+fn measure(s: string): i64 {
+    return s.len
+}
+
+pub fn main(): i32 {
+    let needle: string = "milo"
+    var ps: Vec<Promise<i64>> = Vec.new()
+    var i: i64 = 0
+    while i < 3 {
+        ps.push(Promise<i64>.blocking(move (): i64 => {
+            return measure(needle)
+        }))
+        i = i + 1
+    }
+    let parts = Promise.all(ps).await()!
+    for p in parts {
+        print(p.toString())
+    }
+    return 0
+}

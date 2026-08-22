@@ -8451,7 +8451,21 @@ export class TypeChecker {
       : (retHint && retHint.tag !== "unknown" ? retHint : { tag: "unknown" });
     const savedRetType = this.currentFnRetType;
     this.currentFnRetType = inferredRet;
+    // A closure body is a fresh function body: its `return` returns from the CLOSURE,
+    // and any loop enclosing the closure literal is not a loop around these statements.
+    // Leaving the enclosing loop state visible here let a move inside the body be
+    // credited as "moved only on a path that returns", which checkLoopMoves then
+    // excuses AND resets — so `while … { spawn(move () => f(s)) }` compiled clean and
+    // handed every iteration after the first an empty `s`. Wrong values, no diagnostic.
+    // The direct spelling (`s.len` rather than `f(s)`) was rejected, which is the
+    // give-away: one operation, two spellings, two answers.
+    const savedLoopDepth = this.loopDepth;
+    const savedInReturnInLoop = this.inReturnInLoop;
+    this.loopDepth = 0;
+    this.inReturnInLoop = false;
     for (const s of expr.body) this.checkStmt(s, inferredRet);
+    this.loopDepth = savedLoopDepth;
+    this.inReturnInLoop = savedInReturnInLoop;
     if (inferredRet.tag === "unknown" && expr.body.length > 0) {
       const lastStmt = expr.body[expr.body.length - 1];
       if (lastStmt.kind === "Return" && lastStmt.value) {

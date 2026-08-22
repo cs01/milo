@@ -29,7 +29,7 @@ test("committed std docs are up to date with std doc-comments", () => {
 // Lower the baseline in the same commit that improves the docs. It is deliberately one
 // number rather than a per-module table: a table is a second thing to maintain, and the
 // only motion that matters is the total.
-const UNDOCUMENTED_BASELINE = 893; // measured 2026-08-15
+const UNDOCUMENTED_BASELINE = 886; // measured 2026-08-22
 
 test("the undocumented-API count only goes down", () => {
   let undocumented = 0;

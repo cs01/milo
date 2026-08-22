@@ -89,7 +89,8 @@ Give the buffer back, mutable. Consumes this Sealed.
 pub fn sealedByteAt(s: &Sealed, i: i64): u8
 ```
 
-_Undocumented._
+The byte at `i`, bounds-checked. For a whole range prefer `text` or, to avoid the
+allocation, `eq` and `each`.
 
 ### `sealedEach`
 
@@ -133,7 +134,7 @@ untrusted source might not belong here.
 pub fn sealedLen(s: &Sealed): i64
 ```
 
-_Undocumented._
+Bytes held in the sealed buffer.
 
 ### `sealedSpan`
 
@@ -167,7 +168,8 @@ One past the last byte. The half-open end, which is what substr wants.
 pub fn spanIsEmpty(s: Span): bool
 ```
 
-_Undocumented._
+Whether the span covers no bytes. A zero-length span is legal and resolves to an
+empty result rather than an error.
 
 ### `unseal`
 

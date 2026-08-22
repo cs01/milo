@@ -47,6 +47,8 @@ pub fn spanEnd(s: Span): i64 {
     return s.start + s.len
 }
 
+// Whether the span covers no bytes. A zero-length span is legal and resolves to an
+// empty result rather than an error.
 pub fn spanIsEmpty(s: Span): bool {
     return s.len <= 0
 }
@@ -79,6 +81,7 @@ pub fn unseal(s: Sealed): string {
     return s.data
 }
 
+// Bytes held in the sealed buffer.
 pub fn sealedLen(s: &Sealed): i64 {
     return s.data.len
 }
@@ -100,6 +103,8 @@ pub fn sealedHolds(s: &Sealed, sp: Span): bool {
     return sp.start + sp.len <= s.data.len
 }
 
+// The byte at `i`, bounds-checked. For a whole range prefer `text` or, to avoid the
+// allocation, `eq` and `each`.
 pub fn sealedByteAt(s: &Sealed, i: i64): u8 {
     assert(i >= 0 && i < s.data.len, "sealed: byte index out of range")
     return s.data[i]

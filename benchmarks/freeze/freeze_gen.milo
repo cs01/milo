@@ -1,0 +1,38 @@
+// Generational arena lookup: every get pays an identity check, a bounds check and a
+// generation compare, and returns Option<T> the caller must unwrap.
+from "std/arena" import {
+    Arena, Handle
+}
+from "std/time" import {
+    epochMillis
+}
+
+pub fn main(): i32 {
+    let items: i64 = 1000000
+    let lookups: i64 = 10000000
+    var a: Arena<i64> = Arena<i64>.new()
+    var hs: Vec<Handle<i64>> = Vec.withCapacity(items)
+    var i: i64 = 0
+    while i < items {
+        hs.push(a.alloc(i))
+        i = i + 1
+    }
+    let t0 = epochMillis()
+    var sum: i64 = 0
+    var k: i64 = 0
+    while k < lookups {
+        let h = hs[k % items]
+        match a.get(h) {
+            Option.Some(v) => {
+                sum = sum + v
+            }
+            Option.None => {
+                sum = sum - 1
+            }
+        }
+        k = k + 1
+    }
+    let t1 = epochMillis()
+    print("gen ms=" + (t1 - t0).toString() + " sum=" + sum.toString())
+    return 0
+}

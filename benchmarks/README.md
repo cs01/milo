@@ -92,3 +92,30 @@ claim there: the move-only route to parallelism used to force a copy per worker,
 The loop is memory-bandwidth-bound, so the times sit in a 3-7 ms band run to run and
 four workers buy well under 4x. The memory numbers are stable: the 9.1 MiB the
 parallel row adds is worker stacks, a fixed cost that does not grow with n.
+
+## freeze: infallible arena lookup
+
+`sh benchmarks/freeze/run.sh` — 1M items, 10M lookups, identical checksums.
+
+| | time |
+|---|---|
+| `arena.get` (generational, returns `Option<T>`) | 10 ms |
+| `frozen.get` (infallible, returns `T`) | 7 ms |
+
+1.43x. Worth stating plainly: an earlier design note predicted 2.2x, and that is not
+what this measures. The nanoseconds are also the smaller half of the point — the
+frozen path removes the `Option` from every call site, which is the reason it exists.
+
+## seal: retaining views instead of copies
+
+`sh benchmarks/seal/run.sh` — 600k retained literals, same scanner both sides, same
+checksum, only what is KEPT differs.
+
+| | time | peak memory |
+|---|---|---|
+| owned `string` per literal | 8 ms | 59.6 MiB |
+| `Span` into a sealed buffer | 4 ms | 36.9 MiB |
+
+38% less memory and roughly 2x faster. The owned side allocates once per retained
+literal; the span side keeps two integers each and allocates only when its `Vec`
+doubles.

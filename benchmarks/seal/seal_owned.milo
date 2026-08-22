@@ -1,0 +1,41 @@
+// Retain every scanned literal as an OWNED string: one allocation per literal.
+from "std/time" import {
+    epochMillis
+}
+
+fn buildSource(n: i64): string {
+    var s: string = ""
+    var i: i64 = 0
+    while i < n {
+        s.pushStr("{\"name\":\"milo-lang\"},")
+        i = i + 1
+    }
+    return s
+}
+
+pub fn main(): i32 {
+    let n: i64 = 300000
+    let src = buildSource(n)
+    let t0 = epochMillis()
+    var kept: Vec<string> = Vec.new()
+    var i: i64 = 0
+    while i < src.len {
+        if src[i] == 34 {
+            var j = i + 1
+            while j < src.len && src[j] != 34 {
+                j = j + 1
+            }
+            kept.push(src.substr(i + 1, j))
+            i = j + 1
+        } else {
+            i = i + 1
+        }
+    }
+    var total: i64 = 0
+    for k in kept {
+        total = total + k.len
+    }
+    let t1 = epochMillis()
+    print("owned ms=" + (t1 - t0).toString() + " kept=" + kept.len.toString() + " bytes=" + total.toString())
+    return 0
+}

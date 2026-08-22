@@ -1,0 +1,48 @@
+// Retain every scanned literal as a Span into a sealed buffer: two integers each,
+// no allocation per literal, and the buffer cannot change under them.
+from "std/seal" import {
+    Sealed, Span, seal
+}
+from "std/time" import {
+    epochMillis
+}
+
+fn buildSource(n: i64): string {
+    var s: string = ""
+    var i: i64 = 0
+    while i < n {
+        s.pushStr("{\"name\":\"milo-lang\"},")
+        i = i + 1
+    }
+    return s
+}
+
+pub fn main(): i32 {
+    let n: i64 = 300000
+    let src = seal(buildSource(n))
+    let t0 = epochMillis()
+    var kept: Vec<Span> = Vec.new()
+    var i: i64 = 0
+    while i < src.len() {
+        if src.byteAt(i) == 34 {
+            var j = i + 1
+            while j < src.len() && src.byteAt(j) != 34 {
+                j = j + 1
+            }
+            kept.push(Span {
+                start: i + 1, len: j - i - 1
+            }
+            )
+            i = j + 1
+        } else {
+            i = i + 1
+        }
+    }
+    var total: i64 = 0
+    for k in kept {
+        total = total + k.len
+    }
+    let t1 = epochMillis()
+    print("span ms=" + (t1 - t0).toString() + " kept=" + kept.len.toString() + " bytes=" + total.toString())
+    return 0
+}

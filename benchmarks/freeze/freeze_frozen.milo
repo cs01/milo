@@ -1,0 +1,31 @@
+// The same lookups after freeze(): staleness is unrepresentable, so get returns T
+// directly with no Option to unwrap and no generation compare.
+from "std/arena" import {
+    Arena, Handle
+}
+from "std/time" import {
+    epochMillis
+}
+
+pub fn main(): i32 {
+    let items: i64 = 1000000
+    let lookups: i64 = 10000000
+    var a: Arena<i64> = Arena<i64>.new()
+    var hs: Vec<Handle<i64>> = Vec.withCapacity(items)
+    var i: i64 = 0
+    while i < items {
+        hs.push(a.alloc(i))
+        i = i + 1
+    }
+    let frozen = a.freeze()!
+    let t0 = epochMillis()
+    var sum: i64 = 0
+    var k: i64 = 0
+    while k < lookups {
+        sum = sum + frozen.get(hs[k % items])
+        k = k + 1
+    }
+    let t1 = epochMillis()
+    print("frozen ms=" + (t1 - t0).toString() + " sum=" + sum.toString())
+    return 0
+}

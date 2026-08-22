@@ -1,0 +1,75 @@
+from "std/shard" import {
+    StrShard, shatterStr
+}
+from "std/runtime" import {
+    Promise
+}
+from "std/fs" import {
+    readFile
+}
+from "std/time" import {
+    epochMillis
+}
+from "std/args" import {
+    args
+}
+from "std/strconv" import {
+    parseInt
+}
+
+fn countIn(w: StrShard, needle: string, ownLen: i64): i64 {
+    var s = w
+    var n: i64 = 0
+    var i: i64 = 0
+    // Only count a match that BEGINS inside this window's own range; anything that
+    // begins in the overlap belongs to the next window.
+    while i < ownLen {
+        if s.matchesAt(i, needle) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    let path = argv[1].clone()
+    var workers: i64 = 4
+    if argv.len > 2 {
+        workers = parseInt(argv[2].clone()) ?? 4
+    }
+    let needle: string = "milo"
+    let content = readFile(path)!
+    let total = content.len
+
+    let t0 = epochMillis()
+    var owner = shatterStr(content, workers)
+    let chunk = total / owner.count()
+    var windows = owner.windows(needle.len - 1)
+    var ps: Vec<Promise<i64>> = Vec.new()
+    while windows.len > 0 {
+        let w = windows.pop()!
+        let idx = w.index()
+        var own = chunk
+        if idx == workers - 1 {
+            own = total - idx * chunk
+        }
+        // Each worker needs its OWN needle: the closure takes its captures with it,
+        // so a single shared one would be gone after the first iteration. The compiler
+        // rejects the shared version outright now.
+        let mine = needle.clone()
+        ps.push(Promise<i64>.blocking(move(): i64 => {
+            return countIn(w, mine, own)
+        }
+        ))
+    }
+    let parts = Promise.all(ps).await()!
+    var count: i64 = 0
+    for p in parts {
+        count = count + p
+    }
+    let t1 = epochMillis()
+    print("par workers=" + workers.toString() + " ms=" + (t1 - t0).toString() + " count=" + count.toString())
+    return 0
+}

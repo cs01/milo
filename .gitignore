@@ -50,6 +50,9 @@ mandelbrot.png
 benchmarks/shard/shard_scale
 
 # benchmark artifacts
+benchmarks/strscan/scan_seq
+benchmarks/strscan/scan_par
+benchmarks/strscan/corpus.txt
 benchmarks/shard/shard_seq
 benchmarks/shard/shard_par
 benchmarks/shard/shard_c

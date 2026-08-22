@@ -1,0 +1,32 @@
+from "std/fs" import {
+    readFile
+}
+from "std/time" import {
+    epochMillis
+}
+from "std/args" import {
+    args
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    let content = readFile(argv[1].clone())!
+    let needle: string = "milo"
+    let t0 = epochMillis()
+    var count: i64 = 0
+    var i: i64 = 0
+    while true {
+        match content.indexOfFrom(needle, i) {
+            Option.Some(at) => {
+                count = count + 1
+                i = at + 1
+            }
+            Option.None => {
+                break
+            }
+        }
+    }
+    let t1 = epochMillis()
+    print("seq ms=" + (t1 - t0).toString() + " count=" + count.toString())
+    return 0
+}

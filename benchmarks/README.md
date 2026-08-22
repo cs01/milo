@@ -123,3 +123,25 @@ checksum, only what is KEPT differs.
 38% less memory and roughly 2x faster. The owned side allocates once per retained
 literal; the span side keeps two integers each and allocates only when its `Vec`
 doubles.
+
+## strscan: parallel search over one large file
+
+`sh benchmarks/strscan/run.sh` — 51.3 MiB corpus, literal search, counting occurrences.
+This is the case a grep cannot fall back on file-level parallelism for.
+
+| | time |
+|---|---|
+| sequential (`indexOfFrom`) | 35 ms |
+| read-only windows x1 (naive compare) | 52 ms |
+| read-only windows x2 | 26 ms |
+| read-only windows x4 | 14 ms |
+| read-only windows x8 | 10 ms |
+
+The per-core comparison is deliberately unfavourable to the parallel side: the
+sequential program uses the optimised `indexOfFrom` while the windows use a naive
+byte compare, which is why one window is slower than sequential. Eight windows still
+finish in under a third of the sequential time.
+
+The runner checks every windowing against the sequential count and fails on a
+mismatch. That check is not decorative: dropping the `needle.len - 1` overlap makes
+the 8-window run report 958590 against 958591, one match lost across a boundary.

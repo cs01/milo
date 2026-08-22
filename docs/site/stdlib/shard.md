@@ -13,8 +13,7 @@ from "std/shard" import { Shard, shatter }
 ## Quick start
 
 ```milo
-from "std/shard" import { Shard, shatter }
-from "std/runtime" import { Promise }
+from "std/shard" import { Shard, parallelMap }
 
 fn double(w: Shard<f64>): Shard<f64> {
     var s = w
@@ -34,22 +33,19 @@ pub fn main(): i32 {
         i = i + 1
     }
 
-    var owner = shatter(data, 4)        // `data` is moved
-    var windows = owner.windows()
-
-    var ps: Vec<Promise<Shard<f64>>> = Vec.new()
-    while windows.len > 0 {
-        let w = windows.pop()!
-        ps.push(Promise<Shard<f64>>.blocking(move (): Shard<f64> => {
-            return double(w)
-        }))
-    }
-    let back = Promise.all(ps).await()!
-    let result = owner.weld(back)!      // the original Vec, same allocation
-    print(result[0].toString())
+    let out = parallelMap(data, 4, double)!    // divide, run on 4 threads, reassemble
+    print(out[0].toString())
     return 0
 }
 ```
+
+`data` is moved into `parallelMap` and comes back transformed, in the same allocation.
+No element was copied and no reference crossed a thread.
+
+`f` is a plain function rather than a closure because every worker needs its own copy:
+a capturing closure is moved into the first task and gone for the rest. Everything the
+work depends on therefore travels in the window, which is also what stops workers
+sharing anything. The ergonomics and the safety property are the same choice.
 
 ## Why this is safe
 
@@ -61,7 +57,29 @@ Three things, none of them a new language rule:
 
 So the aliasing argument is the move checker that already shipped. Nothing new had to be proven.
 
-## The one obligation
+## Doing it by hand
+
+Reach for `shatter` / `windows` / `weld` directly only when the workers need to differ
+from each other, or when you want the windows for something other than one task each:
+
+```milo
+from "std/shard" import { Shard, shatter }
+
+pub fn main(): i32 {
+    var data: Vec<i64> = Vec.withCapacity(4)
+    data.push(1)
+    data.push(2)
+
+    var owner = shatter(data, 2)
+    var windows = owner.windows()
+    // ... hand each window to a worker by move, collect them back ...
+    let out = owner.weld(windows)!
+    print(out.len.toString())
+    return 0
+}
+```
+
+## The one obligation (on the manual path only)
 
 Keep the owner alive until `weld`. A window is a pointer into the owner's buffer, so dropping the owner while a worker still holds one is a use-after-free that nothing here catches.
 
@@ -85,7 +103,14 @@ match owner.weld(windows) {
 }
 ```
 
-That is a runtime check, not a proof, and it is the honest residue of this design. See [how Milo compares to Rust](/language/vs-rust).
+That is a runtime check, not a proof, and it is the honest residue of the manual path.
+
+**`parallelMap` does not have that residue.** It creates every window, hands out every
+window, awaits all of them and welds them itself, so no caller code can drop one or let
+the owner die first: the completeness `weld` checks is guaranteed by the shape of the
+call rather than verified after the fact. That is the same guarantee Rust's scoped
+threads get from lifetimes, reached here by closing the cycle inside one function. Use
+`parallelMap` unless you have a reason not to. See [how Milo compares to Rust](/language/vs-rust).
 
 ## What it costs
 

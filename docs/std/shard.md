@@ -2,6 +2,27 @@
 
 ## std/shard
 
+### `parallelMap`
+
+```milo
+pub fn parallelMap<T>(v: Vec<T>, workers: i64, f: (Shard<T>) => Shard<T>): Result<Vec<T>, WeldError>
+```
+
+Divide, run on `workers` threads, reassemble. The whole cycle in one call.
+
+    let out = parallelMap(pixels, 4, shade)!
+
+This is the shape almost every use wants, and doing it by hand means draining the
+window Vec, building a Vec of Promises, awaiting them and welding — plumbing that
+says nothing about the work. Reach for shatter/windows/weld directly only when the
+workers need to differ from each other, or when you want the windows for something
+other than one task each.
+
+`f` is a plain function rather than a closure because each worker needs its own
+copy: a capturing closure would be moved into the first task and gone for the rest.
+Everything the work depends on therefore travels in the window itself, which is
+also what keeps the workers from sharing anything.
+
 ### `Shard.get`
 
 ```milo

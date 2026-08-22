@@ -67,10 +67,15 @@ Measured on a 10-core machine, 20M `f64`, 4 workers, against the C program doing
 run; the memory figures are stable to a tenth of a MiB. The copy tax is gone; what remains is a flat 9.1 MiB of worker stacks, the same
 fixed cost at 40M elements. Reproduce with `sh benchmarks/shard/run.sh`.
 
-What does NOT close: `weld` verifies at RUNTIME that every window came back, because a window is a
-pointer into the owner's buffer and dropping the owner early is a use-after-free nothing here
-catches. Rust's borrow checker rejects the equivalent mistake at compile time. Keeping the owner
-alive until `weld` is an obligation on the programmer. Stencils with overlapping halos, true 2D
+What does NOT close, and how far it shrank: `weld` verifies at RUNTIME that every window came
+back, because a window is a pointer into the owner's buffer and dropping the owner early is a
+use-after-free nothing catches. Rust's borrow checker rejects the equivalent at compile time.
+**That residue applies only to the manual `shatter`/`windows`/`weld` path.** `parallelMap` creates
+every window, hands out every window, awaits all of them and welds them itself, so no caller code
+can drop one or let the owner die first: completeness follows from the shape of the call instead of
+being checked afterwards. It is the same guarantee Rust's scoped threads get from lifetimes,
+reached by closing the cycle inside one function rather than by proving a lifetime. The runtime
+check remains for callers who take the windows apart themselves. Stencils with overlapping halos, true 2D
 tiles, and long-lived contended shared state all remain outside what dividing ownership can do.
 
 For a parser, CLI, or service this is the right trade and often faster to reason about. For a physics kernel, an ECS inner loop, or a tiled image filter that must share one buffer across cores, Rust does the thing Milo won't. Don't pretend the process model covers it — it covers throughput, not shared-memory data parallelism.

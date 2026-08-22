@@ -2820,7 +2820,6 @@ A conforming implementation shall accept this program, and running it shall writ
 - `len=2`
 - `holds=true`
 - `foreign=false`
-- `freezable=false`
 - `refused: freed`
 - `ok after refusal: 7`
 
@@ -8585,7 +8584,6 @@ A conforming implementation shall accept this program, and running it shall writ
 - `milo`
 - `eq-keyword=true`
 - `eq-wrong=false`
-- `eqSpan=true`
 - `holds-foreign=false`
 - `bytes=4`
 - `unsealed=27`
@@ -9308,6 +9306,7 @@ A conforming implementation shall accept this program, and running it shall writ
 - `disjoint misses the seam: 2`
 - `overlap finds it: 3`
 - `start0=0 start1=20`
+- `byte0=109 byte1=105`
 - `foreign rejected`
 
 **Rationale.** Read-only windows over a string. The interesting case is the seam: with disjoint windows a match straddling the boundary is found by neither side, which is why windows() takes an overlap. Nothing writes, so the overlap is sound.

@@ -428,19 +428,6 @@ pub struct FreezeRejected<T> {
     slot: i64,
 }
 
-// Whether `freeze` would succeed, without consuming anything. Cheap enough to
-// call before deciding, O(n) in slots.
-pub fn arenaFreezable<T>(a: &Arena<T>): bool {
-    var i: i64 = 0
-    while i < a.gens.len {
-        if a.gens[i] != 1 {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
 // Consume an arena and hand back a read-only view of the same storage. O(n) in
 // slots to check the precondition; no element is copied.
 //
@@ -634,12 +621,6 @@ impl Arena<T> {
     // refused rather than papered over.
     fn freeze(self: Self): Result<FrozenArena<T>, FreezeRejected<T>> {
         return arenaFreeze(self)
-    }
-
-    // Whether `freeze` would succeed. Ask before committing the move if you
-    // would rather branch than unpack a rejection.
-    fn freezable(self: &Self): bool {
-        return arenaFreezable(self)
     }
 }
 

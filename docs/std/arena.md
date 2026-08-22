@@ -33,15 +33,6 @@ False if `h` was already stale — so a double free is a no-op, not a fault.
 Does NOT shrink the arena, and does not chase handles held INSIDE the
 freed value; a cyclic graph still needs a sweep you write.
 
-### `Arena.freezable`
-
-```milo
-fn Arena.freezable(self: &Arena): bool
-```
-
-Whether `freeze` would succeed. Ask before committing the move if you
-would rather branch than unpack a rejection.
-
 ### `Arena.freeze`
 
 ```milo
@@ -186,15 +177,6 @@ pub fn arenaFree<T>(a: &mut Arena<T>, h: Handle<T>): bool
 
 Free a slot, bumping its generation so stale handles are detected. A slot at
 maximum generation is retired rather than wrapped back onto an old handle.
-
-### `arenaFreezable`
-
-```milo
-pub fn arenaFreezable<T>(a: &Arena<T>): bool
-```
-
-Whether `freeze` would succeed, without consuming anything. Cheap enough to
-call before deciding, O(n) in slots.
 
 ### `arenaFreeze`
 

@@ -3,7 +3,6 @@
 // @expect: len=2
 // @expect: holds=true
 // @expect: foreign=false
-// @expect: freezable=false
 // @expect: refused: freed
 // @expect: ok after refusal: 7
 from "std/arena" import {
@@ -52,7 +51,6 @@ pub fn main(): i32 {
     let c1 = churn.alloc(7)
     let c2 = churn.alloc(8)
     churn.free(c2)
-    print("freezable=" + churn.freezable().toString())
     match churn.freeze() {
         Result.Ok(_f) => {
             print("WRONG: froze an arena that freed")

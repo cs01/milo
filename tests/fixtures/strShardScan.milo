@@ -2,6 +2,7 @@
 // @expect: disjoint misses the seam: 2
 // @expect: overlap finds it: 3
 // @expect: start0=0 start1=20
+// @expect: byte0=109 byte1=105
 // @expect: foreign rejected
 // Read-only windows over a string. The interesting case is the seam: with disjoint
 // windows a match straddling the boundary is found by neither side, which is why
@@ -63,6 +64,10 @@ pub fn main(): i32 {
     var starts = shatterStr(corpus(), 2)
     var sw = starts.windows(0)
     print("start0=" + sw[0].start().toString() + " start1=" + sw[1].start().toString())
+
+    // byteAt is the primitive read; matchesAt is built on it, and a caller writing
+    // any other scan needs it.
+    print("byte0=" + sw[0].byteAt(0).toString() + " byte1=" + sw[0].byteAt(1).toString())
 
     // A window from another shatter is rejected on identity.
     var a = shatterStr(corpus(), 2)

@@ -34,14 +34,6 @@ fn Sealed.eq(self: &Sealed, sp: Span, other: &string): bool
 
 Compare `sp` to a string without materialising it.
 
-### `Sealed.eqSpan`
-
-```milo
-fn Sealed.eqSpan(self: &Sealed, a: Span, b: Span): bool
-```
-
-Compare two spans in this buffer without materialising either.
-
 ### `Sealed.holds`
 
 ```milo
@@ -111,14 +103,6 @@ Compare a span against a string WITHOUT materialising it. This is what keeps
 a scanner's keyword checks off the allocator: the common operation on a
 retained piece is comparing it, not owning it.
 
-### `sealedEqSpan`
-
-```milo
-pub fn sealedEqSpan(s: &Sealed, a: Span, b: Span): bool
-```
-
-Whether two spans name equal bytes in this buffer, again without copying.
-
 ### `sealedHolds`
 
 ```milo
@@ -153,23 +137,6 @@ pub fn sealedText(s: &Sealed, sp: Span): string
 Materialise the span as an owned string. THIS is the allocation, and it is
 the only one: naming it `text` rather than hiding it behind indexing is the
 point, so a reader can see where the copies are.
-
-### `spanEnd`
-
-```milo
-pub fn spanEnd(s: Span): i64
-```
-
-One past the last byte. The half-open end, which is what substr wants.
-
-### `spanIsEmpty`
-
-```milo
-pub fn spanIsEmpty(s: Span): bool
-```
-
-Whether the span covers no bytes. A zero-length span is legal and resolves to an
-empty result rather than an error.
 
 ### `unseal`
 

@@ -67,7 +67,7 @@ pub fn main(): i32 {
 }
 ```
 
-Use `eq` and `eqSpan` in the hot path. Reach for `text` only when you genuinely need to own the bytes.
+Use `eq` in the hot path. Reach for `text` only when you genuinely need to own the bytes.
 
 ## Getting the buffer back
 

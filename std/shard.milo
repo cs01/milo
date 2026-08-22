@@ -90,16 +90,6 @@ impl Shard<T> {
         }
     }
 
-    // Exchange two elements of this window, for in-place sorts and partitions.
-    fn swap(self: &mut Self, a: i64, b: i64): void {
-        assert(a >= 0 && a < self.len, "shard: index out of range")
-        assert(b >= 0 && b < self.len, "shard: index out of range")
-        unsafe {
-            let tmp = self.base[a]
-            self.base[a] = self.base[b]
-            self.base[b] = tmp
-        }
-    }
 }
 
 // Safety: the windows a shatter hands out are pairwise disjoint by construction,

@@ -3,7 +3,6 @@
 // @expect: milo
 // @expect: eq-keyword=true
 // @expect: eq-wrong=false
-// @expect: eqSpan=true
 // @expect: holds-foreign=false
 // @expect: bytes=4
 // @expect: unsealed=27
@@ -50,7 +49,6 @@ pub fn main(): i32 {
     // The comparison a scanner actually wants: no allocation.
     print("eq-keyword=" + src.eq(toks[0].at, "name").toString())
     print("eq-wrong=" + src.eq(toks[1].at, "name").toString())
-    print("eqSpan=" + src.eqSpan(toks[0].at, toks[2].at).toString())
 
     // A span that does not fit is rejected rather than read.
     let foreign: Span = Span {

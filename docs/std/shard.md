@@ -46,14 +46,6 @@ do position-independent work: a filter that needs to know which pixel, row or
 sample it is looking at has no way to find out, because a window's own indices
 all start at 0. Global position of element `i` is `start() + i`.
 
-### `Shard.swap`
-
-```milo
-fn Shard.swap(self: &mut Shard, a: i64, b: i64): void
-```
-
-Exchange two elements of this window, for in-place sorts and partitions.
-
 ### `Shards.count`
 
 ```milo

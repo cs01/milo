@@ -42,17 +42,6 @@ pub struct Span {
     len: i64,
 }
 
-// One past the last byte. The half-open end, which is what substr wants.
-pub fn spanEnd(s: Span): i64 {
-    return s.start + s.len
-}
-
-// Whether the span covers no bytes. A zero-length span is legal and resolves to an
-// empty result rather than an error.
-pub fn spanIsEmpty(s: Span): bool {
-    return s.len <= 0
-}
-
 // An immutable byte buffer. Produced by consuming a string with `seal`; the
 // only way back to a mutable buffer is `unseal`, which consumes this.
 //
@@ -138,24 +127,6 @@ pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
     return true
 }
 
-// Whether two spans name equal bytes in this buffer, again without copying.
-pub fn sealedEqSpan(s: &Sealed, a: Span, b: Span): bool {
-    if !sealedHolds(s, a) || !sealedHolds(s, b) {
-        return false
-    }
-    if a.len != b.len {
-        return false
-    }
-    var i: i64 = 0
-    while i < a.len {
-        if s.data[a.start + i] != s.data[b.start + i] {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
 // Read the span's bytes one at a time without materialising it. The borrowing
 // form: `f` sees each byte, nothing is allocated.
 pub fn sealedEach(s: &Sealed, sp: Span, f: (u8) => void): void {
@@ -197,11 +168,6 @@ impl Sealed {
     // Compare `sp` to a string without materialising it.
     fn eq(self: &Self, sp: Span, other: &string): bool {
         return sealedEq(self, sp, other)
-    }
-
-    // Compare two spans in this buffer without materialising either.
-    fn eqSpan(self: &Self, a: Span, b: Span): bool {
-        return sealedEqSpan(self, a, b)
     }
 
     // Visit each byte of `sp` without materialising it.

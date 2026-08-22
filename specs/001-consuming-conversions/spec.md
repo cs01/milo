@@ -384,5 +384,17 @@ match or beat on equal hardware.
 - **Long-lived contended shared mutable state remains out of scope.** These mechanisms divide data
   and share immutable data; they are not a concurrent map, and the documentation must say so before
   users discover it.
+- **The first real consumer found the gap: cross-thread SHARING, not dividing.** Measured
+  2026-08-22 against `examples/cli-tools/rg.milo`. Its directory search is already parallel (chunks
+  of file paths moved into workers, no copies) and already ties ripgrep: 0.16 s against 0.16 s over
+  a 1.5 GB tree, so shatter/weld has nothing to add there. Its single-large-file search is 2x behind
+  ripgrep (0.04 s against 0.02 s on 51 MiB) and IS the shape shatter serves, except that shatter
+  divides `Vec<T>` and file content in Milo is a `string`. Converting one costs 19-33 ms against a
+  34 ms scan, so the conversion eats the entire win. What that workload actually wants is many
+  readers over ONE immutable buffer, which is `Sealed` being refcounted, `Send` and `Sync` -- the
+  design in `seal-span.md` that User Story 2 deliberately simplified to a single owner. That is the
+  next unit of work, and rg is its proof workload. The boundary case (a match spanning two windows)
+  is real and is handled by scanning the seams after the workers join, not by overlapping windows.
+
 - **The delivered archive is the whole input.** Its four documents, eight prototype programs, and
   benchmark scorecard are treated as the requirement source; nothing outside it is assumed.

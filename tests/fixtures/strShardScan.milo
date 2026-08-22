@@ -1,0 +1,80 @@
+// @expect: len=40 windows=2
+// @expect: disjoint misses the seam: 2
+// @expect: overlap finds it: 3
+// @expect: start0=0 start1=20
+// @expect: foreign rejected
+// Read-only windows over a string. The interesting case is the seam: with disjoint
+// windows a match straddling the boundary is found by neither side, which is why
+// windows() takes an overlap. Nothing writes, so the overlap is sound.
+from "std/shard" import {
+    StrShard, shatterStr
+}
+
+fn countIn(w: &StrShard, needle: &string, ownLen: i64): i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < ownLen {
+        if w.matchesAt(i, needle) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// "milo" sits at 0, at 18 (straddling the 20-byte seam is the one at 18..22), and 36.
+fn corpus(): string {
+    return "milo..............milo..............milo"
+}
+
+pub fn main(): i32 {
+    let needle: string = "milo"
+
+    var owner = shatterStr(corpus(), 2)
+    print("len=" + owner.len().toString() + " windows=" + owner.count().toString())
+
+    // Disjoint: the match beginning at 18 runs past the first window's end and is
+    // invisible to the second, whose own range starts at 20.
+    var disjoint = shatterStr(corpus(), 2)
+    var dw = disjoint.windows(0)
+    var dTotal: i64 = 0
+    for w in dw {
+        dTotal = dTotal + countIn(w, needle, w.len())
+    }
+    print("disjoint misses the seam: " + dTotal.toString())
+
+    // With needle.len - 1 bytes of slack the first window can see the whole match.
+    var over = shatterStr(corpus(), 2)
+    var ow = over.windows(needle.len - 1)
+    var oTotal: i64 = 0
+    var idx: i64 = 0
+    for w in ow {
+        // Count only matches BEGINNING in this window's own range, or the overlap
+        // would let two neighbours count the same one.
+        var own = 20
+        if w.index() == 1 {
+            own = 20
+        }
+        oTotal = oTotal + countIn(w, needle, own)
+        idx = idx + 1
+    }
+    print("overlap finds it: " + oTotal.toString())
+
+    var starts = shatterStr(corpus(), 2)
+    var sw = starts.windows(0)
+    print("start0=" + sw[0].start().toString() + " start1=" + sw[1].start().toString())
+
+    // A window from another shatter is rejected on identity.
+    var a = shatterStr(corpus(), 2)
+    var b = shatterStr(corpus(), 2)
+    let foreign = b.windows(0)
+    match a.weld(foreign) {
+        Result.Ok(_s) => {
+            print("WRONG: welded a foreign window")
+        }
+        Result.Err(_e) => {
+            print("foreign rejected")
+        }
+    }
+    return 0
+}

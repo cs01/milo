@@ -79,7 +79,7 @@ Green-tier concurrency with one OS-thread escape hatch:
 
 I/O & system: `io`, `fs`, `path`, `env`, `environ`, `args`, `process`, `signal`, `dl`, `sysinfo`, `mem`, `os`, `platform`, `term`, `pty`, `keys`, `ansi`
 Networking: `net` (TCP + DNS), `unix` (AF_UNIX), `fetch` (HTTPS client + TLS), `tls` (TLS server transport), `https` (HTTPS server), `http`, `httpmw`, `multipart`, `mime`, `html`, `ws`, `url`
-Data: `json`, `csv`, `base64`, `base32`, `hex`, `binary`, `sqlite`, `arena`, `set`, `pool`, `png`
+Data: `json`, `csv`, `base64`, `base32`, `hex`, `binary`, `sqlite`, `arena`, `seal`, `set`, `pool`, `png`
 Compression: `deflate`, `inflate`, `zip`, `zstd`
 Crypto & auth: `crypto`, `sha256`, `sha512`, `sha1`, `hmac`, `hkdf`, `pbkdf2`, `subtle`, `jwt`, `totp`, `checksum`, `xxhash`
 Concurrency: `runtime`, `sync`, `select`, `event`, `timer`

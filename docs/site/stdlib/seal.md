@@ -92,4 +92,4 @@ This is the staged pipeline: build, seal, parse and share, unseal, mutate, seal 
 
 A span carries no record of which buffer it was measured from. Resolve one against a different `Sealed` and you get the wrong bytes, or an abort if the range does not fit. That is a logic error, deterministic and never memory-unsafety, but it is a real gap: tying a span to one specific buffer at compile time needs a lifetime or a brand to carry the tie, and neither exists in this language. Use `holds` to check a span you did not measure yourself.
 
-See [the residue](/design/residue-vs-rust) for the honest accounting of what this closes and what it does not.
+See [how Milo compares to Rust](/language/vs-rust) for the honest accounting of what this closes and what it does not.

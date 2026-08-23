@@ -51,6 +51,14 @@ fn Sealed.len(self: &Sealed): i64
 
 Bytes held.
 
+### `Sealed.share`
+
+```milo
+fn Sealed.share(self: Sealed): Shared
+```
+
+Consume this buffer and return a shareable holder of the same bytes.
+
 ### `Sealed.span`
 
 ```milo
@@ -155,6 +163,110 @@ pub fn sealedText(s: &Sealed, sp: Span): string
 Materialise the span as an owned string. THIS is the allocation, and it is
 the only one: naming it `text` rather than hiding it behind indexing is the
 point, so a reader can see where the copies are.
+
+### `share`
+
+```milo
+pub fn share(s: Sealed): Shared
+```
+
+Consume a `Sealed` and return a shareable holder of the same bytes. O(1): the
+buffer is moved into the box, never copied.
+
+### `Shared.byteAt`
+
+```milo
+fn Shared.byteAt(self: &Shared, i: i64): u8
+```
+
+The byte at `i`, bounds-checked.
+
+### `Shared.clone`
+
+```milo
+fn Shared.clone(self: &Shared): Shared
+```
+
+Another holder of the same bytes. No copy; the buffer is released when the
+last holder drops.
+
+### `Shared.each`
+
+```milo
+fn Shared.each(self: &Shared, sp: Span, f: (u8) => void): void
+```
+
+Read the span's bytes one at a time without materialising it.
+
+### `Shared.eq`
+
+```milo
+fn Shared.eq(self: &Shared, sp: Span, other: &string): bool
+```
+
+Compare a span against a string without materialising it.
+
+### `Shared.holders`
+
+```milo
+fn Shared.holders(self: &Shared): i64
+```
+
+How many holders are alive right now. A progress hint: by the time you read
+it another thread may have cloned or dropped one. `thaw` is the operation
+that acts on the count without a window between reading and using it.
+
+### `Shared.holds`
+
+```milo
+fn Shared.holds(self: &Shared, sp: Span): bool
+```
+
+Whether `sp` fits here.
+
+### `Shared.len`
+
+```milo
+fn Shared.len(self: &Shared): i64
+```
+
+Bytes held.
+
+### `Shared.span`
+
+```milo
+fn Shared.span(self: &Shared): Span
+```
+
+A span over the whole buffer.
+
+### `Shared.spanOf`
+
+```milo
+fn Shared.spanOf(self: &Shared, start: i64, len: i64): Span
+```
+
+Measure a span against this buffer.
+
+### `Shared.text`
+
+```milo
+fn Shared.text(self: &Shared, sp: Span): string
+```
+
+Materialise the span as an owned string. The allocation, named.
+
+### `thaw`
+
+```milo
+pub fn thaw(sh: Shared): Result<Sealed, ThawRejected>
+```
+
+Recover the `Sealed` when this is the only holder alive.
+
+Refused while another holder exists, because handing the buffer back would let
+it be unsealed and mutated under readers that are still reading it. The refusal
+returns the `Shared` unharmed.
 
 ### `unseal`
 

@@ -118,8 +118,92 @@ pub fn main(): i32 {
 
 This is the staged pipeline: build, seal, parse and share, unseal, mutate, seal again. Spans you measured before the unseal are still just integers, and the buffer is free to change again, so that is exactly where the guarantee ends.
 
+## Sharing one buffer across threads
+
+A `Sealed` is an owned value, so handing it to a worker moves it. That is wrong for the
+case this module was written for: several scanners reading one large input at once.
+Copying per worker is the cost `seal` exists to avoid, and a reference cannot cross a
+thread boundary.
+
+`share` consumes the `Sealed` and returns a `Shared`, a holder that can be cloned:
+
+```milo
+from "std/seal" import { Shared, seal, thaw, unseal }
+from "std/runtime" import { Promise }
+
+pub fn main(): i32 {
+    let src = seal("the quick brown fox".clone())
+    let a = src.share()                          // consumes the Sealed
+
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..4 {
+        let c = a.clone()                        // another holder, no copy
+        ps.push(Promise<i64>.blocking(move (): i64 => {
+            var hits: i64 = 0
+            var i: i64 = 0
+            while i < c.len() {
+                if c.byteAt(i) == 111 { hits = hits + 1 }
+                i = i + 1
+            }
+            return hits
+        }))
+    }
+    let counts = Promise.all(ps).await()!
+    var total: i64 = 0
+    for x in counts { total = total + x }
+    print(total.toString())                      // 8
+    return 0
+}
+```
+
+Sharing is normally unsafe because a reader can observe a write. Here no operation
+writes: immutability is the absence of a method, not a promise, so N readers over one
+buffer need no lock, no ordering, and no check on the read path. `Send` and `Sync` are
+audited rather than derived, and the only mutable state is the holder count, which moves
+under an atomic.
+
+**`Shared` is `Sealed` with holders.** `len`, `span`, `spanOf`, `holds`, `byteAt`, `text`,
+`eq` and `each` are the same methods with the same meanings on both types, so there is one
+reader API to learn. The two differ only in the ownership verbs: `Sealed` has `unseal` and
+`share`, `Shared` has `clone` and `holders`. A test enforces that.
+
+### Getting it back
+
+`thaw` returns the `Sealed` when the caller is the only holder left, and refuses otherwise,
+because handing it back would let it be unsealed and mutated under readers still reading:
+
+```milo
+from "std/seal" import { seal, thaw, unseal }
+
+pub fn main(): i32 {
+    let a = seal("hello".clone()).share()
+    let other = a.clone()                        // a second holder
+    match thaw(a) {
+        Result.Ok(s) => {
+            print(unseal(s))
+        }
+        Result.Err(rej) => {
+            print("still shared by " + rej.holders.toString())   // 2
+            let back = rej.shared                // refusal hands the buffer back
+        }
+    }
+    return 0
+}
+```
+
+The refusal carries the `Shared`, so a caller who guessed wrong has not lost the buffer.
+`holders()` is a progress hint and nothing more: another thread may clone or drop between
+your reading it and acting on it. `thaw` is the operation that reads the count and acts on
+it without that window.
+
+That completes the cycle the staged pipeline wants: build, seal, share out to workers,
+collect, thaw, mutate, seal again. Mutation is exclusive by type and reads are concurrent
+by type, with a runtime check only at the boundary between the two phases.
+
 ## What this does not protect against
 
-A span carries no record of which buffer it was measured from. Resolve one against a different `Sealed` and you get the wrong bytes, or an abort if the range does not fit. That is a logic error, deterministic and never memory-unsafety, but it is a real gap: tying a span to one specific buffer at compile time needs a lifetime or a brand to carry the tie, and neither exists in this language. Use `holds` to check a span you did not measure yourself.
+A span's brand is checked when you resolve it, not when you build it, so a span aimed at the wrong buffer fails at the read rather than at the mistake. Tying the two together at compile time would need a lifetime or a type-level brand, and neither exists in this language, so the tie is a runtime tag. Use `holds` to branch on a span you did not measure yourself rather than letting `text` abort.
+
+Nothing here protects a buffer after `unseal`. Spans you measured are still just integers, and the buffer is mutable again.
 
 See [how Milo compares to Rust](/language/vs-rust) for the honest accounting of what this closes and what it does not.

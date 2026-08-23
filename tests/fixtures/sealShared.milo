@@ -1,0 +1,75 @@
+// Shared: one sealed buffer, many concurrent readers, and a thaw that refuses
+// while another holder is alive. Everything asserted here is deterministic: the
+// readers only read, so their counts cannot depend on scheduling.
+// @expect: 43
+// @expect: o-count x4 = 16
+// @expect: refused holders=2
+// @expect: quick
+// @expect: thawed: the quick brown fox jumps over the lazy dog
+
+from "std/seal" import {
+    Shared, seal, thaw, unseal
+}
+from "std/runtime" import {
+    Promise
+}
+
+// Clone, watch the clone's thaw get refused, and let the clone die here so the
+// caller is sole holder again on return.
+fn showRefusal(a: &Shared): void {
+    let b = a.clone()
+    match thaw(b) {
+        Result.Ok(s) => {
+            print("unexpected ok, holders was wrong")
+        }
+        Result.Err(rej) => {
+            print("refused holders=" + rej.holders.toString())
+            let sp = rej.shared.spanOf(4, 5)
+            print(rej.shared.text(sp))
+        }
+    }
+}
+
+pub fn main(): i32 {
+    var buf = "the quick brown fox jumps over the lazy dog".clone()
+    let src = seal(buf)
+    let a = src.share()
+    print(a.len().toString())
+
+    // Four OS threads reading the one buffer at the same time.
+    var ps: Vec<Promise<i64>> = Vec.new()
+    for k in 0..4 {
+        let c = a.clone()
+        ps.push(Promise<i64>.blocking(move(): i64 => {
+            var hits: i64 = 0
+            var i: i64 = 0
+            while i < c.len() {
+                if c.byteAt(i) == 111 {
+                    hits = hits + 1
+                }
+                i = i + 1
+            }
+            return hits
+        }
+        ))
+    }
+    let counts = Promise.all(ps).await()!
+    var total: i64 = 0
+    for x in counts {
+        total = total + x
+    }
+    print("o-count x4 = " + total.toString())
+
+    showRefusal(a)
+
+    // Sole holder now, so the buffer comes back.
+    match thaw(a) {
+        Result.Ok(s) => {
+            print("thawed: " + unseal(s))
+        }
+        Result.Err(rej) => {
+            print("unexpected refusal at holders=" + rej.holders.toString())
+        }
+    }
+    return 0
+}

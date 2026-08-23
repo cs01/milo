@@ -168,6 +168,7 @@
   "resultFromConversion.milo": "crash",
   "rngSeeded.milo": "mismatch",
   "safeExternCall.milo": "crash",
+  "sealShared.milo": "noEmit",
   "sealSpan.milo": "noEmit",
   "selectChannelVsTimeout.milo": "noEmit",
   "selectChildExit.milo": "noEmit",

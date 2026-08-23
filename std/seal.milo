@@ -27,12 +27,11 @@
 // operation that could invalidate them. There is no check to forget and no
 // unsafe block in this file.
 //
-// The honest gap, stated before you find it: a Span carries no record of WHICH
-// buffer it came from. Resolve one against the wrong Sealed and you get the
-// wrong bytes, or a bounds abort if the range does not fit. That is a logic
-// error, deterministic, never memory-unsafety. Tying a span to one buffer at
-// compile time needs a lifetime or a brand to carry the tie, and neither exists
-// under this language's axiom. See docs/residue-vs-rust.md.
+// A Span carries the identity of the buffer it was measured from, so resolving
+// one against a different Sealed is a named failure rather than wrong-but-plausible
+// bytes. Tying the two together at COMPILE time would need a lifetime or a type-level
+// brand, and neither exists under this language's axiom, so the tie is checked at
+// runtime instead. See docs/residue-vs-rust.md.
 
 // A start, a length, and the identity of the buffer it was measured from.
 //
@@ -47,6 +46,10 @@
 //
 // Make them with `src.span(start, len)`; a hand-built Span carries brand 0, which no
 // buffer ever has, so it fails closed rather than reading something plausible.
+from "std/os" import {
+    free, malloc, memcpy, memset
+}
+
 @derive(Eq)
 pub struct Span {
     start: i64,
@@ -219,5 +222,221 @@ impl Sealed {
     // Give the buffer back, mutable. Consumes this Sealed.
     fn unseal(self: Self): string {
         return unseal(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sharing one sealed buffer across threads.
+// ---------------------------------------------------------------------------
+//
+// `Sealed` is an owned value, so one holder has it and passing it to a worker
+// moves it. That is the right default, and it is exactly wrong for the case this
+// module was written for: N scanners reading ONE large input at once. Copying the
+// buffer per worker is the cost `seal` exists to avoid, and a reference cannot
+// cross a thread boundary.
+//
+// The way out is the property `Sealed` already has. Sharing is unsafe when a
+// reader can observe a write, and no operation on a `Sealed` writes. Immutability
+// is not a promise here, it is the absence of a method, so N readers over one
+// buffer needs no lock, no ordering, and no check inside the read path. What is
+// left is deciding when the storage is released, which is a count, not a race.
+//
+//     let src = seal(readFile("big.json")!)
+//     let a = src.share()          // consumes the Sealed
+//     let b = a.clone()            // another holder, same bytes, no copy
+//     ... hand `b` to a worker by move ...
+//     let back = thaw(a)           // Ok only when no other holder is alive
+//
+// `Send` and `Sync` are audited rather than derived: the raw pointer is reached
+// only by the read paths below and by a refcount that moves under an atomic.
+@noCopy
+pub struct Shared {
+    _ptr: *u8,
+    brand: i32,
+}
+
+// Safe because nothing here writes the bytes. The only mutable state in the box
+// is the refcount, and it moves only under `_atomicAddI64`/`_atomicSubI64`.
+unsafe
+
+impl Send for Shared {
+}
+unsafe
+
+impl Sync for Shared {
+}
+
+// Refcount first so its address is the box's address; `share` relies on that.
+struct SharedBox {
+    rc: i64,
+    inner: Sealed,
+}
+
+// A refused `thaw`, holding the buffer it declined to hand back.
+//
+// Returning the `Shared` rather than dropping it is what makes the refusal
+// recoverable: a caller who guessed wrong about the other holders still has the
+// buffer, and `holders` says how many were alive at the moment of the attempt.
+pub struct ThawRejected {
+    shared: Shared,
+    holders: i64,
+}
+
+// Consume a `Sealed` and return a shareable holder of the same bytes. O(1): the
+// buffer is moved into the box, never copied.
+pub fn share(s: Sealed): Shared {
+    var tmp: Sealed = s
+    let b = tmp.brand
+    unsafe {
+        let raw = malloc(sizeOf<SharedBox>())
+        assert(raw as i64 != 0, "share: out of memory")
+        memset(raw, 0, sizeOf<SharedBox>())
+        let box = raw as *SharedBox
+        (*box).rc = 1
+        // Move the Sealed into the box, then zero the source so its drop is a
+        // no-op: the bytes now belong to the box.
+        memcpy(((*box).inner.addrOf()) as *u8, (tmp.addrOf()) as *u8, sizeOf<Sealed>())
+        memset((tmp.addrOf()) as *u8, 0, sizeOf<Sealed>())
+        var out: Shared = Shared {
+            _ptr: raw, brand: b
+        }
+        return out
+    }
+}
+
+// Recover the `Sealed` when this is the only holder alive.
+//
+// Refused while another holder exists, because handing the buffer back would let
+// it be unsealed and mutated under readers that are still reading it. The refusal
+// returns the `Shared` unharmed.
+pub fn thaw(sh: Shared): Result<Sealed, ThawRejected> {
+    var h: Shared = sh
+    let live = _atomicAddI64(h._ptr, 0)
+    if live != 1 {
+        var r: ThawRejected = ThawRejected {
+            shared: h, holders: live
+        }
+        return Result.Err(r)
+    }
+    unsafe {
+        var out: Sealed = zeroed<Sealed>()
+        let box = h._ptr as *SharedBox
+        // Move the buffer out and zero the slot. `h` still drops below, which
+        // takes the count to zero and frees the box; the zeroed slot makes that
+        // drop's release of `inner` a no-op.
+        memcpy((out.addrOf()) as *u8, ((*box).inner.addrOf()) as *u8, sizeOf<Sealed>())
+        memset(((*box).inner.addrOf()) as *u8, 0, sizeOf<Sealed>())
+        return Result.Ok(out)
+    }
+}
+
+impl Drop for Shared {
+    fn drop(self: &mut Self): void {
+        if self._ptr as i64 == 0 {
+            return
+        }
+        unsafe {
+            let old = _atomicSubI64(self._ptr, 1)
+            if old == 1 {
+                let box = self._ptr as *SharedBox
+                // Take the buffer out so the ordinary string drop releases it,
+                // then release the box. After `thaw` the slot is zeroed and this
+                // is a no-op, which is why there is one path and not two.
+                var last: Sealed = zeroed<Sealed>()
+                memcpy((last.addrOf()) as *u8, ((*box).inner.addrOf()) as *u8, sizeOf<Sealed>())
+                memset(((*box).inner.addrOf()) as *u8, 0, sizeOf<Sealed>())
+                free(self._ptr)
+            }
+        }
+    }
+}
+
+impl Shared {
+    // Another holder of the same bytes. No copy; the buffer is released when the
+    // last holder drops.
+    fn clone(self: &Self): Shared {
+        _atomicAddI64(self._ptr, 1)
+        var out: Shared = Shared {
+            _ptr: self._ptr, brand: self.brand
+        }
+        return out
+    }
+
+    // How many holders are alive right now. A progress hint: by the time you read
+    // it another thread may have cloned or dropped one. `thaw` is the operation
+    // that acts on the count without a window between reading and using it.
+    fn holders(self: &Self): i64 {
+        return _atomicAddI64(self._ptr, 0)
+    }
+
+    // Bytes held.
+    fn len(self: &Self): i64 {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedLen((*box).inner)
+        }
+    }
+
+    // A span over the whole buffer.
+    fn span(self: &Self): Span {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedSpan((*box).inner)
+        }
+    }
+
+    // Measure a span against this buffer.
+    fn spanOf(self: &Self, start: i64, len: i64): Span {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedSpanOf((*box).inner, start, len)
+        }
+    }
+
+    // Whether `sp` fits here.
+    fn holds(self: &Self, sp: Span): bool {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedHolds((*box).inner, sp)
+        }
+    }
+
+    // The byte at `i`, bounds-checked.
+    fn byteAt(self: &Self, i: i64): u8 {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedByteAt((*box).inner, i)
+        }
+    }
+
+    // Materialise the span as an owned string. The allocation, named.
+    fn text(self: &Self, sp: Span): string {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedText((*box).inner, sp)
+        }
+    }
+
+    // Compare a span against a string without materialising it.
+    fn eq(self: &Self, sp: Span, other: &string): bool {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            return sealedEq((*box).inner, sp, other)
+        }
+    }
+
+    // Read the span's bytes one at a time without materialising it.
+    fn each(self: &Self, sp: Span, f: (u8) => void): void {
+        unsafe {
+            let box = self._ptr as *SharedBox
+            sealedEach((*box).inner, sp, f)
+        }
+    }
+}
+
+impl Sealed {
+    // Consume this buffer and return a shareable holder of the same bytes.
+    fn share(self: Self): Shared {
+        return share(self)
     }
 }

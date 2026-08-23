@@ -23,6 +23,32 @@ copy: a capturing closure would be moved into the first task and gone for the re
 Everything the work depends on therefore travels in the window itself, which is
 also what keeps the workers from sharing anything.
 
+### `parallelMapWith`
+
+```milo
+pub fn parallelMapWith<T, S>(v: Vec<T>, windows: i64, states: Vec<S>, f: (Shard<T>, &mut S) => Shard<T>): Result<Mapped<T, S>, WeldError>
+```
+
+parallelMap with two things it cannot express: more windows than workers, and
+per-worker state.
+
+More windows than workers is how uneven work balances out. parallelMap spawns
+one thread per window, so over-partitioning a 64-window render costs 64 OS
+threads. Here `states.len` fixes the worker count and the windows go into a
+queue the workers pull from: a worker that drew a cheap window pulls another,
+and one that drew the expensive window keeps grinding without idling the rest.
+
+The states are the answer to "why must `f` be a plain function": a closure
+cannot be copied to N workers, so whatever it would have captured travels as an
+explicit owned value instead. Each worker moves one `S` in, threads it through
+every window it processes, and hands it back through the result. Configuration
+rides in, accumulators ride out, and nothing is shared: an S is on exactly one
+thread at a time, which is the same move-checker argument the windows use.
+
+Which worker processes which window is scheduling, so state a caller reads back
+must not encode the assignment: per-worker tallies merge into totals that are
+deterministic even though each worker's share is not.
+
 ### `Shard.get`
 
 ```milo

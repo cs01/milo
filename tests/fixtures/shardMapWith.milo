@@ -1,0 +1,54 @@
+// parallelMapWith: pooled windows + per-worker owned state. The pooling makes
+// worker/window assignment nondeterministic, so everything asserted here is
+// invariant under scheduling: the transform, merged accumulator totals, and the
+// states coming home in the order they were given.
+// @expect: 3
+// @expect: 3000
+// @expect: 16
+// @expect: 0123
+
+from "std/shard" import {
+    Shard, parallelMapWith
+}
+
+pub struct Env {
+    id: i64,
+    scale: f64,
+    sum: f64,
+    windowsSeen: i64,
+}
+
+fn scale(w: Shard<f64>, e: &mut Env): Shard<f64> {
+    for i in 0..w.len() {
+        let x = w.get(i) * e.scale
+        w.set(i, x)
+        e.sum = e.sum + x
+    }
+    e.windowsSeen = e.windowsSeen + 1
+    return w
+}
+
+pub fn main(): i32 {
+    var data: Vec<f64> = Vec.filled(1000, 1.0)
+    var envs: Vec<Env> = Vec.new()
+    for k in 0..4 {
+        envs.push(Env {
+            id: k, scale: 3.0, sum: 0.0, windowsSeen: 0
+        }
+        )
+    }
+    let r = parallelMapWith(data, 16, envs, scale)!
+    var total: f64 = 0.0
+    var seen: i64 = 0
+    var ids = ""
+    for e in r.states {
+        total = total + e.sum
+        seen = seen + e.windowsSeen
+        ids = ids + e.id.toString()
+    }
+    print(r.data[0].toString())
+    print(total.toString())
+    print(seen.toString())
+    print(ids)
+    return 0
+}

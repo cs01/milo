@@ -172,13 +172,64 @@ still grinding while the rest sit idle:
 | 64 | 19 ms |
 
 It keeps improving well past the core count, because smaller units even out the finishing times.
-The caveat is that one task per window means 64 windows spawn 64 blocking tasks, which is more OS
-threads than the machine has cores. A worker pool pulling windows off a queue is the better answer
-and does not exist yet.
+The caveat is that `parallelMap` spawns one OS thread per window, so 64 windows is 64 threads on a
+ten-core machine. `parallelMapWith` below fixes the worker count and queues the windows instead.
 
 The point is the memory column. The copying approach this replaces roughly doubles peak memory; shatter/weld adds a flat 9.1 MiB, which is the worker stacks and is the same fixed cost at 40M elements. As a percentage that is 5.9% at 20M and 3.0% at 40M.
 
 Build the `Vec` with `Vec.withCapacity` if you know the size. Growing one by pushing peaks at roughly 2.7x the final size during the doubling reallocs, which dwarfs anything this module does.
+
+## Uneven work and per-worker state
+
+`parallelMap` cannot express two things: more windows than workers, and state that belongs to one
+worker. `parallelMapWith` adds both:
+
+```milo
+from "std/shard" import { Shard, parallelMapWith }
+
+pub struct Env { scale: f64, sum: f64 }
+
+fn scale(w: Shard<f64>, e: &mut Env): Shard<f64> {
+    for i in 0..w.len() {
+        let x = w.get(i) * e.scale
+        w.set(i, x)
+        e.sum = e.sum + x
+    }
+    return w
+}
+
+pub fn main(): i32 {
+    var data: Vec<f64> = Vec.filled(1000, 1.0)
+    var envs: Vec<Env> = Vec.new()
+    for k in 0..4 {
+        envs.push(Env { scale: 2.0, sum: 0.0 })
+    }
+    let r = parallelMapWith(data, 16, envs, scale)!   // 16 windows, 4 workers
+    var total: f64 = 0.0
+    for e in r.states { total = total + e.sum }
+    print(total.toString())                           // 2000
+    return 0
+}
+```
+
+`states.len` is the worker count and the windows go into a queue the workers pull from, so a worker
+that drew a cheap window pulls another while one that drew the expensive window keeps grinding. On
+2M elements where the first quarter costs 40x the rest, 10 workers: `parallelMap` 34 ms, 40 pooled
+windows 19 ms. Reproduce with `benchmarks/shard/shard_balance.milo`.
+
+The environments are the answer to "why must `f` be a plain function". A closure cannot be copied
+to N workers, so whatever it would have captured travels as an explicit owned value instead: each
+worker moves one `S` in, threads it through every window it processes, and hands it back through
+`r.states`, in the order the environments were given. Configuration rides in, accumulators ride
+out, and an `S` is on exactly one thread at a time, which is the same move-checker argument the
+windows use.
+
+That makes reduction a recipe rather than a primitive: put the accumulator in `S`, leave the window
+unchanged, and merge `r.states` sequentially when they come home.
+
+One rule: pooling makes the worker/window assignment scheduling-dependent, so state you read back
+must not encode which worker got which window. Per-worker tallies that merge into totals are
+deterministic; "worker 0 saw window 5" is not.
 
 ## Scanning a string
 

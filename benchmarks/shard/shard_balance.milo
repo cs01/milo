@@ -1,0 +1,83 @@
+// Static windows vs pooled windows on deliberately uneven work.
+//
+// The first quarter of the buffer costs ~40x the rest per element. With one
+// window per worker, whoever draws the first quarter grinds while the others
+// idle; with 4x more windows than workers pulling from a queue, the cheap
+// windows fill the idle time. Same total work, same f, same thread count.
+//
+//   ./milo build benchmarks/shard/shard_balance.milo --release -o benchmarks/shard/shard_balance
+//   benchmarks/shard/shard_balance static 10   # parallelMap, 10 windows = 10 workers
+//   benchmarks/shard/shard_balance pooled 10   # parallelMapWith, 40 windows / 10 workers
+
+from "std/shard" import {
+    Shard, parallelMap, parallelMapWith
+}
+from "std/time" import {
+    epochMillis
+}
+from "std/args" import {
+    args
+}
+from "std/strconv" import {
+    parseInt
+}
+
+let n = 2000000
+
+fn cost(idx: i64): i64 {
+    if idx * 4 < n {
+        return 200
+    }
+    return 5
+}
+
+fn grind(w: Shard<f64>): Shard<f64> {
+    let base = w.start()
+    for i in 0..w.len() {
+        var x = w.get(i)
+        let rounds = cost(base + i)
+        for r in 0..rounds {
+            x = x * 1.0000001 + 0.0000001
+        }
+        w.set(i, x)
+    }
+    return w
+}
+
+pub struct NoEnv {
+    pad: i64
+}
+
+fn grindEnv(w: Shard<f64>, _e: &mut NoEnv): Shard<f64> {
+    return grind(w)
+}
+
+pub fn main(): i32 {
+    let argv = args()
+    if argv.len < 3 {
+        print("usage: shard_balance static|pooled <workers>")
+        return 1
+    }
+    let mode = argv[1].clone()
+    let workers = parseInt(argv[2].clone()) ?? 10
+
+    var data: Vec<f64> = Vec.filled(n, 1.0)
+    let t0 = epochMillis()
+    if mode == "static" {
+        let out = parallelMap(data, workers, grind)!
+        let t1 = epochMillis()
+        print("static  workers=" + workers.toString() + " " + (t1 - t0).toString() + "ms (checksum " + out[0].toString() + ")")
+    } else {
+        var envs: Vec<NoEnv> = Vec.new()
+        for k in 0..workers {
+            envs.push(NoEnv {
+                pad: 0
+            }
+            )
+        }
+        let r = parallelMapWith(data, workers * 4, envs, grindEnv)!
+        let t1 = epochMillis()
+        print("pooled  workers=" + workers.toString() + " windows=" + (workers * 4).toString() + " " + (t1 - t0).toString() + "ms (checksum " + r.data[0].toString() + ")")
+    }
+    return 0
+}

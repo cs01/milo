@@ -177,6 +177,7 @@
   "selectTimerMain.milo": "noEmit",
   "sendAnnotation.milo": "noEmit",
   "sha512Vectors.milo": "noEmit",
+  "shardMapWith.milo": "noEmit",
   "shardParallelMap.milo": "noEmit",
   "shardWeld.milo": "noEmit",
   "signalSigchld.milo": "noEmit",

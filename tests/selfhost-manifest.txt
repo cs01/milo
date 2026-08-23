@@ -22,6 +22,7 @@ arrayCopy
 arrayLen
 arrayMutate
 arrayMutRef
+arrayOfGenericElements
 arrayRepeat
 arrayRepeatStruct
 arrays
@@ -610,6 +611,7 @@ vecMap
 vecPop
 vecReadsAndReshape
 vecRefFn
+vecRemoveDiscardedDrop
 vecSlice
 vecString
 vecStringLiveGrow

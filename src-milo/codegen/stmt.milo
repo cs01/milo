@@ -1599,6 +1599,57 @@ pub fn putArms(cg: &mut Cgen, idx: i64, a: Vec<HMatchArm>) {
 
 // -- Main statement dispatch. Returns true if stmt terminates block. --
 
+// A call in statement position still returns an OWNED value, and with nobody to bind it
+// nothing else will ever free it: `v.remove(0)` as a statement destroyed nothing, so the
+// element's destructor never ran and its heap went with it.
+//
+// Only call-shaped expressions qualify. A place expression — an identifier, a field, an
+// index — names storage someone else owns, and dropping one of those would double-free.
+// That is the whole distinction the oracle draws in isOwnedTempExpr, and getting it
+// backwards is worse than the leak.
+fn isOwnedTempNode(n: &HExprNode): bool {
+    match n.kind {
+        HExpr.Unlowered(a) => {
+            match (*a).kind {
+                Expr.Call(name, args, typeArgs) => {
+                    return true
+                }
+                Expr.MethodCall(obj, method, args) => {
+                    return true
+                }
+                Expr.EnumLit(en, va, args) => {
+                    return true
+                }
+                Expr.StructLit(name, fields) => {
+                    return true
+                }
+                _ => {
+                    return false
+                }
+            }
+        }
+        _ => {
+            return false
+        }
+    }
+}
+
+fn dropDiscardedTemp(cg: &mut Cgen, n: &HExprNode, v: &Val) {
+    if !isOwnedTempNode(n) {
+        return
+    }
+    if !cgNeedsDrop(cg, v.ty) {
+        return
+    }
+    // llType, not the raw Val type: a struct-typed Val carries the bare name here and
+    // LLVM needs the '%'. Emitting `alloca Res` fails to parse.
+    let llTy = llType(v.ty)
+    let addr = nextTemp(cg) + ".tmpdrop"
+    emit(cg, "  " + addr + " = alloca " + llTy.clone() + "\n")
+    emit(cg, "  store " + llTy.clone() + " " + v.v.clone() + ", ptr " + addr + "\n")
+    emitDropValue(cg, addr, v.ty)
+}
+
 pub fn genStmt(cg: &mut Cgen, s: &HStmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
     match s {
         HStmt.Let(name, ty, value, mutable) => {
@@ -1642,7 +1693,8 @@ pub fn genStmt(cg: &mut Cgen, s: &HStmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnS
             return true
         }
         HStmt.ExprStmt(e) => {
-            let _ = genHExpr(cg, *e, locs, sigs, "")
+            let dv = genHExpr(cg, *e, locs, sigs, "")
+            dropDiscardedTemp(cg, *e, dv)
             return false
         }
         HStmt.If(cond, thenBody, elseBody) => {

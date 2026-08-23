@@ -6347,7 +6347,15 @@ pub fn genMethodCall(cg: &mut Cgen, object: &ExprNode, method: &string, args: &V
             }
             var retTyStr = closureRetOf(fieldTy)
             if retTyStr.len == 0 {
-                retTyStr = "i64"
+                // The field's type did not carry a return type ("fn" rather than
+                // "fn:<ret>"). Defaulting to i64 does not make the closure return an
+                // integer — it makes the call site READ whatever it returned as one, so a
+                // String comes back as a pointer-sized integer and every use of it is
+                // garbage. There is no safe guess here.
+                eprint("internal error: closure field of type '" + fieldTy.clone() + "' carries no return type, so its call result cannot be typed")
+                unsafe {
+                    exit(1)
+                }
             }
             let retTyResolved = resolveTyStr(cg, retTyStr)
             let retLl = llType(retTyResolved)
@@ -8797,7 +8805,15 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &
                     pointee = pv.ty[1..pv.ty.len].clone()
                 }
                 if pointee.len == 0 {
-                    pointee = "i64"
+                    // Neither a Heap<T> nor a raw pointer, so there is no pointee to name.
+                    // The checker rejects dereferencing anything else, so reaching here
+                    // means the backend lost the operand's type rather than the program
+                    // being wrong — and reading the result as i64 would silently
+                    // reinterpret whatever is actually there.
+                    eprint("internal error: dereferencing a value of type '" + pv.ty.clone() + "', which names no pointee")
+                    unsafe {
+                        exit(1)
+                    }
                 }
                 return Val {
                     v: pv.v, ty: pointee

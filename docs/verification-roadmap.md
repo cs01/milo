@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: verification
+purpose: the path from sealed safety to SMT-discharged contracts, and what each stage buys
+key-files: src/checker.ts, std/smt.milo, src/verify.ts
+update-when: a verification stage ships, a discharge strategy changes, or the solver story moves
+last-verified: 2026-08-23
+-->
+
 # Verification Roadmap: From Sealed Safety to Provable Properties
 
 Status: Part A done. Part B is partly SHIPPED — see "What shipped" below; the rest of this
@@ -143,7 +151,7 @@ Goal: let users state properties (bounds, ranges, invariants) and have the compi
    fn push(v: &mut Vec<T>, x: T)
        ensures v.len() == old(v.len()) + 1
    ```
-2. **Dynamic-first.** Lower predicates to debug-mode `assert` traps. Ships value immediately with no solver. Mirrors the existing overflow-safety pattern (compile-time where possible, debug traps otherwise).
+2. **Dynamic-first.** Lower predicates to debug-mode `assert` traps. Ships value immediately with no solver. Deliberately NOT the overflow-safety pattern: overflow traps in every build mode, because an overflow is the machine doing something other than the arithmetic says. A contract is a claim the author wrote down, so it defaults to debug and `--contract-checks` forces it on at any optimization level.
 3. **Static discharge.** Checker emits verification conditions → Z3. Pass = compile-time proof. Fail = diagnostic with the solver's counterexample (Elm-style, via `diagnostics.ts`). SMT integration options below.
 4. **Payoff pass.** When an index is proven in-bounds, codegen skips the bounds check. Verification becomes a perf feature, not just a safety feature.
 5. **Stdlib first.** Annotate `Vec` indexing, integer ranges, slice ops. User types opt in — same rollout as the `@invalidates_refs` plan.

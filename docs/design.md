@@ -3,7 +3,7 @@ system: language-design
 purpose: the why behind Milo's design decisions — memory model, references, concurrency, error handling
 key-files: docs/language-reference.md, src/checker.ts, std/arena.milo
 update-when: a design decision changes, a deferred feature ships, or a fence/tradeoff is revised
-last-verified: 2026-08-21
+last-verified: 2026-08-23
 -->
 
 # Milo Language Design
@@ -126,7 +126,7 @@ Five compile-time guardrails:
 - **Memory safe** — moves, use-after-move errors, bounds checks, no dangling references
 - **Null safe** — no null; `Option<T>` with exhaustive matching
 - **Race safe** — Send/Sync; `spawn()` rejects non-Send captures
-- **Overflow safe** — compile-time literal/const checks, debug-mode runtime traps
+- **Overflow safe** — compile-time literal/const checks, runtime traps in *every* build mode (`--no-overflow-checks`/`--fast` opt out)
 - **Coercion safe** — no implicit coercions; explicit `as` casts only
 
 Ongoing work on aliasing/invalidation gaps: [safety-roadmap.md](safety-roadmap.md).

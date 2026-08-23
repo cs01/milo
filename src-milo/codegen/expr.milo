@@ -8984,10 +8984,14 @@ pub fn genIntLitVal(cg: &mut Cgen, n: i64, ty: string): Val {
 pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
     match e.kind {
         Expr.IntLit(n) => {
-            // No hint means no answer, and the historical answer was "i64" — a plausible
-            // default that silently retypes the literal. The typed path in genHExpr has
-            // the checker's type instead; this stays until IntLit lowering covers every
-            // position that reaches here.
+            // NOT a silent default, despite looking exactly like one. The language
+            // reference is explicit: "An integer literal with no type context defaults to
+            // i64" (docs/language-reference.md, `let a = 5  // i64 (no context)`). An
+            // empty hint IS the no-type-context case, so this line implements the spec.
+            //
+            // Called out because it was mistaken for the defect during the fail-closed
+            // pass: the shape of an invented type and the shape of a documented default
+            // are identical in the source, and only the spec tells them apart.
             var ty = hintTy.clone()
             if ty.len == 0 {
                 ty = "i64"

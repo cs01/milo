@@ -3040,7 +3040,16 @@ pub fn genClosureCall(cg: &mut Cgen, lc: &Local, args: &Vec<Heap<ExprNode>>, loc
         retTyStr = retHint.clone()
     }
     if retTyStr.len == 0 {
-        retTyStr = "i64"
+        // The closure's own type carried no return type and no hint supplied one. i64 does
+        // not make the call return an integer — it makes this site READ whatever came back
+        // as one, so a returned String arrives as a pointer-sized integer and every use of
+        // it is garbage. The twin of this site in genFieldClosureCall was failed closed
+        // first; this one was missed until a census went looking for the shape rather than
+        // the symbol.
+        eprint("internal error: closure call has no recoverable return type (closure type '" + lc.ty.clone() + "'), so its result cannot be typed")
+        unsafe {
+            exit(1)
+        }
     }
     let retLl = llType(resolveTyStr(cg, retTyStr))
     let retTyResolved = resolveTyStr(cg, retTyStr)

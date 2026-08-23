@@ -237,3 +237,49 @@ one-line diff. Reverted here; worth fixing in the script.
 | Manifest | 637 |
 | Fixtures | 658 |
 | Outside | 21, of which `arrayOfGenericElements` is **flaky rather than failing** — it needs a root cause, not a ratchet entry (T048) |
+
+---
+
+## Seam conversion, iteration 1 — what landed and what the gate caught
+
+`genLetBinding` and `genReturnValue` now take `&HExprNode`. Corpus green
+(`RATCHET OK — all 637 manifest fixtures still pass`), ratchet unchanged at 115. Pushed as
+`546c12d1`.
+
+Converting seams while every node is still `Unlowered` is behaviour-identical by
+construction, which is the point: the plumbing gets proven by the corpus separately from
+the first kind that flows through it. When a kind does break, the cause is the kind.
+
+### The ratchet caught a real mistake, not a bookkeeping one
+
+The first cut of both arms passed the surrounding hint into `genHExpr`:
+
+```milo
+v0 = genHExpr(cg, value, locs, sigs, hintTy.clone())
+```
+
+`hintTy` went 87 → 88 and the gate refused it. The fix was not to rebaseline — the code was
+wrong. A lowered node carries the type the checker gave it, so consulting a hint on that
+path is the exact re-derivation this feature removes. Passing `""` is more correct AND
+returns the counter to 115.
+
+Worth recording how close this came to being missed: the first check read `$?` after a
+pipe, which returns `tail`'s status, and printed `exit=0` directly beneath the ratchet's
+failure text. Re-run through a file, it was exit 1. That is the silent-success shape again,
+in the act of verifying a gate designed to prevent it.
+
+### Seams deliberately left aborting
+
+| Seam | Why it stays loud |
+|---|---|
+| `genIf` → `constFoldBool` | Folds on the WRITTEN form, and its comment is explicit that this is required rather than an optimization: a dead arm may call a symbol that exists on no other target. A silently unfolded branch is a link error on some platform, so an abort is the better failure. |
+| `genStmt`/`Match` → `genMatchAst` | Needs syntax and ownership together. A real conversion, not a wrapper. |
+
+### Why `genAssignAst` has no shared wrapper
+
+Seven `genOwnedArg(cg, value, …)` call sites want one HIR-dispatching helper. `genOwnedArg`'s
+own parameter is named `hintTy`, so any wrapper that forwards a hint adds two to that
+counter. Renaming the parameter to slip past the gate would be gaming it. The ratchet header
+states there is no honest reason for a counter to rise mid-migration, so the conversion
+inlines the dispatch at each site instead — which is also the idiom second-class references
+force everywhere else in this codebase.

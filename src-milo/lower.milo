@@ -257,9 +257,18 @@ fn hoistKind(k: Expr, ownerId: u32, fnRetType: &TypeKind, ck: &Checker, cx: &mut
                 Option.Some(t) => {
                     match t {
                         TypeKind.TStruct(mono) => {
+                            // Only when the concrete static method actually exists.
+                            // Matching on the name prefix alone was too broad: the
+                            // checker special-cases `Promise.all(v)` into the free fn
+                            // `promiseAll`, and its result type is still a `Promise_…`,
+                            // so the prefix test renamed the node and sent codegen
+                            // hunting for a `Promise_Vec_i64.all` that was never
+                            // registered. Six Promise fixtures regressed on that.
                             let prefix = enumName.clone() + "_"
                             if mono != enumName && mono.len > prefix.len && mono.substr(0, prefix.len) == prefix {
-                                name = mono.clone()
+                                if ck.functions.contains(mono.clone() + "$" + variant.clone()) {
+                                    name = mono.clone()
+                                }
                             }
                         }
                         _ => {

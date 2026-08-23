@@ -25,7 +25,7 @@ fn fmt2(template: &string, a: &string, b: &string): string
 Replaces the first two `{}` placeholders with `a` and `b`.
 
 ```milo
-let msg = fmt2(&"Hello, {}! You have {} messages.", &name, &intToString(count))
+let msg = fmt2("Hello, {}! You have {} messages.", name, intToString(count))
 // "Hello, Alice! You have 3 messages."
 ```
 
@@ -83,5 +83,5 @@ fn join(parts: &Vec<string>, separator: &string): string
 Joins all strings in `parts` with `separator` between them.
 
 ```milo
-let csv = join(&names, &", ")
+let csv = join(names, ", ")
 ```

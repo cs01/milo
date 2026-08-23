@@ -31,7 +31,7 @@ Reads every entry, decompressing and CRC-checking each. Returns an error on a ma
 from "std/io" import { readFile }
 
 let bytes = readFile("archive.zip")!
-for entry in Zip.read(&bytes)! {
+for entry in Zip.read(bytes)! {
     print($"{entry.name}: {entry.data.len} bytes")
 }
 ```

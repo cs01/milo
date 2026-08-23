@@ -33,10 +33,10 @@ fn hasFlag(name: &string): bool
 Returns true if `--name` appears in the arguments.
 
 ```milo
-let verbose = hasFlag(&"verbose")
-let output = getFlag(&"output")
+let verbose = hasFlag("verbose")
+let output = getFlag("output")
 match output {
-    Some(path) => print(fmt1(&"Writing to {}", &path)),
+    Some(path) => print(fmt1("Writing to {}", path)),
     None => print("Writing to stdout"),
 }
 ```

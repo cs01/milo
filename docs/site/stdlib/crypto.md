@@ -36,7 +36,7 @@ fn Crypto.md5(data: &string): string
 MD5 of `data` as a lowercase hex string.
 
 ```milo
-let hash = Crypto.sha256(&"hello world")
+let hash = Crypto.sha256("hello world")
 // "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
 ```
 
@@ -55,6 +55,6 @@ fn Crypto.aesGcmDecrypt(key: &string, iv: &string, ciphertext: &string, tag: &st
 - `aad` is additional authenticated data — pass `&""` if unused.
 
 ```milo
-let out = Crypto.aesGcmEncrypt(&key, &iv, &"secret", &"")!
-let plain = Crypto.aesGcmDecrypt(&key, &iv, &out.ciphertext, &out.tag, &"")!
+let out = Crypto.aesGcmEncrypt(key, iv, "secret", "")!
+let plain = Crypto.aesGcmDecrypt(key, iv, out.ciphertext, out.tag, "")!
 ```

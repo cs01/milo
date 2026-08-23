@@ -58,7 +58,7 @@ print(url.scheme)  // https
 print(url.host)    // example.com
 print(url.port)    // 8080
 
-match urlQueryGet(&url, &"name") {
+match urlQueryGet(url, "name") {
     Some(val) => print(val)  // milo
     None => {}
 }

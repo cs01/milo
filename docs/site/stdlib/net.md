@@ -179,7 +179,7 @@ HTTP GET with automatic TLS and DNS resolution.
 
 ```milo
 let resp = fetch("https://httpbin.org/get")!
-writeStdout(&resp.body)
+writeStdout(resp.body)
 ```
 
 ### fetchWith

@@ -186,7 +186,7 @@ fn main(): i32 {
     let data = Json.parse("{\"name\": \"milo\", \"version\": 1, \"tags\": [\"fast\", \"safe\"]}")!
 
     match data.str("name") {
-        Some(name) => writeStdout(&name),
+        Some(name) => writeStdout(name),
         None => writeStdout("unknown"),
     }
 
@@ -197,7 +197,7 @@ fn main(): i32 {
             match first {
                 Some(tag) => {
                     match tag.asStr() {
-                        Some(s) => writeStdout(&s),
+                        Some(s) => writeStdout(s),
                         None => {},
                     }
                 },

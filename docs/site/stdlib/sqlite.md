@@ -183,22 +183,22 @@ from "std/sqlite" import { dbOpen, dbClose, dbExec, dbQuery, dbStep, dbColumnTex
 fn main(): i32 {
     let db = dbOpen(":memory:")!
 
-    dbExec(&db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")!
-    dbExec(&db, "INSERT INTO users (name, age) VALUES ('Alice', 30)")!
-    dbExec(&db, "INSERT INTO users (name, age) VALUES ('Bob', 25)")!
+    dbExec(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")!
+    dbExec(db, "INSERT INTO users (name, age) VALUES ('Alice', 30)")!
+    dbExec(db, "INSERT INTO users (name, age) VALUES ('Bob', 25)")!
 
     // Query with prepared statement
-    let stmt = dbQuery(&db, "SELECT name, age FROM users WHERE age > ?")!
-    dbBindInt(&stmt, 1, 20)!
+    let stmt = dbQuery(db, "SELECT name, age FROM users WHERE age > ?")!
+    dbBindInt(stmt, 1, 20)!
 
-    while dbStep(&stmt) {
-        let name = dbColumnText(&stmt, 0)
-        let age = dbColumnInt(&stmt, 1)
+    while dbStep(stmt) {
+        let name = dbColumnText(stmt, 0)
+        let age = dbColumnInt(stmt, 1)
         print(name + " is " + intToString(age))
     }
 
-    dbFinalize(&stmt)
-    dbClose(&db)
+    dbFinalize(stmt)
+    dbClose(db)
 
     return 0
 }

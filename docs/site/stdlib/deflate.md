@@ -35,6 +35,6 @@ Compresses to a zlib stream: 2-byte header, DEFLATE body, Adler-32 trailer.
 ```milo
 from "std/inflate" import { Inflate }
 
-let gz = Deflate.gzip(&"hello, hello, hello")
-let back = Inflate.gzip(&gz)!   // "hello, hello, hello"
+let gz = Deflate.gzip("hello, hello, hello")
+let back = Inflate.gzip(gz)!   // "hello, hello, hello"
 ```

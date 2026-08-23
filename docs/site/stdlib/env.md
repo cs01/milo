@@ -18,7 +18,7 @@ Look up an environment variable. Returns `None` if unset.
 
 ```milo
 match Env.get("HOME") {
-    Some(home) => writeStdout(&home),
+    Some(home) => writeStdout(home),
     None => writeStdout("HOME not set"),
 }
 ```

@@ -49,6 +49,15 @@ into Ada than he proposed: ranged types (`i32(0..50000)`) and
    paths; ranged types and the SMT lane can provably delete checks later.
    → backlog Tier 2 (benchmark, then flip the default).
 
+   **SHIPPED** — the default was flipped; `+ - * -x` trap in every build mode
+   (see memory-safety-vs-rust.md finding #1). The decision holds, but the
+   estimate it rested on did not: "a few percent" is right for float, parsing
+   and allocation work (0–2%), and wrong for integer-dense loops, where the
+   measured cost is 19–30% (2026-08-23; `sh benchmarks/run-overflow.sh`).
+   The escape hatches named above are what carry that case, and the prover lever
+   is still half-built — L1+L2 range propagation shipped, L3 branch narrowing
+   did not, so even `n - 1` guarded by `if n < 2` still emits a check.
+
 2. **Do not build lazy iterator adapters.** Associated types drag in the
    inference complexity and library coupling Graydon blames traits for, and
    lazy adapters are the poster child of "library code that only performs via

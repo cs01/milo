@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: debugging
+purpose: runtime bug hunting — sanitizers, DWARF, overflow traps, and what each build flag does
+key-files: src/main.ts, src/target.ts
+update-when: a build flag changes what it enables, or a new debugging tool ships
+last-verified: 2026-08-23
+-->
+
 # Debugging
 
 Milo emits standard DWARF debug info, so any DWARF-aware debugger — `lldb`, `gdb`, or [dapweb](https://github.com/milo-language/dapweb) — can set breakpoints on Milo source lines and inspect Milo values.
@@ -136,8 +144,8 @@ Current gaps:
 Runtime bug hunting, before you reach for a debugger:
 
 ```bash
-milo build app.milo -o app --debug     # -O0 traps on integer overflow
+milo build app.milo -o app --debug     # -O0, no optimisation
 milo build app.milo -o app --sanitize  # link with AddressSanitizer (clang only)
 ```
 
-`--debug` (`-O0`) enables overflow traps; the default `-O2` and `--release` builds use wrapping arithmetic. See [Warnings & Errors](/language/warnings-and-errors) for compile-time diagnostics.
+Arithmetic traps on overflow in **every** build mode, `--release` included — it is a language law, not a debug aid, so there is no mode in which a release binary quietly wraps. `--no-overflow-checks` (or `--fast`) opts back into wrapping for a perf-critical build; `wrappingAdd`/`saturatingAdd`/`checkedAdd` name it per operation. See [Warnings & Errors](/language/warnings-and-errors) for compile-time diagnostics.

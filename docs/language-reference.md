@@ -3,7 +3,7 @@ system: language-reference
 purpose: the syntax-and-semantics reference for Milo — types, control flow, ownership, slices, Heap, arenas, generics
 key-files: src/parser.ts, src/checker.ts, docs/grammar.ebnf, std/arena.milo
 update-when: surface syntax or a language feature changes, or a stdlib type gets first-class reference docs
-last-verified: 2026-08-03 (Uuid value-type section added and compiled; full snippet sweep last run 2026-07-31)
+last-verified: 2026-08-23 (Uuid value-type section added and compiled; full snippet sweep last run 2026-07-31)
 -->
 
 # The Milo Language Guide
@@ -175,7 +175,9 @@ The rule is uniform: **every operation is total — it produces the correct valu
 
 Checked operations: `+`, `-`, `*`, unary negation (`-x`), integer division/remainder (`/` `%`, including signed `INT_MIN / -1`), and shift-by-out-of-range (`<<`/`>>` with an amount ≥ the operand's bit width). Array/slice bounds and ranged-type bounds trap the same way.
 
-For a perf-critical build that cannot afford the checks on `+ - *`, `--no-overflow-checks` (or `--fast`) restores silent two's-complement wrapping; `--overflow-checks` forces trapping. These change *only* the plain `+ - *` operators — everything else stays total. The cost is near-zero in practice: the compiler proves most operations safe and emits no check.
+For a perf-critical build that cannot afford the checks on `+ - *`, `--no-overflow-checks` (or `--fast`) restores silent two's-complement wrapping; `--overflow-checks` forces trapping. These change *only* the plain `+ - *` operators — everything else stays total.
+
+The cost depends entirely on how integer-dense the inner loop is (measured 2026-08-23 on macOS/aarch64; reproduce with `sh benchmarks/run-overflow.sh`): float math, parsing and allocation-bound work pay 0–2%; byte scanning about 16%; tight loops over unconstrained integers 21–31%. Where the range prover can discharge an operation it emits no check at all, but an unconstrained `i64` parameter cannot be discharged, so recursive integer code pays the full cost today. Float-heavy code is cheap for a different reason: the checks are emitted on the loop indices, they are simply dwarfed by the f64 work. Branch narrowing (ranged integers L3, planned) is what would close that gap: `n - 1` under an `if n < 2` guard is provably safe and still emits a check.
 
 **Explicit overflow control** — wrapping is otherwise reached only by *naming* it, per operation:
 

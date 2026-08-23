@@ -21,7 +21,7 @@ Primitive types, let/var bindings, if/else, while/for loops, functions, structs,
 - **Ownership**: single-owner move semantics, compiler-tracked drops, no GC, no reference counting
 - **Null safety**: `Option<T>` — no null pointers in safe code
 - **Race safety**: structural `Send`/`Sync` — the compiler rejects data races at `spawn()` boundaries
-- **Overflow safety**: compile-time range proof plus runtime traps on `+ - * -x` — and shift-out-of-range, divide-by-zero, `INT_MIN / -1` — in **every** build mode, release included. `--no-overflow-checks` opts back into wrapping, and `wrappingAdd`/`saturatingAdd`/`checkedAdd` name it per operation. Most arithmetic is proved safe and emits no check at all
+- **Overflow safety**: compile-time range proof plus runtime traps on `+ - * -x` — and shift-out-of-range, divide-by-zero, `INT_MIN / -1` — in **every** build mode, release included. `--no-overflow-checks` opts back into wrapping, and `wrappingAdd`/`saturatingAdd`/`checkedAdd` name it per operation. Measured cost: 0–2% on float, parsing and allocation work, up to ~30% on tight loops over unconstrained integers (reproduce with `sh benchmarks/run-overflow.sh`)
 - **`unsafe` blocks**: pointer work is quarantined behind a grep target, with an unused-`unsafe` lint on by default
 - **Borrow invalidation**: ref-while-frozen, use-after-invalidate, and call-site exclusivity are compile errors
 - **Arena safety**: identity and generation validation for `Arena<T>`/`Handle<T>`

@@ -3,7 +3,7 @@ system: planning
 purpose: canonical status — what shipped, what is in flight, what is planned, what was retired
 key-files: docs/backlog.md (ROI ordering over the open items), docs/safety-roadmap.md, docs/self-hosting.md, docs/verification-roadmap.md
 update-when: a feature ships, a track is abandoned, or a new track opens
-last-verified: 2026-08-15 (self-host endgame decided proof-only and src-milo frozen; packages ecosystem at 8 published with an install-and-build gate; green main; counts re-measured)
+last-verified: 2026-08-23 (self-host endgame decided proof-only and src-milo frozen; packages ecosystem at 8 published with an install-and-build gate; green main; counts re-measured)
 -->
 
 # Milo Roadmap
@@ -27,7 +27,7 @@ Diagnostics carry "did you mean" suggestions on a missed method, field, or name 
 - **Ownership**: single-owner moves, compiler-tracked drops, no GC, no RC
 - **Null safety**: `Option<T>` — no null in safe code
 - **Race safety**: structural `Send`/`Sync`, checked at `spawn()`/`Promise.blocking` boundaries
-- **Overflow safety**: compile-time range proof + runtime traps on `+ - * -x` (and shift-out-of-range, div-by-zero, `INT_MIN / -1`) in **all** build modes; `--no-overflow-checks` / `--fast` opt back into wrapping for `+ - *`, `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd` name it per op. The silent release wrap was the one inherited footgun (Ethos #1). The compiler proves most arithmetic safe and emits no check at all (`matmul` emits zero traps with checks on); arithmetic-dominated code with unprovable operand ranges measured **~+8%** worst case (0.37s → 0.40s over 400M iterations), near-zero on real sub-0.3s benchmarks. A trap `abort()`s for a supervisor-visible abnormal exit and a core dump
+- **Overflow safety**: compile-time range proof + runtime traps on `+ - * -x` (and shift-out-of-range, div-by-zero, `INT_MIN / -1`) in **all** build modes; `--no-overflow-checks` / `--fast` opt back into wrapping for `+ - *`, `.wrappingAdd`/`.saturatingAdd`/`.checkedAdd` name it per op. The silent release wrap was the one inherited footgun (Ethos #1). Cost measured across the benchmark suite on 2026-08-23, macOS/aarch64 (reproduce with `sh benchmarks/run-overflow.sh`; results land in a gitignored `benchmarks/results-*.md`): **0–2%** on float, parsing and allocation-bound work, **~19%** on byte scanning, and **up to 1.30x** on tight loops over unconstrained integers. The earlier "~+8% worst case, `matmul` emits zero traps" note was wrong on both halves — `matmul` emits 100 overflow intrinsics (they are dwarfed by the f64 work, which is why it still times at 1.01x), and `fib` measures 1.30x. The range prover discharges what it can, but an unconstrained `i64` parameter cannot be discharged, and branch narrowing (ranged integers L3, planned) is what would close the rest: `n - 1` guarded by `if n < 2` is provably safe and still emits a check. A trap `abort()`s for a supervisor-visible abnormal exit and a core dump
 - **`unsafe` blocks**: required for deref, pointer indexing, address-of, pointer casts, `zeroed<T>()`, unsafe-signature extern calls; unused-`unsafe` lint on by default
 - **Borrow invalidation**: ref-while-frozen and use-after-invalidate for built-in borrows; call-site exclusivity (`f(&mut v, &v[0])` rejected)
 - **Arena safety**: identity + generation validation at runtime for `Arena<T>`/`Handle<T>`

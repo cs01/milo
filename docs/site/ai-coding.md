@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: ai-coding
+purpose: how Milo's guarantees map onto the failure modes of machine-generated code
+key-files: docs/site/language/safety.md, docs/language-reference.md
+update-when: a safety guarantee changes, or the list of covered failure modes moves
+last-verified: 2026-08-23
+-->
+
 # AI-Assisted Development
 
 Milo is designed so that **wrong code fails to compile, not fails silently at runtime**. When LLM-generated code has a bug, the compiler catches it with a clear error — there is no middle ground where code compiles, appears to work, and hides a latent memory-safety bug.
@@ -94,7 +102,7 @@ C++ lets wrong code compile. LLMs generate plausible C++ that works in testing a
 3. **Dangling references** — the most common C++ CVE pattern; LLMs routinely return refs to locals. Milo: impossible by construction.
 4. **Null deref** — LLMs forget null checks; C++ can't enforce them. Milo: `Option<T>` with exhaustive match (or explicit `w!`).
 5. **Data races** — LLMs share mutable state across threads freely. Milo rejects non-Send captures at compile time.
-6. **Integer overflow** — signed overflow is UB; compilers delete "impossible" checks. Milo: compile-time checks for constants, debug traps, explicit `wrappingAdd`/`saturatingAdd`.
+6. **Integer overflow** — signed overflow is UB; compilers delete "impossible" checks. Milo: compile-time checks for constants, runtime traps in every build mode (release included), explicit `wrappingAdd`/`saturatingAdd`.
 
 The pattern, concretely:
 

@@ -393,3 +393,53 @@ The fail-closed pass is finished — every can't-tell site that CAN reject now d
 remains for HIR is the residue: sites where the backend must reconstruct because the
 information never arrived. Those are found by asking "does this function have enough
 evidence to be right?", not by counting symbols.
+
+---
+
+## Where the fail-closed vein runs out
+
+A census of every codegen helper whose catch-all answers "I don't know" with a falsy value
+found 20 candidates. Nearly all are honest predicates: `isFixedArrayTy` returning false for
+a non-array is the right answer, not a guess. Two looked like real conflations.
+
+### `placeRootIsOwned` — predicted hazard, disproved by probe
+
+`Expr.IndexAccess` is absent from its match, so `v[0].field` falls to `_ => false` and
+reports "not an owned root". Since NOT marking a consumed receiver means the enclosing
+scope drops it again, that reads as a double free.
+
+It isn't one. Probe:
+
+```milo
+let s = v[0].consume()   // consume takes self: Self, by value
+print(s)                 // alpha
+print(v[0].name)         // alpha  ← still there
+```
+
+Indexing a struct out of a container materialises a COPY, so the receiver is a temp rather
+than a place, and there is no ownership decision to skip. Clean under ASan on both
+compilers. `false` is the correct answer here.
+
+(The clone-on-index is a known separate issue. It is a performance and ergonomics question,
+not unsoundness.)
+
+### Prediction scorecard
+
+| Predicted hazard | Verdict | Disproved by |
+|---|---|---|
+| `placeTypeStr` conflation (8 sites) | REAL | — |
+| `resolveTyStr` pass-through | REAL | — |
+| `genAsCast` unresolved target | REAL | — |
+| closure return type ×2 | REAL | — |
+| deref pointee | REAL | — |
+| empty array literal | REAL | — |
+| `genArrayRepeat` default | false | reading — both branches assign |
+| `IntLit` default | false | the language reference — it IS the rule |
+| `placeRootIsOwned` on IndexAccess | false | a probe — the element is cloned |
+
+**7 real, 3 false.** The last two attempts were both false, which is the signal that this
+vein is worked out: what remains are predicates that are correct by construction.
+
+Structural analysis over-predicts hazards. Every one of the three was disproved in minutes
+by reading the code, the spec, or running a five-line probe — none needed the corpus. That
+ordering is worth keeping: read, check the spec, probe, and only then change the compiler.

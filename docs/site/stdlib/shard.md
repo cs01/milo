@@ -2,6 +2,8 @@
 
 A `Shard` is an owned window over part of a `Vec`. Splitting a buffer into disjoint shards lets several threads transform it in place, with no copies and no shared references.
 
+A shard holds a pointer into the original buffer and a length, which is the same representation a mutable slice has in any other language. Milo gives it the *type* of an owned value, so the move checker decides who may touch each range and no lifetime has to be written down. The buffer is allocated once and is never copied and never split. What moves is the right to write a range.
+
 `parallelMap` runs that whole cycle in one call and is what most uses want. `shatter`, `windows` and `weld` are the same cycle by hand, for when the workers must differ from each other.
 
 ## Why this module exists

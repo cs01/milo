@@ -346,6 +346,7 @@ loopInvariant
 mapIterTwoLoops
 matchBareVariant
 matchBigAggSubject
+matchConsumesSubjectDrop
 matchDivergingArmMove
 matchExpr
 matchHeapDerefBorrows

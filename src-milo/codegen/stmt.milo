@@ -1332,6 +1332,25 @@ fn trailingIdentName(body: &Vec<Heap<HStmt>>): string {
     }
 }
 
+// Does any arm bind a payload that owns something? Only then is the subject consumed:
+// a Copy payload is copied out and leaves the subject intact.
+fn armMovesPayload(cg: &Cgen, arms: &Vec<HMatchArm>): bool {
+    for ai in 0..arms.len {
+        match arms[ai].pattern {
+            HPattern.HEnumPattern(vname, bindings, vidx) => {
+                for bi in 0..bindings.len {
+                    if cgNeedsDrop(cg, tyStr(cg, bindings[bi].ty, "match binding")) {
+                        return true
+                    }
+                }
+            }
+            _ => {
+            }
+        }
+    }
+    return false
+}
+
 pub fn genMatchAst(cg: &mut Cgen, subject: &ExprNode, arms: &Vec<HMatchArm>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string, wantValue: bool, hintTy: string): MatchGen {
     // Whether the subject is BORROWED rather than consumed is a question about the place
     // it names, which is still a syntactic one here — the checker records no equivalent of
@@ -1339,6 +1358,20 @@ pub fn genMatchAst(cg: &mut Cgen, subject: &ExprNode, arms: &Vec<HMatchArm>, loc
     // reports a subject whose recorded type was still a `&T`) and is deliberately not used.
     let subjBorrows = matchSubjectBorrows(subject, locs)
     let subjLv = genLvalue(cg, subject, locs, sigs)
+    // An arm that MOVES a droppable payload out of an owned subject leaves that subject
+    // dead. Zeroing the payload slot (bindArmPayloads) is not enough on its own: it makes
+    // the subject's drop glue free a null pointer, which is a harmless no-op and is why
+    // heap payloads looked correct — but a user `Drop` impl runs regardless and receives
+    // the zeroed value. `Res { id: 1 }` therefore dropped twice, the second time printing
+    // `drop 0`; for std/http's `Socket { fd: i32 }` that second drop is `close(0)`,
+    // closing stdin on a socket already moved away.
+    //
+    // Only types whose fields are all Copy ever showed it, because a heap field's second
+    // free was silently a no-op. Recording the subject's address as moved is the same
+    // channel every other move-out already uses, so scope-end drops skip it.
+    if !subjBorrows && armMovesPayload(cg, arms) {
+        cg.movedLocalAddrs.push(subjLv.v.clone())
+    }
     if llType(subjLv.ty) == "%String" {
         let sv = nextTemp(cg)
         emit(cg, "  " + sv + " = load %String, ptr " + subjLv.v + "\n")

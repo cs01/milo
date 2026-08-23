@@ -350,3 +350,46 @@ danger.
 Roughly one real hazard per sixteen mentions. The kind-by-kind HIR migration would have
 worked the 114 and found the 7 only incidentally, while the ratchet ticked down by ones
 and looked like progress throughout.
+
+---
+
+## The site where HIR is genuinely the fix
+
+The `IntLit` claim was retracted above (it implements the documented default). This is its
+honest replacement, found by extending the shape census from "invents a type" to
+"skips when it cannot tell".
+
+`disambiguateStructLit` (`codegen/expr.milo:88`) picks among a generic struct's
+monomorphizations — `Pair_i32_i32` vs `Pair_string_i32` — by matching each literal field's
+value category against the candidate's field type. Its own comment states the problem:
+*"which the checker already resolved, but the AST keeps the bare name."*
+
+When `exprCategory` cannot categorise a field it returns `""` and the field's evidence is
+skipped. That path is not exceptional: `exprCategory` answers for five literal kinds and
+returns `""` for every ident, call and field read.
+
+**The hazard.** If the skipped field is the one that would have excluded a candidate,
+exactly one survivor remains, and the function returns the wrong monomorphization — whose
+fields are then read at the wrong types. With two or more survivors it returns the bare
+base name and the failure is loud downstream. The single-survivor case is the silent one.
+
+**Why fail-closed does not apply here.** Every other can't-tell site in this pass could
+abort, because the unknown case was rare and indicated a lost type. Here the unknown case
+is the normal path, so an abort would fire constantly on correct programs. Strictness
+cannot rescue a function whose evidence is structurally too weak.
+
+**What does fix it.** The checker resolved this literal's type; the backend is
+reconstructing it from value shapes because the AST kept the bare name. Carrying the
+checker's type to codegen removes the guess rather than making the guessing cleverer.
+
+That is the argument for the HIR migration, stated at one concrete site instead of as a
+count. It is a better argument than the ratchet ever made: not "87 mentions of hintTy",
+but "this function guesses, and the guess can be wrong, and no amount of strictness here
+can help".
+
+### What this changes about the remaining work
+
+The fail-closed pass is finished — every can't-tell site that CAN reject now does. What
+remains for HIR is the residue: sites where the backend must reconstruct because the
+information never arrived. Those are found by asking "does this function have enough
+evidence to be right?", not by counting symbols.

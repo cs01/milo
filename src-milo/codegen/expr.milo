@@ -96,6 +96,24 @@ pub fn disambiguateStructLit(cg: &Cgen, base: &string, fields: &Vec<StructLitFie
         for fi in 0..fields.len {
             let cat = exprCategory(*fields[fi].value)
             if cat.len == 0 {
+                // Skipping this field's evidence, and that is a guess rather than a
+                // safe default. exprCategory answers for five literal kinds and returns
+                // "" for everything else — idents, calls, field reads — so the skip is
+                // the COMMON path, not the rare one.
+                //
+                // The hazard is narrow but real: if the skipped field is the one that
+                // would have excluded a candidate, exactly one survivor remains and this
+                // function returns the WRONG monomorphization, whose fields are then read
+                // at the wrong types. When two or more survive it returns the bare base
+                // name and the failure is loud downstream; the single-survivor case is
+                // the silent one.
+                //
+                // Unlike the other can't-tell sites closed in this pass, aborting here is
+                // not available: the unknown case is the normal case. The fix is the one
+                // the comment above this function already names — the checker RESOLVED
+                // this literal's type and the AST kept the bare name. Carrying that type
+                // through to codegen removes the guess entirely, rather than making
+                // category-matching cleverer.
                 continue
             }
             let idx = lookupFieldIndex(cg, k, fields[fi].name)

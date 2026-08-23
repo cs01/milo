@@ -2,9 +2,13 @@
 
 `shatter` splits a `Vec` into disjoint owned windows so several threads can transform it in place, with no copies and no shared references.
 
-Milo will not let a reference cross a thread boundary. The usual consequence is that parallelising a transform means giving every worker its own copy of a chunk and stitching the copies back together, and for a large buffer that copy costs more than the parallelism saves.
+## Why this module exists
 
-This module takes the other route: instead of sharing a reference, it divides the *ownership*. `shatter` consumes the `Vec` and hands out windows, each an ordinary owned value that a worker receives by move like anything else.
+Milo has no stored references. A `&T` or `&mut T` exists only as a function parameter, never in a struct field, a `Vec` element, or a return value. That restriction is what keeps lifetimes out of the language: a reference that cannot outlive the call it was passed to needs no annotation to prove it, so there is nothing to name and nothing to thread through a signature.
+
+Parallel transforms are where that restriction costs something. The standard move is to split a buffer into mutable slices and give one to each worker, which Rust spells `split_at_mut`. It works because the type system can state that the slices borrow one buffer over disjoint regions, and can check that claim. Milo cannot state it, and adding lifetimes so that it could would give back exactly what the restriction bought. That leaves copying a chunk per worker and stitching the copies together, and on a 20M-element buffer the copy costs more than the parallelism saves.
+
+So this module divides the *ownership* instead of the borrow. `shatter` consumes the `Vec` and hands out windows, each an ordinary owned value that a worker receives by move like anything else. No reference crosses a thread because no reference exists, and the aliasing argument is the move checker that already shipped rather than a new rule to trust.
 
 ```milo
 from "std/shard" import { Shard, shatter }

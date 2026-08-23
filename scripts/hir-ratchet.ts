@@ -48,7 +48,19 @@ const reason = ri >= 0 ? argv[ri + 1] : "";
 const COUNTERS = [
   ["astTypeStr", "re-derives a type string from an AST type"],
   ["resolveAstTy", "resolves an AST type to a backend type string"],
-  ["placeTypeStr", "re-derives a place's type; returns \"\" on failure, read as \"skip\""],
+  // Renamed from placeTypeStr when the silent-failure mode was closed (the "" that
+  // callers read as "skip an ownership decision" is now PlaceTy.Unresolved, which aborts).
+  // The counter follows the RENAME rather than being retired, because the re-derivation
+  // itself is what it measures and that has not gone anywhere: placeTypeOf still walks
+  // syntax to rebuild a type the checker already had. Letting the old name sit here would
+  // report 0 forever while the thing it counts is untouched — a gate whose parser stopped
+  // matching, which is the failure this whole file exists to prevent.
+  ["placeTypeOf", "re-derives a place's type from syntax (fails closed, but still re-derives)"],
+  // The string face every consumer calls. Counted separately from placeTypeOf so the
+  // total reflects every site that asks for a re-derived place type, not just the
+  // recursion inside the walk. Both must reach zero: failing closed removed the silent
+  // skip, it did not remove the re-derivation.
+  ["placeTypeStrOrAbort", "asks for a re-derived place type at an ownership decision"],
   ["hintTy", "threads an expected type down the tree in place of a typed node"],
   // Construction sites only. Counting the identifier would also count the variant
   // declaration, mkUnlowered's own body and its hexprKindName arm — a floor of 4 that

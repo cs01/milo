@@ -316,57 +316,154 @@ pub fn genFieldAccess(cg: &mut Cgen, object: &ExprNode, field: &string, locs: &V
 
 // Pure (no emit) type of an addressable place expr. "" for non-places, bare fn
 // names, and derefs — anything genOwnedArg must not treat as an owned slot.
-pub fn placeTypeStr(cg: &Cgen, e: &ExprNode, locs: &Vec<Local>): string {
+// Three answers where there were two.
+//
+// "This expression is not a place" and "this IS a place but I could not derive its type"
+// both used to return "", and every caller reads "" as "skip the ownership decision". The
+// first is correct: a non-place owns nothing, so there is nothing to mark moved or drop.
+// The second is a missed drop or a double free, and it was indistinguishable from the
+// first. That conflation is the reason this enum exists.
+//
+// Deliberately NOT a string with a sentinel. A sentinel is what got us here.
+pub enum PlaceTy {
+    NotAPlace,
+    Unresolved(string),
+    Known(string),
+}
+
+// The string face, for the call sites that still want one.
+//
+// NotAPlace still yields "" and callers still read that as "skip" — which is correct, a
+// non-place owns nothing. Unresolved does NOT: it aborts naming what could not be resolved.
+// That is the whole change. Every caller of this function is making an ownership decision
+// (mark a receiver moved, clone-or-move an argument, drop the old value at an assignment),
+// and a decision made on a type nobody could derive is a decision made on nothing.
+//
+// Constitution I: every "unknown / can't tell / didn't match" path must reject, not accept.
+// This path used to accept.
+pub fn placeTypeStrOrAbort(cg: &Cgen, e: &ExprNode, locs: &Vec<Local>, what: &string): string {
+    match placeTypeOf(cg, e, locs) {
+        PlaceTy.Known(t) => {
+            return t
+        }
+        PlaceTy.NotAPlace => {
+            return ""
+        }
+        PlaceTy.Unresolved(w) => {
+            eprint("internal error: " + what.clone() + " needs the type of a place, but " + w.clone() + " could not be resolved")
+            unsafe {
+                exit(1)
+            }
+            return ""
+        }
+    }
+}
+
+// The place's type, or an honest statement that there isn't one.
+pub fn placeTypeOf(cg: &Cgen, e: &ExprNode, locs: &Vec<Local>): PlaceTy {
     match e.kind {
         Expr.Ident(name) => {
             if hasLocal(locs, name) {
-                return findLocal(locs, name).ty.clone()
+                return PlaceTy.Known(findLocal(locs, name).ty.clone())
             }
             if cg.globalVars.contains(name) {
-                return cg.globalVars.get(name)!
+                return PlaceTy.Known(cg.globalVars.get(name)!)
             }
-            return ""
+            // Every place is rooted in a local or a global. A bare name that is neither
+            // is not a place root at all: a function referenced as a value, or a type
+            // used as a namespace (`f64.NAN` parses as FieldAccess over Ident "f64").
+            // NotAPlace here is a classification, not a skip — the strictness that
+            // matters lives in the derived cases below, where an object IS a place and
+            // its field, element or pointee type cannot be named.
+            return PlaceTy.NotAPlace
         }
         Expr.FieldAccess(obj, field) => {
-            let ot = stripPercent(placeTypeStr(cg, *obj, locs))
-            if ot.len == 0 {
-                return ""
+            match placeTypeOf(cg, *obj, locs) {
+                PlaceTy.NotAPlace => {
+                    return PlaceTy.NotAPlace
+                }
+                PlaceTy.Unresolved(w) => {
+                    return PlaceTy.Unresolved(w)
+                }
+                PlaceTy.Known(ot0) => {
+                    let ot = stripPercent(ot0)
+                    let idx = lookupFieldIndex(cg, ot, field)
+                    if idx >= 0 {
+                        return PlaceTy.Known(lookupFieldType(cg, ot, idx))
+                    }
+                    // A miss on a type that IS a struct means a field this walk cannot
+                    // name — that is a real unknown. A miss on anything else is a builtin
+                    // accessor (`s.len`, `v.ptr`) which yields a value, not a place, so
+                    // there is no ownership decision to skip.
+                    if cg.structs.contains(ot) {
+                        return PlaceTy.Unresolved("field '" + field.clone() + "' of struct '" + ot.clone() + "'")
+                    }
+                    return PlaceTy.NotAPlace
+                }
             }
-            let idx = lookupFieldIndex(cg, ot, field)
-            if idx < 0 {
-                return ""
-            }
-            return lookupFieldType(cg, ot, idx)
         }
         Expr.IndexAccess(obj, i) => {
-            let ot = resolveTyStr(cg, placeTypeStr(cg, *obj, locs))
-            if isVecTy(ot) {
-                return unwrapVec(ot)
+            match placeTypeOf(cg, *obj, locs) {
+                PlaceTy.NotAPlace => {
+                    return PlaceTy.NotAPlace
+                }
+                PlaceTy.Unresolved(w) => {
+                    return PlaceTy.Unresolved(w)
+                }
+                PlaceTy.Known(ot0) => {
+                    let ot = resolveTyStr(cg, ot0)
+                    if isVecTy(ot) {
+                        return PlaceTy.Known(unwrapVec(ot))
+                    }
+                    if ot.len > 0 && ot[0] == 42 {
+                        return PlaceTy.Known(ot[1..ot.len].clone())
+                    }
+                    if isInlineArrTy(ot) {
+                        return PlaceTy.Known(inlineArrElem(ot))
+                    }
+                    // Indexing a string yields a byte by value, and indexing a HashMap
+                    // hands back a copy of the value. Neither is a place the caller can
+                    // own, so there is genuinely no ownership decision to make — the
+                    // honest answer is NotAPlace, not an unresolved type.
+                    if ot == "%String" || ot == "String" || ot == "string" {
+                        return PlaceTy.NotAPlace
+                    }
+                    if isHashMapTy(ot) {
+                        return PlaceTy.NotAPlace
+                    }
+                    return PlaceTy.Unresolved("element of '" + ot.clone() + "'")
+                }
             }
-            if ot.len > 0 && ot[0] == 42 {
-                return ot[1..ot.len].clone()
-            }
-            return ""
         }
         // `*box` on a Heap<T> is the pointee's place; `*p` on a raw `*T` likewise.
         // Without this the deref of an owned box read as "unknown type", which made
         // every ownership decision about it (move? drop?) fall through to "no".
         Expr.UnaryOp(op, operand) => {
             if op != "*" {
-                return ""
+                return PlaceTy.NotAPlace
             }
-            let ot = resolveTyStr(cg, placeTypeStr(cg, *operand, locs))
-            let inner = unwrapHeap(ot)
-            if inner.len > 0 {
-                return inner
+            match placeTypeOf(cg, *operand, locs) {
+                PlaceTy.NotAPlace => {
+                    return PlaceTy.NotAPlace
+                }
+                PlaceTy.Unresolved(w) => {
+                    return PlaceTy.Unresolved(w)
+                }
+                PlaceTy.Known(ot0) => {
+                    let ot = resolveTyStr(cg, ot0)
+                    let inner = unwrapHeap(ot)
+                    if inner.len > 0 {
+                        return PlaceTy.Known(inner)
+                    }
+                    if ot.len > 0 && ot[0] == 42 {
+                        return PlaceTy.Known(ot[1..ot.len].clone())
+                    }
+                    return PlaceTy.Unresolved("pointee of '" + ot.clone() + "'")
+                }
             }
-            if ot.len > 0 && ot[0] == 42 {
-                return ot[1..ot.len].clone()
-            }
-            return ""
         }
         _ => {
-            return ""
+            return PlaceTy.NotAPlace
         }
     }
 }
@@ -404,7 +501,7 @@ fn placeRootIsOwned(e: &ExprNode, cg: &Cgen, locs: &Vec<Local>): bool {
 // not be dropped again by the enclosing scope). Only whole owned places are
 // touched; a borrow's pointee belongs to someone else.
 pub fn markReceiverMoved(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>) {
-    let tyStr = placeTypeStr(cg, e, locs)
+    let tyStr = placeTypeStrOrAbort(cg, e, locs, "marking a receiver moved")
     if tyStr.len == 0 {
         return
     }
@@ -457,7 +554,7 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &ExprNode, hintTy: string, locs: &Vec<Local
         // gives two owners of one buffer and whichever drops first empties the other.
         // Mirrors the oracle's indexAccessClones.
         Expr.IndexAccess(obj, idx) => {
-            let elemTy = placeTypeStr(cg, e, locs)
+            let elemTy = placeTypeStrOrAbort(cg, e, locs, "passing an owned argument")
             if elemTy.len > 0 && cgNeedsDrop(cg, elemTy) {
                 let lv = genLvalue(cg, e, locs, sigs)
                 let ll = llType(resolveTyStr(cg, lv.ty))
@@ -477,7 +574,7 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &ExprNode, hintTy: string, locs: &Vec<Local
         // Heap<Tree> payload): zero it so the box's own drop frees the box without
         // recursing into a subtree the callee already took and dropped.
         Expr.UnaryOp(op, operand) => {
-            let tyStr = placeTypeStr(cg, e, locs)
+            let tyStr = placeTypeStrOrAbort(cg, e, locs, "passing an owned argument")
             if op == "*" && tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
                 if placeRootIsOwned(e, cg, locs) {
                     let lv = genLvalue(cg, e, locs, sigs)
@@ -509,7 +606,7 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &ExprNode, hintTy: string, locs: &Vec<Local
     }
     match e.kind {
         Expr.FieldAccess(obj, field) => {
-            let tyStr = placeTypeStr(cg, e, locs)
+            let tyStr = placeTypeStrOrAbort(cg, e, locs, "passing an owned argument")
             if tyStr.len > 0 && cgNeedsDrop(cg, tyStr) {
                 if placeRootIsOwned(e, cg, locs) {
                     let lv = genLvalue(cg, e, locs, sigs)
@@ -544,7 +641,7 @@ pub fn genOwnedArg(cg: &mut Cgen, e: &ExprNode, hintTy: string, locs: &Vec<Local
         Expr.Ident(name) => {
             let isLocal = hasLocal(locs, name)
             if (isLocal && !findLocal(locs, name).isRef) || (!isLocal && cg.globalVars.contains(name)) {
-                let tyStr = placeTypeStr(cg, e, locs)
+                let tyStr = placeTypeStrOrAbort(cg, e, locs, "passing an owned argument")
                 // A fixed-size Copy array (`[T;N]`) lowers onto the SAME %Vec runtime
                 // shape as a real growable Vec — nothing in the `ty` string tells them
                 // apart, only the Local's isArr bit does (see its doc comment). Passing
@@ -3326,7 +3423,7 @@ pub fn genAsCast(cg: &mut Cgen, inner: &ExprNode, targetTy: &string, locs: &Vec<
         // mislabeled that aggregate `ptr` without converting it: `tcgetattr(0,
         // state.saved as *u8)` passed a `[80 x i8]`-typed temporary where the extern
         // declared `ptr`, and clang rejected the mismatched define.
-        if isInlineArrTy(placeTypeStr(cg, inner, locs)) {
+        if isInlineArrTy(placeTypeStrOrAbort(cg, inner, locs, "a cast through an inline array")) {
             let addr = genLvalue(cg, inner, locs, sigs)
             return Val {
                 v: addr.v, ty: targetTy.clone()
@@ -6538,7 +6635,7 @@ pub fn genIndex(cg: &mut Cgen, obj: &ExprNode, idx: &ExprNode, locs: &Vec<Local>
     // Inline struct-field array (see isInlineArrTy): there is no %Vec header to
     // pull a data ptr out of by value, so index the field's ADDRESS directly
     // via genLvalue + GEP[0, i] instead of the by-value genExpr path below.
-    let objPlaceTy = placeTypeStr(cg, obj, locs)
+    let objPlaceTy = placeTypeStrOrAbort(cg, obj, locs, "indexing a place")
     if isInlineArrTy(objPlaceTy) {
         let addr = genLvalue(cg, obj, locs, sigs)
         let elemTy = inlineArrElem(addr.ty)
@@ -8285,7 +8382,7 @@ pub fn genCall(cg: &mut Cgen, name: &string, args: &Vec<Heap<ExprNode>>, typeArg
                 )
                 argPointees.push(lv.ty.clone())
             }
-        } else if cg.externFns.contains(name) && hint.len > 0 && hint[0] == 42 && isInlineArrTy(placeTypeStr(cg, *args[i], locs)) {
+        } else if cg.externFns.contains(name) && hint.len > 0 && hint[0] == 42 && isInlineArrTy(placeTypeStrOrAbort(cg, *args[i], locs, "an extern inline-array argument")) {
             // A struct-field array passed to a raw-pointer extern param decays to
             // its data address (C's `T arr[N]` → `T*` argument rule) — e.g. regcomp's
             // `_preg: *u8` out-param. Must be the field's REAL address (genLvalue),
@@ -8714,7 +8811,7 @@ pub fn genLvalueWithHint(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &
             // `a[i]` as an lvalue — needed for `a[i].field = x` and `&a[i]`.
             // Inline struct-field array: index the field's address directly
             // (mirrors genIndex above — no %Vec header to extract a data ptr from).
-            let objPlaceTy = placeTypeStr(cg, *obj, locs)
+            let objPlaceTy = placeTypeStrOrAbort(cg, *obj, locs, "an lvalue with a type hint")
             if isInlineArrTy(objPlaceTy) {
                 let addr = genLvalue(cg, *obj, locs, sigs)
                 let elemTy = inlineArrElem(addr.ty)

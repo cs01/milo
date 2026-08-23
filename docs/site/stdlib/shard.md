@@ -31,8 +31,9 @@ fn double(w: Shard<f64>): Shard<f64> {
 }
 
 pub fn main(): i32 {
-    var data: Vec<f64> = Vec.withCapacity(16)
-    for i in 0..16 {
+    let n = 16
+    var data: Vec<f64> = Vec.withCapacity(n)
+    for i in 0..n {
         data.push(1.0)
     }
 

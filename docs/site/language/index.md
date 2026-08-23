@@ -335,7 +335,9 @@ fn main(): i32 {
     let doubled = v.map((n: &i32) => n * 2)
     let evens = v.filter((n: &i32) => n % 2 == 0)
 
-    print(doubled.join(", "))   // 20, 40, 60
+    for d in doubled {
+        print(d)                // 20, 40, 60
+    }
 
     for item in v {
         print(item)
@@ -381,6 +383,17 @@ enum Tree {
 // runtime polymorphism — different concrete types behind one interface
 interface Shape {
     fn area(self: &Self): f64
+}
+
+struct Circle { radius: f64 }
+struct Square { side: f64 }
+
+impl Circle {
+    fn area(self: &Self): f64 { return 3.14159 * self.radius * self.radius }
+}
+
+impl Square {
+    fn area(self: &Self): f64 { return self.side * self.side }
 }
 
 fn main(): i32 {
@@ -436,7 +449,9 @@ fn makeAdder(n: i32): (i32) => i32 {
 fn main(): i32 {
     let nums: Vec<i32> = [1, 2, 3, 4, 5]
     let squared = nums.map((n: &i32) => n * n)
-    print(squared.join(", "))     // 1, 4, 9, 16, 25
+    for sq in squared {
+        print(sq)                 // 1, 4, 9, 16, 25
+    }
 
     let add10 = makeAdder(10)     // returns a closure with 10 baked in
     print(add10(5))               // 15
@@ -511,6 +526,10 @@ A `Promise` runs a function in the background and hands you the result later. `P
 ```milo
 from "std/runtime" import { Promise }
 
+fn expensiveComputation(): i64 {
+    return 42
+}
+
 fn main(): i32 {
     let p = Promise((): i64 => { return expensiveComputation() })
     let result = p.await()!
@@ -531,14 +550,15 @@ from "std/sync" import { Channel }
 
 fn main(): i32 {
     var ch = Channel<i64>.new(8)!   // holds up to 8 pending values
+    var tx = ch.clone()             // the producer needs its own owner
 
     // The producer runs on its own thread so it keeps sending
     // while `main` receives.
     let producer = Promise<i64>.blocking(move (): i64 => {
         for i in 1..6 {
-            ch.send(i as i64)!
+            tx.send(i as i64)!
         }
-        ch.close()   // "no more values coming"
+        tx.close()   // "no more values coming"
         return 0
     })
 
@@ -546,7 +566,6 @@ fn main(): i32 {
         print($"received: {val}")
     }
     producer.await()!
-    ch.destroy()
     return 0
 }
 ```
@@ -561,7 +580,8 @@ This example uses `Promise.blocking` for the producer, which runs it on a real s
 
 Every import is explicit — you list exactly which symbols you're using. No wildcard imports, no ambiguity about where something comes from. This keeps code readable and makes it easy for both people and tools to understand dependencies at a glance.
 
-```milo
+```milo skip
+// `lib/utils` is a module in the reader's own project — this shows the import FORM.
 from "std/http" import { Context, Response, Router, serveRouter }
 from "std/json" import { jsonParse }
 from "lib/utils" import { validate }
@@ -573,7 +593,7 @@ Milo has a built-in package manager for installing and managing third-party depe
 
 ## Contracts and Safety Profiles
 
-Functions can declare preconditions and postconditions that the compiler type-checks. Loop invariants document what stays true across iterations. These are compile-time only — zero runtime cost.
+Functions can declare preconditions and postconditions that the compiler type-checks. Loop invariants document what stays true across iterations. `milo prove` discharges them statically. They are also asserted at runtime in `--debug` builds, and `--contract-checks` keeps them at any optimisation level — a release build that keeps its `requires` checks is a normal thing to want.
 
 ```milo
 fn clamp(value: i64, lo: i64, hi: i64): i64

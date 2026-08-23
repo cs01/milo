@@ -80,7 +80,9 @@ Web servers are where that pays off most, since the alternative is shipping a st
 directory next to the binary and keeping the two in sync. A handler returns the asset
 directly:
 
-```milo
+```milo skip
+// Handler shapes from std/http; `index.html` and `public/style.css` are the reader's
+// own asset files, so this fence illustrates rather than compiles.
 pub fn homeHandler(ctx: &mut Context): Response {
     return ctx.html(@embedFile("index.html"))
 }
@@ -161,8 +163,9 @@ is `internal` by default, so dead-code elimination is free to drop it.
 `build-lib` shows the difference, since its header declares exactly the functions that
 kept external linkage:
 
-```milo
-// mathlib.milo — the file passed to build-lib
+```milo skip
+// mathlib.milo — the file passed to build-lib. `./helpers` is the reader's own file,
+// so this fence is illustrative rather than compiled.
 from "./helpers" import { miloAdd }
 
 pub fn miloGreet(): void { print("hello from milo") }

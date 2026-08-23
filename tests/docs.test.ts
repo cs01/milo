@@ -29,19 +29,8 @@ import { readdirSync } from "fs";
 // snippets with elided `...` bodies, undeclared variables, and APIs the page describes
 // but the stdlib does not have.
 const SNIPPETS_NOT_YET_CHECKED = new Set([
-  "docs/site/ai-coding.md",
-  "docs/site/demos.md",
-  "docs/site/index.md",
-  "docs/site/language/annotations.md",
-  "docs/site/language/collections.md",
-  "docs/site/language/concurrency.md",
   "docs/site/language/ffi.md",
-  "docs/site/language/index.md",
-  "docs/site/language/modules.md",
   "docs/site/language/ownership.md",
-  "docs/site/language/safety.md",
-  "docs/site/language/strings.md",
-  "docs/site/language/traits.md",
   "docs/site/language/variables.md",
   "docs/site/language/warnings-and-errors.md",
   "docs/site/packages.md",
@@ -75,7 +64,6 @@ const SNIPPETS_NOT_YET_CHECKED = new Set([
   "docs/site/stdlib/timer.md",
   "docs/site/stdlib/totp.md",
   "docs/site/stdlib/url.md",
-  "docs/site/stdlib/zip.md",
 ]);
 
 const siteDocs: string[] = [];

@@ -4,7 +4,9 @@
 
 All imports must name exactly which symbols they use:
 
-```milo
+```milo skip
+// `lib/math` is a module in the reader's own project, so this fence illustrates the
+// import FORM rather than compiling against a real path.
 from "std/http" import { Context, Response, Router, serveRouter }
 from "std/json" import { jsonParse, Json }
 from "lib/math" import { add, multiply }
@@ -15,7 +17,7 @@ No wildcard imports, no bare `import "path"`. The LSP autocompletes both module 
 ## Standard library
 
 ```milo
-from "std/io" import { readFile, writeFile }
+from "std/fs" import { readFile, writeFile }
 from "std/fs" import { readDir, fileInfo }
 from "std/fetch" import { fetch }
 from "std/argparse" import { ArgParser }

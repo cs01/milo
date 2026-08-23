@@ -30,7 +30,7 @@ s.trim()                         // removes leading/trailing whitespace
 
 s.split(", ")                    // Vec<string>: ["Hello", "World!"]
 s.replace("World", "Milo")      // "Hello, Milo!"
-s.indexOf("World")             // i64: 7, or -1 if not found
+s.indexOf("World")             // Option<i64>: Some(7), or None if not found
 s.repeat(3)                      // "Hello, World!Hello, World!Hello, World!"
 ```
 
@@ -51,7 +51,7 @@ reallocates and recopies the whole accumulator on every concat.
 
 A string is a UTF-8 byte buffer, and iterating one directly yields **bytes**:
 
-```milo
+```milo skip
 for b in s {              // b: u8
     if b == 44 { ... }    // scanning for ',' — no decoding needed
 }
@@ -83,6 +83,7 @@ width:
 ```milo
 from "std/unicode" import { decodeCodepoint }
 
+let s = "héllo"
 let c = decodeCodepoint(s, 0)
 print($"{c.value} occupies {c.size} bytes")
 ```
@@ -100,6 +101,7 @@ let t = pi.toString()         // "3.14"
 ## String comparison
 
 ```milo
+let greeting = "hello"
 if greeting == "hello" {
     print("match!")
 }

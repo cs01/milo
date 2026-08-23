@@ -227,9 +227,10 @@ fn main(): i32 {
     for i in 0..8 {
         wg.add(1)
         let n = i
+        let w = wg.clone()       // each task needs its own owner
         Task.spawn(move (): void => {
             print(n.toString())
-            wg.done()
+            w.done()
         })
     }
     wg.wait()          // returns once all 8 have called done()
@@ -356,11 +357,12 @@ from "std/sync" import { Channel }
 
 fn main(): i32 {
     var ch = Channel<i64>.new(8)!
+    var tx = ch.clone()          // the producer needs its own owner
 
     let producer = Promise<i64>.blocking(move (): i64 => {
-        ch.send(10)!
-        ch.send(20)!
-        ch.close()
+        tx.send(10)!
+        tx.send(20)!
+        tx.close()
         return 0
     })
 
@@ -480,6 +482,10 @@ variable. Re-entering `run` from inside its own initializer aborts rather than h
 in dependency order, before `main`:
 
 ```milo
+fn buildTable(): Vec<i64> {
+    return [1, 2, 3]
+}
+
 var gTable: Vec<i64> = buildTable()   // eager, runs before main
 ```
 
@@ -490,6 +496,10 @@ guard function, because a getter cannot hand back a `&T` — references are seco
 ```milo
 from "std/sync" import { Once }
 
+fn buildTable(): Vec<i64> {
+    return [1, 2, 3]
+}
+
 var gTable: Vec<i64> = []
 var gTableOnce: Once = Once.new()
 
@@ -497,6 +507,12 @@ pub fn ensureTable(): void {
     gTableOnce.run((): void => {
         gTable = buildTable()
     })
+}
+
+fn main(): i32 {
+    ensureTable()
+    print(gTable.len)
+    return 0
 }
 ```
 

@@ -132,7 +132,7 @@ Clone the repo and run or build any of the `examples/` programs with the `./milo
 The emulators and milojs live in their own repos; clone them next to an installed `milo` and run them the same way:
 
 ```bash
-git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom>
+git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom>
 git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo app.js
 ```
 
@@ -140,7 +140,7 @@ git clone https://github.com/milo-language/milojs && milo run milojs/milojs.milo
 
 ```milo
 from "std/argparse" import { ArgParser }
-from "std/io" import { readFile }
+from "std/fs" import { readFile }
 
 fn main(): i32 {
     var parser = ArgParser.new("grep", "search for a string pattern in files")

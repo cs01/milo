@@ -40,7 +40,18 @@ With the contract in place, there are three ways it gets enforced.
 
 If the compiler can determine the value, it will enforce it. Here we pass -1 directly.
 
-```milo
+```milo error
+pub fn sqrt(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var r: i64 = 0
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    return r
+}
+
 pub fn main(): i32 {
     print(sqrt(-1))
     return 0
@@ -62,10 +73,21 @@ error: requires clause 'n >= 0' violated
 Let's say the value passed to `sqrt` is no longer a constant, but a number drawn at runtime. There is nothing left for the compiler to fold:
 
 ```milo
-from "std/random" import { randRange }
+from "std/random" import { Random }
+
+pub fn sqrt(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var r: i64 = 0
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    return r
+}
 
 pub fn main(): i32 {
-    let reading: i64 = randRange(-100, 100)
+    let reading: i64 = Random.range(-100, 100)
     print(sqrt(reading))
     return 0
 }
@@ -98,6 +120,17 @@ Whoops, the sqrt returned 0 and continued on. Nothing asserted or aborted. If yo
 Neither of the two cases above covers what you actually worry about: a value that only goes negative on some input you never thought to test. That is what the prover is for. Let's say a `scale` function forwards its argument straight through without checking it:
 
 ```milo
+pub fn sqrt(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var r: i64 = 0
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    return r
+}
+
 pub fn scale(raw: i64): i64 {
     return sqrt(raw)
 }
@@ -106,19 +139,32 @@ pub fn scale(raw: i64): i64 {
 ```
 $ milo prove sqrt.milo
 verification: 2 conditions
-  proven: 1  failed: 1  unknown: 0  errors: 0
+  proven: 0  failed: 1  unknown: 1  errors: 0
 
-  ✓ [postcondition] sqrt: proven
-  ✗ [precondition] scale: failed — counterexample: raw = -1
+  ? [postcondition] sqrt: unknown — outside linear fragment (std/smt)
+  ✗ [precondition] scale: failed — counterexample: raw = -1, sqrt__ret0 = -1
 $ echo $?
 1
 ```
 
-Nothing was run and no input was supplied — the solver derived `raw = -1` by itself. And notice what it proved along the way: `ensures result >= 0` holds for *every* `n`, which no amount of testing can establish.
+Nothing was run and no input was supplied — the solver derived `raw = -1` by itself.
+
+Notice the other line too. The postcondition came back **unknown**, not proven: `(r + 1) * (r + 1)` is nonlinear, and the built-in `std/smt` solver handles linear arithmetic only. That is the prover being honest rather than useful — an unproven obligation is never reported as proven. `--solver=z3` swaps in Z3 for the nonlinear case.
 
 **Now that we have the violation of the contract, we can modify the code to satisfy it, then run the prover again.**
 
 ```milo
+pub fn sqrt(n: i64): i64
+requires n >= 0
+ensures result >= 0
+{
+    var r: i64 = 0
+    while (r + 1) * (r + 1) <= n {
+        r = r + 1
+    }
+    return r
+}
+
 pub fn scale(raw: i64): i64 {
     if raw < 0 {
         return 0
@@ -130,15 +176,19 @@ pub fn scale(raw: i64): i64 {
 ```
 $ milo prove sqrt.milo
 verification: 2 conditions
-  proven: 2  failed: 0  unknown: 0  errors: 0
+  proven: 1  failed: 0  unknown: 1  errors: 0
 
-  ✓ [postcondition] sqrt: proven
-  ✓ [precondition] scale: proven
+  ? [postcondition] sqrt: unknown — outside linear fragment (std/smt)
+  ✓ [precondition] scale: proven — conditional: assumes sqrt, whose own postcondition is not established
+
+  1 of 1 proofs are conditional on something this run did not establish.
 $ echo $?
 0
 ```
 
-The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined result on a path you wrote — so there is nothing left to abort on, and no runtime assert is doing the work. `proven` means every input is handled in ordinary code; a runtime assert only backstops what you haven't established. Anything still `unknown` is yours to catch, and `milo prove` exits non-zero on a failure, so CI enforces the difference.
+The negative never reaches `sqrt` now — `raw < 0` returns `0`, a defined result on a path you wrote — so there is nothing left to abort on, and no runtime assert is doing the work.
+
+The precondition is discharged, and the prover still will not let that stand unqualified: the proof *assumes* `sqrt` meets its own postcondition, which this run did not establish, so it says so and counts it. `proven` means every input is handled in ordinary code; a runtime assert only backstops what you haven't established. Anything still `unknown` is yours to catch, and `milo prove` exits non-zero on a failure, so CI enforces the difference.
 
 ### Loop invariants
 
@@ -225,6 +275,12 @@ invariant prg.len >= 16384
 Now this is provable, with nothing in it bounding `prg.len`:
 
 ```milo
+struct Rom {
+    prg: Vec<u8>,
+    mapper: i64,
+}
+invariant prg.len >= 16384
+
 fn readAt(r: &Rom, i: i64): i64
 requires i >= 0
 requires i < r.prg.len
@@ -239,7 +295,9 @@ fn readLow(r: &Rom): i64 {
 
 An invariant that was only ever *assumed* would be a hole with a keyword in front of it, so it is also **owed** — at every struct literal, and in every function that takes the type by `&mut`:
 
-```milo
+```milo skip
+// Illustrative: `zeros(n)` stands in for whatever builds the bank. The second line is
+// meant to FAIL the prover, so this fence is not compiled.
 fn makeRom(): Rom { return Rom { prg: zeros(16384), mapper: 0 } }   // ✓ proven
 fn makeBad(): Rom { return Rom { prg: zeros(16), mapper: 0 } }      // ✗ failed
 ```

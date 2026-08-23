@@ -94,7 +94,6 @@ fn sum(t: Tree): i32 {
             return sum(*left) + sum(*right)
         }
     }
-    return 0
 }
 
 let tree = Tree.Node(
@@ -146,6 +145,20 @@ print(*h)          // 42
 Methods are called directly — no `*` needed:
 
 ```milo
+interface Shape {
+    fn area(self: &Self): f64
+}
+
+struct Circle {
+    radius: f64,
+}
+
+impl Circle {
+    fn area(self: &Self): f64 {
+        return 3.14159 * self.radius * self.radius
+    }
+}
+
 let s: Heap<Shape> = Heap(Circle { radius: 3.0 })
 print(s.area())    // auto-derefs through Heap, then dispatches via itable
 ```

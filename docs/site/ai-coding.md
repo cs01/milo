@@ -53,7 +53,9 @@ Aliasing is only half of it. A signature says what a function may mutate; it doe
 not say whether the function printed, read a file, opened a socket, or touched
 module state. `@pure` closes that for the functions that opt in:
 
-```milo
+```milo error
+from "std/math" import { Math }
+
 @pure
 fn hypot(a: f64, b: f64): f64 {
     return Math.sqrt(a * a + b * b)     // the whole Math namespace is @pure
@@ -100,7 +102,7 @@ C++ lets wrong code compile. LLMs generate plausible C++ that works in testing a
 1. **Implicit conversions** — `char`/`int` blurring, `bool` arithmetic, unsigned wraparound in comparisons. Milo has zero implicit coercions; all are compile errors.
 2. **Use-after-move** — moved-from C++ objects are "valid but unspecified"; LLMs don't track invalidation. Milo: compile error.
 3. **Dangling references** — the most common C++ CVE pattern; LLMs routinely return refs to locals. Milo: impossible by construction.
-4. **Null deref** — LLMs forget null checks; C++ can't enforce them. Milo: `Option<T>` with exhaustive match (or explicit `w!`).
+4. **Null deref** — LLMs forget null checks; C++ can't enforce them. Milo: `Option<T>` with exhaustive match (or explicit `!`).
 5. **Data races** — LLMs share mutable state across threads freely. Milo rejects non-Send captures at compile time.
 6. **Integer overflow** — signed overflow is UB; compilers delete "impossible" checks. Milo: compile-time checks for constants, runtime traps in every build mode (release included), explicit `wrappingAdd`/`saturatingAdd`.
 
@@ -113,7 +115,7 @@ auto v2 = std::move(v);
 v.push_back(4);          // "valid but unspecified" — may silently corrupt
 ```
 
-```milo
+```milo error
 // Milo — compile error
 var v = Vec.new()
 let v2 = v               // v moved to v2
@@ -128,7 +130,7 @@ std::string_view getName() {
 }
 ```
 
-```milo
+```milo error
 // Milo — impossible by construction
 fn getName(): &string {  // ERROR: cannot return a reference
     let s = "hello"
@@ -144,6 +146,9 @@ std::thread t2([&]{ counter++; });
 ```
 
 ```milo
+from "std/runtime" import { Promise }
+from "std/sync" import { AtomicI64 }
+
 // Milo — a plain captured var is a copy; a raw pointer to it isn't Send, so
 // there's no way to share unsynchronized mutable state across a blocking worker.
 // correct version — share via an atomic:

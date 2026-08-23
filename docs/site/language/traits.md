@@ -49,7 +49,7 @@ fn printIfEqual<T: Eq>(a: &T, b: &T) {
 
 Multiple bounds:
 
-```milo
+```milo skip
 fn process<T: Eq + Hash>(item: &T) { ... }
 ```
 
@@ -72,11 +72,31 @@ Auto-generate trait implementations:
 struct Point { x: i32, y: i32 }
 ```
 
+## Operator overloading
+
+Implementing `Add`, `Sub`, `Mul`, `Div` or `Eq` for your type makes the corresponding
+operator work on it. Dispatch is static — there is no runtime lookup.
+
+```milo
+struct Vec2 {
+    x: i32,
+    y: i32,
+}
+
+impl Add for Vec2 {
+    fn add(self: &Self, other: &Self): Self {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+
+let sum = Vec2 { x: 3, y: 4 } + Vec2 { x: 5, y: 6 }
+print(sum.x)   // 8
+```
+
 ## What's not here yet
 
 - `dyn Trait` (trait objects)
 - Associated types
-- Operator overloading
 - `where` clauses
 
 These are on the roadmap.

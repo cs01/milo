@@ -171,8 +171,7 @@ Reproduce: `sh scripts/selfhost.sh` (builds stage1 via the oracle — required; 
 - [ ] **Named enum-variant fields** — `ForEach { varName: string, … }` instead of an 8-slot positional payload. Greenlit as a language feature; hits the self-hosted compiler hardest. Parser + checker + formatter + LSP
 - [ ] **Tuple binding in for-in** — `for (i, x) in vec.enumerate()`; converts most `while i < len()` loops. match already destructures tuples
 - [ ] **Combinators on slices and arrays** — `map`/`filter`/`each`/`enumerate`/`find`/`any`/`all`/`sum` ship on `Vec` but are gated on it, so `&[T]` and `[T; N]` get none of them (`s.sum()` on a `&[i64]` param is an error). The gate is the work, not the adapter count; `fold` is the one adapter genuinely missing. `take`/`skip`/`zip` are declined — see Retired. Lazy/fusing adapters are deliberately out
-- [ ] **`Heap<Interface>`** — heterogeneous collections (`Vec<Heap<Shape>>`)
-- [ ] **Error boxing** — the `?` half of error conversion shipped; `anyhow`-style boxing wants `Heap<Interface>`
+- [ ] **Error boxing** — the `?` half of error conversion shipped; `anyhow`-style boxing builds on `Heap<Interface>`, which now works
 - [ ] **Ranged integers L3** — branch narrowing: after `if x < 50`, `x` is `(min..49)` in the then-branch
 - [ ] **Structured OS / syscall errors** — `OsError` carrying `errno` plus syscall/path context
 - [ ] **C ABI layout control** — packed structs, alignment. `extern struct`, `sizeOf`/`offsetOf` already work

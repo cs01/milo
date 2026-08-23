@@ -28,7 +28,7 @@ fn Zip.read(src: &string): Result<Vec<ZipEntry>, string>
 Reads every entry, decompressing and CRC-checking each. Returns an error on a malformed archive, an unsupported method, or a CRC mismatch.
 
 ```milo
-from "std/io" import { readFile }
+from "std/fs" import { readFile }
 
 let bytes = readFile("archive.zip")!
 for entry in Zip.read(bytes)! {

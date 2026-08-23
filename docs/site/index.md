@@ -74,7 +74,7 @@ fn clamp(x: i64, lo: i64, hi: i64): i64
 ```
 
 ```milo
-from "std/math" import { sqrt }
+from "std/math" import { Math }
 
 struct Point {
     x: f64,
@@ -83,7 +83,7 @@ struct Point {
 
 impl Point {
     fn dist(self: &Self): f64 {
-        return sqrt(self.x * self.x + self.y * self.y)
+        return Math.sqrt(self.x * self.x + self.y * self.y)
     }
 }
 
@@ -93,7 +93,7 @@ fn main() {
 }
 ```
 
-```milo
+```milo error
 fn main() {
     let name = "milo"
     let greeting = name   // `name` moves here. It is no longer yours
@@ -131,7 +131,7 @@ fn main() {
         <h3>NES Emulator</h3>
         <p>A complete Nintendo, playable right here in your browser.</p>
         <div class="tile-tags"><span>6502 core</span><span>bitwise</span><span>emit-js</span><span>SDL</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom.nes>" title="git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom.nes>">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom.nes>" title="git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom.nes>">⧉ copy run command</span>
       </a>
       <a class="tile" href="/milo/emulators/genesis/" target="_self" data-vp-ignore>
         <img class="tile-img" src="/showcase/genesis.png" alt="Sonic the Hedgehog running on the Milo Genesis emulator" loading="lazy">
@@ -139,7 +139,7 @@ fn main() {
         <h3>Genesis Emulator</h3>
         <p>A complete Sega Genesis. Sonic runs.</p>
         <div class="tile-tags"><span>68000 + Z80</span><span>DMA</span><span>emit-js</span><span>SDL</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom.md>" title="git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom.md>">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom.md>" title="git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom.md>">⧉ copy run command</span>
       </a>
       <a class="tile" href="/milo/emulators/snes/" target="_self" data-vp-ignore>
         <img class="tile-img" src="/showcase/snes.png" alt="Super Mario World running on the Milo SNES emulator" loading="lazy">
@@ -147,7 +147,7 @@ fn main() {
         <h3>SNES Emulator</h3>
         <p>A Super Nintendo. Mario World, Donkey Kong Country, Star Fox.</p>
         <div class="tile-tags"><span>Super FX GSU</span><span>bitwise</span><span>emit-js</span></div>
-        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom.sfc>" title="git clone https://github.com/milo-language/milo-emulators && emulators/arcade.sh <rom.sfc>">⧉ copy run command</span>
+        <span class="tile-copy" role="button" tabindex="0" data-cmd="git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom.sfc>" title="git clone https://github.com/milo-language/milo-emulators && milo-emulators/arcade.sh <rom.sfc>">⧉ copy run command</span>
       </a>
     </div>
   </div>
@@ -299,7 +299,7 @@ fn main() {
 ### Take Milo for a walk
 
 <div class="cta-buttons">
-  <a class="cta-primary" href="/milo/tour">Learn the basics · 11 lessons</a>
+  <a class="cta-primary" href="/milo/tour">Learn the basics · 12 lessons</a>
   <a class="cta-secondary" href="/milo/language/">Language overview</a>
   <a class="cta-secondary" href="/milo/stdlib/">Standard library</a>
   <a class="cta-secondary" href="/milo/playground">Playground</a>

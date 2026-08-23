@@ -1686,14 +1686,7 @@ fn dropDiscardedTemp(cg: &mut Cgen, n: &HExprNode, v: &Val) {
 pub fn genStmt(cg: &mut Cgen, s: &HStmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string): bool {
     match s {
         HStmt.Let(name, ty, value, mutable) => {
-            match (*value).kind {
-                HExpr.Unlowered(av) => {
-                    genLetBinding(cg, name, ty, *av, (*value).span, locs, sigs)
-                }
-                _ => {
-                    hexprAbort(*value, "'" + name.clone() + "' initializer")
-                }
-            }
+            genLetBinding(cg, name, ty, *value, (*value).span, locs, sigs)
             return false
         }
         HStmt.Assign(target, value, isInit) => {
@@ -1703,14 +1696,7 @@ pub fn genStmt(cg: &mut Cgen, s: &HStmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnS
         HStmt.Return(value, retType) => {
             match value {
                 Option.Some(hv) => {
-                    match (*hv).kind {
-                        HExpr.Unlowered(av) => {
-                            genReturnValue(cg, *av, (*hv).span, locs, sigs, retTy)
-                        }
-                        _ => {
-                            hexprAbort(*hv, "return value")
-                        }
-                    }
+                    genReturnValue(cg, *hv, (*hv).span, locs, sigs, retTy)
                 }
                 Option.None => {
                     emitScopeDrops(cg, locs, 0, "")
@@ -1808,7 +1794,13 @@ pub fn genStmt(cg: &mut Cgen, s: &HStmt, locs: &mut Vec<Local>, sigs: &Vec<CgFnS
 // Every backend fact about the binding — its type, its bound, whether it is a fixed array
 // — is read off the ONE TypeKind the checker gave it, rather than reconstructed from the
 // annotation's syntax at three separate sites.
-fn genLetBinding(cg: &mut Cgen, name: &string, ty: &TypeKind, value: &ExprNode, span: &Option<Span>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>) {
+// Takes the HIR node, not the AST underneath it. The two syntax reads below (is this a
+// bare `Vec.new()`? does this binding force a move?) still need the written form and match
+// `Unlowered` inline for it; the value itself goes through genHExpr, which dispatches.
+// Converting the seam BEFORE any kind is lowered is deliberate: while every node is still
+// Unlowered this is behaviour-identical, so the corpus proves the plumbing separately from
+// the first kind that flows through it.
+fn genLetBinding(cg: &mut Cgen, name: &string, ty: &TypeKind, value: &HExprNode, span: &Option<Span>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>) {
     // Left open only where the checker itself left it open — an un-annotated `Vec.new()`
     // whose element the first push supplies — and the push pre-scan answers that case.
     var hintTy = ""
@@ -1816,7 +1808,16 @@ fn genLetBinding(cg: &mut Cgen, name: &string, ty: &TypeKind, value: &ExprNode, 
         hintTy = tyStr(cg, ty, "'" + name.clone() + "'")
     }
     if hintTy.len == 0 {
-        hintTy = vecNewHint(cg, name, value)
+        // Reads the SYNTAX — "was this written as Vec.new()" — so it needs the AST node.
+        // A lowered node is never a bare Vec.new(): lowering that kind will carry the
+        // element type on the node and this hint disappears with it.
+        match value.kind {
+            HExpr.Unlowered(av) => {
+                hintTy = vecNewHint(cg, name, *av)
+            }
+            _ => {
+            }
+        }
     }
     // A fixed-size array and a growable Vec share one runtime shape, so this bit is what
     // tells genOwnedArg to deep-clone instead of move at a by-value site. The checker
@@ -1828,12 +1829,25 @@ fn genLetBinding(cg: &mut Cgen, name: &string, ty: &TypeKind, value: &ExprNode, 
     var v0 = Val {
         v: "0", ty: "void"
     }
-    match forceMoveIfEscaping(cg, name, value) {
-        Option.Some(forced) => {
-            v0 = genOwnedArg(cg, *forced, hintTy.clone(), locs, sigs)
+    match value.kind {
+        HExpr.Unlowered(av) => {
+            match forceMoveIfEscaping(cg, name, *av) {
+                Option.Some(forced) => {
+                    v0 = genOwnedArg(cg, *forced, hintTy.clone(), locs, sigs)
+                }
+                Option.None => {
+                    v0 = genOwnedArg(cg, *av, hintTy.clone(), locs, sigs)
+                }
+            }
         }
-        Option.None => {
-            v0 = genOwnedArg(cg, value, hintTy.clone(), locs, sigs)
+        _ => {
+            // genOwnedArg's job is the ownership decision — clone vs move, and zeroing the
+            // source place. Only kinds with no ownership to decide may take this arm, which
+            // today means the scalar literals. A kind that owns anything needs a typed
+            // genOwnedArg before it may be lowered, not this shortcut.
+            // Empty hint on purpose: a lowered node carries the type the checker gave it,
+            // so consulting a hint here would be the very re-derivation being removed.
+            v0 = genHExpr(cg, value, locs, sigs, "")
         }
     }
     let v1 = genOptionWrapIfNeeded(cg, v0, hintTy.clone())
@@ -1849,11 +1863,20 @@ fn genLetBinding(cg: &mut Cgen, name: &string, ty: &TypeKind, value: &ExprNode, 
     )
 }
 
-fn genReturnValue(cg: &mut Cgen, expr: &ExprNode, span: &Option<Span>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
+fn genReturnValue(cg: &mut Cgen, hexpr: &HExprNode, span: &Option<Span>, locs: &mut Vec<Local>, sigs: &Vec<CgFnSig>, retTy: &string) {
     // a returned local is moved out — everything else in scope drops
     var skipName = ""
-    match expr.kind {
-        Expr.Ident(n) => {
+    match hexpr.kind {
+        HExpr.Unlowered(e) => {
+            match (*e).kind {
+                Expr.Ident(n) => {
+                    skipName = n.clone()
+                }
+                _ => {
+                }
+            }
+        }
+        HExpr.Ident(n, isMove) => {
             skipName = n.clone()
         }
         _ => {
@@ -1870,12 +1893,23 @@ fn genReturnValue(cg: &mut Cgen, expr: &ExprNode, span: &Option<Span>, locs: &mu
     var v00 = Val {
         v: "0", ty: "void"
     }
-    match forcedMoveClosure(expr) {
-        Option.Some(forced) => {
-            v00 = genOwnedArg(cg, *forced, retTy.clone(), locs, sigs)
+    match hexpr.kind {
+        HExpr.Unlowered(e) => {
+            match forcedMoveClosure(*e) {
+                Option.Some(forced) => {
+                    v00 = genOwnedArg(cg, *forced, retTy.clone(), locs, sigs)
+                }
+                Option.None => {
+                    v00 = genOwnedArg(cg, *e, retTy.clone(), locs, sigs)
+                }
+            }
         }
-        Option.None => {
-            v00 = genOwnedArg(cg, expr, retTy.clone(), locs, sigs)
+        _ => {
+            // Same rule as genLetBinding: only kinds with no ownership to decide take this
+            // arm. forcedMoveClosure reads the written form, and a lowered closure literal
+            // will carry its own capture mode when that kind is migrated.
+            // Empty hint, same reason as genLetBinding: the node knows its own type.
+            v00 = genHExpr(cg, hexpr, locs, sigs, "")
         }
     }
     let v = genInterfaceCoerceIfNeeded(cg, v00, retTy)

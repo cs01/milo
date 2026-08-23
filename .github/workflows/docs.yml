@@ -52,7 +52,17 @@ jobs:
         run: cd docs/site && bun install
 
       - name: Build
-        run: cd docs/site && bun run build
+        # Shiki falls back to plain text for an unregistered fence language and the
+        # build still exits 0. That shipped 2076 unhighlighted blocks unnoticed, so
+        # the warning is the gate, not the exit code.
+        run: |
+          cd docs/site
+          bun run build 2>&1 | tee /tmp/vitepress-build.log
+          if grep -q "not loaded, falling back" /tmp/vitepress-build.log; then
+            echo "::error::a code fence language is not registered with Shiki; blocks rendered as plain text"
+            grep -o "The language '[^']*' is not loaded" /tmp/vitepress-build.log | sort -u
+            exit 1
+          fi
 
       - uses: actions/configure-pages@v5
 

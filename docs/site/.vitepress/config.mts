@@ -10,12 +10,18 @@ import { toDate } from './postdate'
 // version: it highlighted `char`, `String` and `Box` (none exist in Milo) and missed
 // `unsafe`, `from`, `trait`, `interface`, `type`, `move`, the contract keywords and the
 // `int`/`byte`/`float`/`string` type names. Read the one file the gate covers.
-const miloGrammar = JSON.parse(
-  fs.readFileSync(
-    path.resolve(__dirname, '../../../editors/vscode/syntaxes/milo.tmLanguage.json'),
-    'utf-8',
+// Shiki resolves a fence's language by the grammar's `name`, and the generated
+// grammar carries the display name 'Milo'. Every ```milo fence therefore missed and
+// fell back to plain text while the build still exited 0. Pin the id to the fence.
+const miloGrammar = {
+  ...JSON.parse(
+    fs.readFileSync(
+      path.resolve(__dirname, '../../../editors/vscode/syntaxes/milo.tmLanguage.json'),
+      'utf-8',
+    ),
   ),
-)
+  name: 'milo',
+}
 
 const SITE = 'https://milo-language.github.io/milo'
 

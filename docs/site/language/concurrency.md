@@ -418,13 +418,10 @@ gives it back. No reference crosses a thread, and nothing is copied.
 from "std/shard" import { Shard, parallelMap }
 
 fn shade(w: Shard<f64>): Shard<f64> {
-    var s = w
-    var i: i64 = 0
-    while i < s.len() {
-        s.set(i, s.get(i) * 2.0)
-        i = i + 1
+    for i in 0..w.len() {
+        w.set(i, w.get(i) * 2.0)
     }
-    return s
+    return w
 }
 ```
 

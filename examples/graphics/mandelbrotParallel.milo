@@ -67,15 +67,12 @@ fn shade(px: i64, py: i64): u32 {
 
 // Fill one window. The worker owns these pixels outright for the duration.
 fn renderWindow(w: Shard<u32>): Shard<u32> {
-    var s = w
-    let base = s.start()
-    var i: i64 = 0
-    while i < s.len() {
+    let base = w.start()
+    for i in 0..w.len() {
         let p = base + i
-        s.set(i, shade(p % width, p / width))
-        i = i + 1
+        w.set(i, shade(p % width, p / width))
     }
-    return s
+    return w
 }
 
 pub fn main(): i32 {

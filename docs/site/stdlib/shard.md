@@ -16,21 +16,16 @@ from "std/shard" import { Shard, shatter }
 from "std/shard" import { Shard, parallelMap }
 
 fn double(w: Shard<f64>): Shard<f64> {
-    var s = w
-    var i: i64 = 0
-    while i < s.len() {
-        s.set(i, s.get(i) * 2.0)
-        i = i + 1
+    for i in 0..w.len() {
+        w.set(i, w.get(i) * 2.0)
     }
-    return s
+    return w
 }
 
 pub fn main(): i32 {
     var data: Vec<f64> = Vec.withCapacity(16)
-    var i: i64 = 0
-    while i < 16 {
+    for i in 0..16 {
         data.push(1.0)
-        i = i + 1
     }
 
     let out = parallelMap(data, 4, double)!    // divide, run on 4 threads, reassemble

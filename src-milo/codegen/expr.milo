@@ -1608,6 +1608,9 @@ pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<ExprNode>>, locs: &Vec<Local>
     }
     ensureVecTy(cg)
     ensureMalloc(cg)
+    // Overwritten from the hint just below, or inferred from the first element in the
+    // loop after it. It survives only for an EMPTY literal with no hint, which is the one
+    // case with no element type to be had — see the haveTy check after the loop.
     var elemTy = "i64"
     var haveTy = false
     if isVecTy(hintTy) {
@@ -1626,6 +1629,16 @@ pub fn genArrayLit(cg: &mut Cgen, elems: &Vec<Heap<ExprNode>>, locs: &Vec<Local>
             haveTy = true
         }
         vals.push(v)
+    }
+    // An empty literal with no hint: nothing supplied an element type and there is no
+    // element to infer one from. i64 here would name the Vec `Vec<i64>` on the strength of
+    // nothing — the checker requires an annotation in that position, so reaching this
+    // means the hint was lost on the way down rather than the program being untyped.
+    if !haveTy {
+        eprint("internal error: empty array literal with no element type — no hint reached it and there is no element to infer from")
+        unsafe {
+            exit(1)
+        }
     }
     let elemLl = llType(elemTy)
     let esz = genSizeOf(cg, elemLl)
@@ -1676,6 +1689,9 @@ pub fn genArrayRepeat(cg: &mut Cgen, value: &ExprNode, count: i64, locs: &Vec<Lo
     }
     ensureVecTy(cg)
     ensureMalloc(cg)
+    // Never observed: the two branches below (hint, else the repeated value's own type)
+    // are exhaustive, and Milo requires the var be initialised. Left as i64 rather than
+    // restructured, but it is not a default anyone falls through to.
     var elemTy = "i64"
     var h = ""
     if isVecTy(hintTy) {

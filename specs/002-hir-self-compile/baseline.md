@@ -206,3 +206,34 @@ arm, and would have needed 6 seam conversions. Three pre-scans (`trailingIdentNa
 already answer correctly for a literal.
 
 Budget the remaining ~100 kinds against that, not against "two lines each".
+
+---
+
+## The flaky-pass guard earned its keep on the first try
+
+Two independent full sweeps reported `arrayOfGenericElements` as newly passing. Both were
+right, and adopting it would still have been wrong:
+
+```
+NOT ADOPTED — passed the sweep but not 3 confirmation run(s):
+  arrayOfGenericElements (failed confirmation 1/3: run-crash)
+```
+
+The fixture passes the sweep and crashes on re-run. FR-011 exists for exactly this, and
+this repo has been caught by this exact fixture before: a prior session put an aborting
+`arrayOfGenericElements` into the manifest on the strength of a single passing run.
+
+Manifest stays at **637**. The confirmation requirement is not ceremony — it is the
+difference between a ratchet that records progress and one that records noise.
+
+`--write` also prepends a stray blank line to `tests/selfhost-manifest.txt` on every run.
+Harmless (the count parser skips blanks) but it makes every `--write` show a spurious
+one-line diff. Reverted here; worth fixing in the script.
+
+### Corpus status, unchanged and honest
+
+| | |
+|---|---|
+| Manifest | 637 |
+| Fixtures | 658 |
+| Outside | 21, of which `arrayOfGenericElements` is **flaky rather than failing** — it needs a root cause, not a ratchet entry (T048) |

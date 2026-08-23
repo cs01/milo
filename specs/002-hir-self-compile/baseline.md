@@ -283,3 +283,70 @@ counter. Renaming the parameter to slip past the gate would be gaming it. The ra
 states there is no honest reason for a counter to rise mid-migration, so the conversion
 inlines the dispatch at each site instead — which is also the idiom second-class references
 force everywhere else in this codebase.
+
+---
+
+## Corrections to this document
+
+Two claims recorded earlier turned out to be wrong. Both are corrected here rather than
+edited away, because the mistakes are the useful part.
+
+### The IntLit `i64` default is the language spec, not a defect
+
+This document earlier called `if ty.len == 0 { ty = "i64" }` in `genExpr`'s `Expr.IntLit`
+arm "the clearest small example of the defect this feature exists to remove". It is the
+opposite. `docs/language-reference.md:136`:
+
+> An integer literal with **no type context** defaults to `i64` … `let a = 5  // i64 (no context)`
+
+An empty hint IS the no-type-context case, so the line implements the documented rule
+exactly. The site is now annotated in place so the mistake is not repeated.
+
+This matters beyond the one line: **an invented type and a documented default are
+identical in shape**, and only the spec distinguishes them. Every "silent default" found
+by pattern must be checked against the language reference before it is called a bug.
+
+### `genArrayRepeat`'s `elemTy = "i64"` is unreachable
+
+Counted as a hazard from a grep. Reading it shows both following branches assign `elemTy`
+unconditionally (from the hint, else from the repeated value's own type), and Milo requires
+the `var` be initialised. Nobody falls through to it. Annotated, not "fixed".
+
+## The census that beat the counters
+
+Working down the list of counter names missed a real bug. Searching for the defect's
+SHAPE — "tests for empty, then assigns a concrete type" — found it:
+
+```
+expr.milo:6350  genFieldClosureCall   retTyStr = "i64"   ← found via the hintTy counter
+stmt.milo:3042  genClosureCall        retTyStr = "i64"   ← found only by shape census
+```
+
+Twins, in different files, same consequence: a closure whose return type could not be
+recovered gets its result READ as a pointer-sized integer, so a returned String is garbage
+at every use. The counters pointed at one and never at the other.
+
+Third time this session the same lesson landed:
+
+| Occasion | What the counter said | What was true |
+|---|---|---|
+| After renaming `placeTypeStr` | 115 → 103, best result of the session | Parser stopped matching; re-derivation untouched |
+| `genArrayRepeat` | a `hintTy` hazard | unreachable initialiser |
+| `genClosureCall` | nothing at all | a real wrong-type read |
+
+The counters measure mentions. They are a fine ratchet against drift and a poor map of
+danger.
+
+## Final tally for the fail-closed pass
+
+| | |
+|---|---|
+| Real hazards closed | 7 |
+| Miscounted as hazards (unreachable or spec-mandated) | 2 |
+| Found by shape census, invisible to every counter | 1 |
+| False-abort rounds, all caught by the corpus before pushing | 5 |
+| Counter mentions across the four ratchet symbols | ~114 |
+
+Roughly one real hazard per sixteen mentions. The kind-by-kind HIR migration would have
+worked the 114 and found the 7 only incidentally, while the ratchet ticked down by ones
+and looked like progress throughout.

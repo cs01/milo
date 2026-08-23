@@ -8809,48 +8809,61 @@ pub fn genHExpr(cg: &mut Cgen, n: &HExprNode, locs: &Vec<Local>, sigs: &Vec<CgFn
     }
 }
 
+// The value an integer literal takes once its surface type is known. Split out of the
+// AST arm so the typed path can reuse it: the HIR node carries the checker's type, the
+// AST node has only a hint that may be empty. Two copies of the ptr/float/unsigned rules
+// would be two chances for them to disagree about what `let b: u8 = 200` means.
+pub fn genIntLitVal(cg: &mut Cgen, n: i64, ty: string): Val {
+
+    var ll = llType(ty)
+    // An integer literal in pointer position (`p: *u8 = 0`) is a null
+    // pointer: LLVM writes `null`, not the integer constant `0`.
+    if ll == "ptr" {
+        if n == 0 {
+            return Val {
+                v: "null", ty: "ptr"
+            }
+        }
+        let t = nextTemp(cg)
+        emit(cg, "  " + t + " = inttoptr i64 " + n.toString() + " to ptr\n")
+        return Val {
+            v: t, ty: "ptr"
+        }
+    }
+    // An int literal in float position (`x: f64 = 0`, a zeroed float field)
+    // must be a floating constant — LLVM rejects `double 0`, needs `0.0`.
+    if ll == "double" || ll == "float" {
+        return Val {
+            v: n.toString() + ".0", ty: ll
+        }
+    }
+    // Only integer hints apply to an int literal; a non-int hint (e.g. a
+    // generic type param `A` passed as a call-arg hint) must not retype it.
+    let isInt = ll.len > 0 && ll[0] == 105
+    if !isInt {
+        return Val {
+            v: n.toString(), ty: "i64"
+        }
+    }
+    // keep the SURFACE type (u8/i32/…), not the LLVM type, so unsigned-ness
+    // survives — otherwise `let b: u8 = 200; b as i32` sign-extends to -56.
+    return Val {
+        v: n.toString(), ty: ty
+    }
+}
+
 pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSig>, hintTy: string): Val {
     match e.kind {
         Expr.IntLit(n) => {
+            // No hint means no answer, and the historical answer was "i64" — a plausible
+            // default that silently retypes the literal. The typed path in genHExpr has
+            // the checker's type instead; this stays until IntLit lowering covers every
+            // position that reaches here.
             var ty = hintTy.clone()
             if ty.len == 0 {
                 ty = "i64"
             }
-            var ll = llType(ty)
-            // An integer literal in pointer position (`p: *u8 = 0`) is a null
-            // pointer: LLVM writes `null`, not the integer constant `0`.
-            if ll == "ptr" {
-                if n == 0 {
-                    return Val {
-                        v: "null", ty: "ptr"
-                    }
-                }
-                let t = nextTemp(cg)
-                emit(cg, "  " + t + " = inttoptr i64 " + n.toString() + " to ptr\n")
-                return Val {
-                    v: t, ty: "ptr"
-                }
-            }
-            // An int literal in float position (`x: f64 = 0`, a zeroed float field)
-            // must be a floating constant — LLVM rejects `double 0`, needs `0.0`.
-            if ll == "double" || ll == "float" {
-                return Val {
-                    v: n.toString() + ".0", ty: ll
-                }
-            }
-            // Only integer hints apply to an int literal; a non-int hint (e.g. a
-            // generic type param `A` passed as a call-arg hint) must not retype it.
-            let isInt = ll.len > 0 && ll[0] == 105
-            if !isInt {
-                return Val {
-                    v: n.toString(), ty: "i64"
-                }
-            }
-            // keep the SURFACE type (u8/i32/…), not the LLVM type, so unsigned-ness
-            // survives — otherwise `let b: u8 = 200; b as i32` sign-extends to -56.
-            return Val {
-                v: n.toString(), ty: ty
-            }
+            return genIntLitVal(cg, n, ty)
         }
         Expr.FloatLit(f) => {
             // Honor an f32 field/arg hint: a bare float literal defaults to double,

@@ -125,3 +125,84 @@ The defect was reverted and the binary stamp returned to `3b871732`; G2 passes c
 Each needs a fixture before it counts as migrated (T035). Everything else has coverage;
 the four kinds Phase 3 depends on are covered by 625 (`Ident`), 179 (`FieldAccess`),
 132 (`IndexAccess`) and 67 (`UnaryOp`) fixtures.
+
+---
+
+## Phase 3 discovery — the task list had the sequencing backwards
+
+Attempting the first kind end to end (`IntLit`, deliberately the simplest) surfaced a
+prerequisite neither the plan nor the task list accounted for. Recorded here because it
+changes the shape of the remaining work.
+
+### What was assumed
+
+T016–T020 assumed migrating a kind is: add a `lowerExpr` arm, add a `genHExpr` arm, run
+the gates. Research Finding 2 supported this — inline `Unlowered` seams make mixed trees
+the supported state, so kinds can migrate in any order.
+
+### What is actually true
+
+Kinds can migrate in any order **once the seams accept lowered nodes**, and today most do
+not. `genHExpr` already exists (`codegen/expr.milo:8784`) and `FieldAccess` already has a
+typed path there, so the dispatcher pattern is proven. But the seams that reach it are
+not the only ones. The statement layer calls **AST-specific functions** directly:
+
+| Seam | Calls | Takes |
+|---|---|---|
+| `genStmt` / `HStmt.Let` | `genLetBinding(…, *av, …)` | `&ExprNode` |
+| `genStmt` / `HStmt.Return` | `genReturnValue(…, *av, …)` | `&ExprNode` |
+| `genIf` | `constFoldBool(cg, *c)` | `&ExprNode` — reads syntax, not value |
+| `genAssign` | `genAssignAst(cg, *t, *v, …)` | `&ExprNode` ×2 |
+| `genProgram` ×2 | global initializers | `&ExprNode` |
+
+Each unwraps `Unlowered` to get an AST node and aborts on anything else. So lowering
+`IntLit` makes `let x = 5` abort:
+
+```
+internal error: 'hit' initializer reached the untyped backend as a lowered IntLit
+```
+
+The abort is the design working correctly — it named the kind and the position rather
+than miscompiling — but it means **a kind cannot be lowered until every seam that can
+receive it takes a `&HExprNode`**. For `IntLit` that is essentially all of them.
+
+### The corrected order
+
+Seams first, then kinds. A seam can be converted independently: change its parameter to
+`&HExprNode`, call `genHExpr` where it needs a value, and match `Unlowered` inline only
+where it genuinely needs syntax (`constFoldBool` does — it folds on the written form, not
+the evaluated one). Once a seam takes HIR, every kind flows through it for free.
+
+Kinds are cheap **after** the seams are converted, and impossible before. The task list
+reads the other way round and must be resequenced: what T016–T020 describe is the second
+half of the work, not the first.
+
+### What was kept
+
+`genIntLitVal` (`codegen/expr.milo:8816`), extracted from the `Expr.IntLit` arm of
+`genExpr`. Behaviour-neutral: the AST arm still computes its type from the hint and
+delegates. It exists because the typed path will need the same ptr/float/unsigned rules,
+and two copies of "what does `let b: u8 = 200` mean" is one copy too many.
+
+Worth noting what that arm does today, since it is the clearest small example of the
+defect this feature exists to remove:
+
+```milo
+var ty = hintTy.clone()
+if ty.len == 0 {
+    ty = "i64"
+}
+```
+
+An integer literal that no one threaded a hint down to becomes `i64`, whatever the
+checker decided. Not a crash, not a diagnostic — a plausible default.
+
+### Per-kind cost, measured
+
+`IntLit` is the simplest kind in the language: no children, no ownership, no move
+semantics. It still needed edits in 4 analysis pre-scans, 1 dispatcher arm, 1 lowering
+arm, and would have needed 6 seam conversions. Three pre-scans (`trailingIdentName`,
+`isOwnedTempNode`, `pushIfBareIdentH`) needed nothing, because their existing defaults
+already answer correctly for a literal.
+
+Budget the remaining ~100 kinds against that, not against "two lines each".

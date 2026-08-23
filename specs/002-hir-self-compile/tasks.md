@@ -69,8 +69,23 @@ Work happens in a worktree at `../milo-hir`. All paths below are relative to tha
 - [X] T014 [P] [US1] Document in `specs/002-hir-self-compile/baseline.md` that `placeTypeStr` handles only `Ident`, `FieldAccess`, `IndexAccess`, `UnaryOp`, and that its `_ => return ""` catch-all (`src-milo/codegen/expr.milo:369`) is itself a silent accept for every other place expression
 - [X] T015 [P] [US1] List the nine external consumers with their line numbers in the same file: `markReceiverMoved:407`, `genOwnedArg:460,480,512,547`, `genAsCast:3329`, `genIndex:6541`, `genCall:8288`, `genLvalueWithHint:8717` (331/342/358 are internal recursion)
 
+### Convert the seams to take HIR (DISCOVERED PREREQUISITE — see baseline.md)
+
+Kinds cannot be lowered until the seams that receive them accept `&HExprNode`. Attempting
+`IntLit` proved this: `let x = 5` aborts with *"'hit' initializer reached the untyped
+backend as a lowered IntLit"*. Seams first, then kinds — the reverse of the order below.
+
+- [ ] T016a [US1] Convert `genLetBinding` in `src-milo/codegen/stmt.milo` to take `&HExprNode`, calling `genHExpr` for the value and matching `Unlowered` inline only where it needs syntax
+- [ ] T016b [US1] Convert `genReturnValue` in `src-milo/codegen/stmt.milo` to take `&HExprNode`
+- [ ] T016c [US1] Convert `genAssignAst` in `src-milo/codegen/stmt.milo` to take `&HExprNode` for target and value
+- [ ] T016d [US1] Convert `constFoldBool`'s seam in `genIf` — it folds on the WRITTEN form, so it keeps an inline `Unlowered` match and returns "cannot fold" for a lowered node rather than aborting
+- [ ] T016e [US1] Convert the two global-initializer seams in `src-milo/codegen/emit.milo:1271,1307`
+- [ ] T016f [US1] Add `IntLit` arms to the four analysis pre-scans in `src-milo/codegen/stmt.milo` (`collectIdentsHExpr`, `collectReturnEscapedIdentsInto`, `collectVecPushHintsInto`, `collectMovedOutIdentsHExpr`); `trailingIdentName`, `isOwnedTempNode` and `pushIfBareIdentH` need no change, their defaults already answer correctly for a literal
+- [ ] T016g [US1] Lower `IntLit` in `src-milo/lower.milo` and add its `genHExpr` arm using `genIntLitVal(cg, v, tyStr(cg, hirType(n), ...))`; this is the end-to-end proof that the seams are ready
+
 ### Lower the four place kinds
 
+- [ ] T015a [US1] Add `movedExprs: HashMap<u32, bool>` to the `Checker` in `src-milo/checker/state.milo` and record into it beside `setVarMoved(ck, name, true)` at `src-milo/checker/expr.milo:156` and in `tryMoveField` — `HExpr.Ident(name, isMove)` carries this flag and `src-milo`'s checker computes it but discards it, while the oracle keeps it (`src/checker.ts:6154`) and codegen reads it for every drop decision
 - [ ] T016 [US1] Read `src/lower.ts` for the `Ident` arm, then add the `Expr.Ident` arm to `lowerExpr` in `src-milo/lower.milo`, taking the type from the `Checker` rather than re-deriving it (contract C1)
 - [ ] T017 [US1] Add the `Expr.FieldAccess` arm to `lowerExpr` in `src-milo/lower.milo` against `src/lower.ts`
 - [ ] T018 [US1] Add the `Expr.IndexAccess` arm to `lowerExpr` in `src-milo/lower.milo` against `src/lower.ts`

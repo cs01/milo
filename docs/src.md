@@ -25,6 +25,7 @@ Source → Lexer → Parser → AST → Resolver (imports) → AST (merged) → 
 | `src/abi.ts` | Native C ABI classification for passing/returning structs by value across an extern (C) boundary. |
 | `src/api-search.ts` | `milo api <query>` — signature search over the std library for humans and LLMs. |
 | `src/ast.ts` | AST node types: what the parser produces and the checker walks. |
+| `src/attributes.ts` | The attribute vocabulary, in one place. |
 | `src/builtin-members.ts` | The builtin method surface, for the receivers whose dispatch is a hand-written if-chain in checker.ts rather than a symbol table. |
 | `src/cgu.ts` | Split one emitted LLVM module into N codegen units so clang can optimize them in parallel processes. |
 | `src/checker.ts` | Type checking, move checking and scope validation over the merged AST, producing the CheckResult that lowering reads. |

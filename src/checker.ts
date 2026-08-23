@@ -1,6 +1,7 @@
 // Type checking, move checking and scope validation over the merged AST, producing
 // the CheckResult that lowering reads. Semantic errors are caught HERE, before codegen:
 // if codegen can reach an invalid state, this file missed it.
+import { attributesFor } from "./attributes";
 import type { Program, Function, Stmt, Expr, MiloType, StructDecl, Pattern, Span, TraitDecl, MatchArm, Attribute, GlobalDecl } from "./ast";
 import { simpleType, declaredType, floatNamespaceConst } from "./ast";
 import type { TypeKind } from "./types";
@@ -2236,7 +2237,7 @@ export class TypeChecker {
             }
           }
           else this.error(`'@${attr.name}' is not supported on functions — '${fn.name}'`, undefined,
-            `only '@cSig', '@externalLinkage', '@link', '@pure', '@thread' and '@wrapping' apply to a fn; it would be silently ignored otherwise`);
+            `only ${attributesFor("fn").map(a => `'@${a}'`).join(", ")} apply to a fn; it would be silently ignored otherwise`);
         }
       }
       this.checkVariadicExtern(fn);
@@ -2961,7 +2962,7 @@ export class TypeChecker {
   // in silence, so a typo (`@clayout`, `@drive(Eq)`) looked like it worked while doing
   // nothing — the same silent-failure class @cLayout exists to close. Enums parse
   // attributes but nothing consumes them, so those are rejected rather than ignored.
-  private static readonly KNOWN_ATTRS = ["derive", "cLayout", "cSig", "noCopy"];
+  private static readonly KNOWN_ATTRS = attributesFor("struct");
 
   // `@cSig("unistd.h", "long sysconf(int)")` — the C signature is checked against the real
   // header at build time. Milo's type system can't express C type identity (is `i64` a
@@ -4288,7 +4289,7 @@ export class TypeChecker {
       for (const attr of m.attributes ?? []) {
         if (attr.name !== "pure" && attr.name !== "wrapping" && attr.name !== "thread" && attr.name !== "synchronized") {
           this.error(`'@${attr.name}' is not supported on methods — '${typeName}.${m.name}'`, m.span ?? impl.span,
-            `only '@pure', '@wrapping', '@thread', and '@synchronized' apply to a method`);
+            `only ${attributesFor("method").map(a => `'@${a}'`).join(", ")} apply to a method`);
         } else if (attr.args.length > 0) {
           this.error(`'@${attr.name}' takes no arguments`, m.span ?? impl.span,
             `write '@${attr.name}' on the line above 'fn ${m.name}'`);

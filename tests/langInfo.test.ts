@@ -16,6 +16,7 @@ import { KEYWORD_DOCS } from "../src/keyword-docs";
 import { PRIMITIVE_TYPE_NAMES } from "../src/types";
 import { BUILTIN_MEMBERS } from "../src/builtin-members";
 import { WARNINGS, WARNING_NAMES, OFF_BY_DEFAULT } from "../src/warnings";
+import { ATTRIBUTES, ATTRIBUTE_NAMES } from "../src/attributes";
 
 const ROOT = join(import.meta.dir, "..");
 const CHECKER = readFileSync(join(ROOT, "src", "checker.ts"), "utf-8");
@@ -79,5 +80,41 @@ test("every keyword carries hover documentation", () => {
     expect(doc.startsWith("```milo\n")).toBe(true);
     expect(doc.length).toBeGreaterThan(80);
     expect(langInfo().keywordDocs[kw]).toBe(doc);
+  }
+});
+
+
+// The attribute vocabulary is a PUBLIC surface: an editor, linter or agent outside this
+// repo learns it from `milo lang --json` and cannot import TypeScript from the compiler.
+// It went missing once already -- `@thread` and `@synchronized` shipped as safety-critical
+// annotations that no tool could discover and that the language's own author did not know
+// existed -- so these hold the JSON to the checker rather than to a hand-kept list.
+test("every attribute is reported by lang --json", () => {
+  const info = langInfo() as unknown as { attributes: { name: string }[] };
+  expect(info.attributes.map(a => a.name).sort()).toEqual([...ATTRIBUTE_NAMES].sort());
+});
+
+test("every attribute names at least one target and carries a doc", () => {
+  for (const a of ATTRIBUTES) {
+    expect(a.targets.length).toBeGreaterThan(0);
+    expect(a.doc.length).toBeGreaterThan(20);
+  }
+});
+
+// Both per-target lists the checker used to carry lived inside error-message strings and
+// had drifted from each other. Derived, or the drift comes back.
+test("the checker derives its attribute lists from the vocabulary", () => {
+  const src = readFileSync(join(import.meta.dir, "..", "src", "checker.ts"), "utf-8");
+  expect(src).toContain('attributesFor("struct")');
+  expect(src).toContain('attributesFor("fn")');
+  expect(src).toContain('attributesFor("method")');
+});
+
+// A safety-critical attribute nobody can find is the failure this file exists to prevent.
+test("the annotations the checker enforces are documented for humans too", () => {
+  const ref = readFileSync(join(import.meta.dir, "..", "docs", "language-reference.md"), "utf-8");
+  for (const name of ATTRIBUTE_NAMES) {
+    expect({ attribute: name, documented: ref.includes(`@${name}`) })
+      .toEqual({ attribute: name, documented: true });
   }
 });

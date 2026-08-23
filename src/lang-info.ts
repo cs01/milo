@@ -15,6 +15,7 @@ import { KEYWORD_DOCS } from "./keyword-docs";
 import { PRIMITIVE_TYPE_NAMES } from "./types";
 import { BUILTIN_MEMBERS } from "./builtin-members";
 import { WARNINGS } from "./warnings";
+import { ATTRIBUTES } from "./attributes";
 import { writeStdout } from "./stdout";
 
 export const LANG_JSON_SCHEMA = 1;
@@ -53,6 +54,15 @@ export function langInfo() {
     symbols,
     builtinMembers,
     warnings: WARNINGS.map(w => ({ name: w.name, offByDefault: !!w.offByDefault })),
+    // The attribute vocabulary. Absent until 2026-08-22, which is how `@thread` and
+    // `@synchronized` — both safety-critical — shipped invisible to every tool outside
+    // this repo, and to the language's own author.
+    attributes: ATTRIBUTES.map(a => ({
+      name: a.name,
+      targets: a.targets,
+      takesArgs: !!a.takesArgs,
+      doc: a.doc,
+    })),
   };
 }
 

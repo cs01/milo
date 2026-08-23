@@ -581,6 +581,37 @@ is then marked conditional.
 
 Use `milo prove file.milo` to discharge contracts against the built-in `std/smt` prover (`--solver=z3` for theories it doesn't model, `--emit-smt` to print the raw SMT-LIB2 conditions instead of solving them). Contracts are not emitted at `-O1`+; `--debug` and `--contract-checks` turn them into runtime asserts. Use `milo safety file.milo --safety=do178c-a` to check against domain-specific safety profiles (DO-178C, ISO 26262, NASA, IEC 61508, IEC 62304).
 
+### Thread boundaries — `@thread` and `@synchronized`
+
+A data race can only enter a program somewhere, and `@thread` marks that somewhere: a
+function that hands a closure to a **real OS thread**. Two functions in `std` carry it,
+`spawnOsThreadDetached` and `Promise.blocking`. The checker reads the annotation rather
+than keeping its own list of entry points, and holds any closure crossing one to `Send`,
+rejecting unsynchronized mutable globals reached from its body.
+
+Written `@thread` on the line above the function, as `std/runtime` does for
+`spawnOsThreadDetached` and `Promise.blocking`.
+
+That indirection is not decoration. The checker used to hardcode the boundary list, the
+list drifted, and a spawn that had never been given an arm shipped a pointer into a dead
+frame to another thread. Declaring the boundary beside the function that *is* the
+boundary is what stops the two going out of step.
+
+`@synchronized` is its counterpart, and marks a method whose closure argument is a
+**critical section** — the primitive itself supplies the mutual exclusion and the
+happens-before edge, so a global written inside is not racing:
+
+`std/sync` writes it on `Once.run`, the one method in the standard library that
+qualifies.
+
+Without it, the canonical one-shot initializer reports as the very race it prevents.
+The scan stops at the boundary instead of modelling the primitive, so a new
+synchronization type only has to declare itself rather than teach the checker how it
+works.
+
+Both are enforced annotations, not documentation: `milo lang --json` reports the whole
+attribute vocabulary, so an editor or linter outside this repo can discover them.
+
 ### Purity — `@pure`
 
 A signature already tells you what a function may *mutate*: only what it was passed,

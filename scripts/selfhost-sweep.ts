@@ -20,7 +20,7 @@ import { requireFreshSelfhost } from "./selfhost-stamp";
 
 const MILO_ROOT = join(import.meta.dir, "..");
 const MILO_SELF = join(MILO_ROOT, ".selfhost", "milo-self.bin");
-const FIXTURES_DIR = join(MILO_ROOT, "tests", "fixtures");
+export const FIXTURES_DIR = join(MILO_ROOT, "tests", "fixtures");
 const MANIFEST = join(MILO_ROOT, "tests", "selfhost-manifest.txt");
 // How many extra times a newly-passing fixture must pass before the manifest claims it.
 const CONFIRM_RUNS = 3;
@@ -82,7 +82,7 @@ function describeDiff(expected: string[], actual: string[]): string {
   return "identical — reported as a mismatch, which means this comparison is wrong";
 }
 
-async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
+export async function sweepOne(name: string, tmpDir: string): Promise<Outcome> {
   const src = join(FIXTURES_DIR, `${name}.milo`);
   const outBin = join(tmpDir, name);
   const source = readFileSync(src, "utf-8");
@@ -262,4 +262,8 @@ async function main() {
   }
 }
 
-main();
+// Guarded so this module can be imported for sweepOne without launching the whole
+// sweep. scripts/hir-cover.ts reuses the runner rather than reimplementing it: a second
+// copy of "build a fixture with milo-self and diff its output" is the copy that drifts
+// and then disagrees with the ratchet about what passing means.
+if (import.meta.main) main();

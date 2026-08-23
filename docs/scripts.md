@@ -68,6 +68,7 @@ To change an entry, change that line — this table is a projection of it.
 | `scripts/gen-tmlanguage.ts` | Regenerates editors/vscode/syntaxes/milo.tmLanguage.json from the compiler's own keyword and primitive-type lists. |
 | `scripts/gen-vscode-icon.ts` | Renders the mascot to editors/vscode/icon.png. |
 | `scripts/guard.ts` | Guarded child execution: hard memory + wall-clock + CPU caps for every process the test harnesses spawn. |
+| `scripts/hir-cover.ts` | Which fixtures exercise which HIR expression kinds? |
 | `scripts/hir-ratchet.ts` | How much of src-milo's backend still re-derives what the frontend already knew? |
 | `scripts/ir-diff.ts` | Byte-exact IR differential: emit LLVM IR for every fixture with BOTH compilers and compare the bytes. |
 | `scripts/js-sweep.ts` | codegen-js coverage sweep: how many fixtures run byte-identical under `emit-js`. |

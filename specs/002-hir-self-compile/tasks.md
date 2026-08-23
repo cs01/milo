@@ -27,11 +27,11 @@ Work happens in a worktree at `../milo-hir`. All paths below are relative to tha
 
 **Purpose**: An isolated tree with its own compiler, and a recorded baseline. Another session holds uncommitted edits to `std/seal.milo` in the primary tree; nothing here may disturb them.
 
-- [ ] T001 Record the primary tree's dirty state to `/private/tmp/claude-501/-Users-csmith-git-milo/53dd66dd-bfde-4ff3-b2e0-786d9e2e4faf/scratchpad/primary-before.txt` via `git -C /Users/csmith/git/milo status --short`, as the before-image for SC-007
-- [ ] T002 Create the worktree: `git worktree add ../milo-hir -b 002-hir-self-compile` from `/Users/csmith/git/milo`
-- [ ] T003 Build milo-self inside the worktree with `sh scripts/selfhost.sh` — a worktree does not inherit `.selfhost/` from the primary tree, and using the primary tree's compiler would silently test the wrong binary
-- [ ] T004 [P] Capture the live ratchet baseline: `bun scripts/hir-ratchet.ts` into `specs/002-hir-self-compile/baseline.md`; confirm total is 115 or record the new number
-- [ ] T005 [P] Capture the live corpus baseline into the same file: `grep -vc '^#\|^$' tests/selfhost-manifest.txt` and `ls tests/fixtures/*.milo | wc -l` (expect 637 / 658; the denominator moves as the other session lands fixtures)
+- [X] T001 Record the primary tree's dirty state to `/private/tmp/claude-501/-Users-csmith-git-milo/53dd66dd-bfde-4ff3-b2e0-786d9e2e4faf/scratchpad/primary-before.txt` via `git -C /Users/csmith/git/milo status --short`, as the before-image for SC-007
+- [X] T002 Create the worktree: `git worktree add ../milo-hir -b 002-hir-self-compile` from `/Users/csmith/git/milo`
+- [X] T003 Build milo-self inside the worktree with `sh scripts/selfhost.sh` — a worktree does not inherit `.selfhost/` from the primary tree, and using the primary tree's compiler would silently test the wrong binary
+- [X] T004 [P] Capture the live ratchet baseline: `bun scripts/hir-ratchet.ts` into `specs/002-hir-self-compile/baseline.md`; confirm total is 115 or record the new number
+- [X] T005 [P] Capture the live corpus baseline into the same file: `grep -vc '^#\|^$' tests/selfhost-manifest.txt` and `ls tests/fixtures/*.milo | wc -l` (expect 637 / 658; the denominator moves as the other session lands fixtures)
 
 **Checkpoint**: Isolated tree, own compiler, baselines written down rather than remembered.
 
@@ -43,13 +43,13 @@ Work happens in a worktree at `../milo-hir`. All paths below are relative to tha
 
 **⚠️ CRITICAL**: No expression kind is migrated until T010 and T011 have been observed to FAIL.
 
-- [ ] T006 [US4] Create `scripts/hir-cover.ts` generating a kind → fixtures index by running `bun run src/main.ts emit-hir <fixture> --all --json` over `tests/fixtures/*.milo` and inverting the result; cache to `tests/hir-cover.json`
-- [ ] T007 [US4] Add `--for <Kind>...` to `scripts/hir-cover.ts` listing every fixture whose HIR contains those kinds
-- [ ] T008 [US4] Add `--check --for <Kind>...` to `scripts/hir-cover.ts`: build and run each covering fixture through milo-self, exit non-zero on any failure
-- [ ] T009 [US4] Make `scripts/hir-cover.ts` print its input count on every run and **exit non-zero when that count is zero** — a gate reporting success over zero inputs is the recorded silent-success defect, not a pass (FR-023)
-- [ ] T010 [US4] Falsify G1: add a throwaway `hintTy` call to `src-milo/codegen/expr.milo`, confirm `bun scripts/hir-ratchet.ts --check` exits 1 naming `hintTy`, then revert with `git checkout src-milo/codegen/expr.milo`
-- [ ] T011 [US4] Falsify G2: break a codegen arm for a kind with known coverage, confirm `bun scripts/hir-cover.ts --check --for <Kind>` exits 1 naming a fixture, then revert
-- [ ] T012 [US4] Record in `specs/002-hir-self-compile/baseline.md` which kinds have **zero** covering fixtures; each is a kind whose migration proves nothing until a fixture exists
+- [X] T006 [US4] Create `scripts/hir-cover.ts` generating a kind → fixtures index by running `bun run src/main.ts emit-hir <fixture> --all --json` over `tests/fixtures/*.milo` and inverting the result; cache to `tests/hir-cover.json`
+- [X] T007 [US4] Add `--for <Kind>...` to `scripts/hir-cover.ts` listing every fixture whose HIR contains those kinds
+- [X] T008 [US4] Add `--check --for <Kind>...` to `scripts/hir-cover.ts`: build and run each covering fixture through milo-self, exit non-zero on any failure
+- [X] T009 [US4] Make `scripts/hir-cover.ts` print its input count on every run and **exit non-zero when that count is zero** — a gate reporting success over zero inputs is the recorded silent-success defect, not a pass (FR-023)
+- [X] T010 [US4] Falsify G1: add a throwaway `hintTy` call to `src-milo/codegen/expr.milo`, confirm `bun scripts/hir-ratchet.ts --check` exits 1 naming `hintTy`, then revert with `git checkout src-milo/codegen/expr.milo`
+- [X] T011 [US4] Falsify G2: break a codegen arm for a kind with known coverage, confirm `bun scripts/hir-cover.ts --check --for <Kind>` exits 1 naming a fixture, then revert
+- [X] T012 [US4] Record in `specs/002-hir-self-compile/baseline.md` which kinds have **zero** covering fixtures; each is a kind whose migration proves nothing until a fixture exists
 - [ ] T013 [US4] Commit and merge to `main`: gates before migration
 
 **Checkpoint**: Both fast gates have been seen to fail on a real defect. Migration may begin.
@@ -66,8 +66,8 @@ Work happens in a worktree at `../milo-hir`. All paths below are relative to tha
 
 ### Understand the blast radius
 
-- [ ] T014 [P] [US1] Document in `specs/002-hir-self-compile/baseline.md` that `placeTypeStr` handles only `Ident`, `FieldAccess`, `IndexAccess`, `UnaryOp`, and that its `_ => return ""` catch-all (`src-milo/codegen/expr.milo:369`) is itself a silent accept for every other place expression
-- [ ] T015 [P] [US1] List the nine external consumers with their line numbers in the same file: `markReceiverMoved:407`, `genOwnedArg:460,480,512,547`, `genAsCast:3329`, `genIndex:6541`, `genCall:8288`, `genLvalueWithHint:8717` (331/342/358 are internal recursion)
+- [X] T014 [P] [US1] Document in `specs/002-hir-self-compile/baseline.md` that `placeTypeStr` handles only `Ident`, `FieldAccess`, `IndexAccess`, `UnaryOp`, and that its `_ => return ""` catch-all (`src-milo/codegen/expr.milo:369`) is itself a silent accept for every other place expression
+- [X] T015 [P] [US1] List the nine external consumers with their line numbers in the same file: `markReceiverMoved:407`, `genOwnedArg:460,480,512,547`, `genAsCast:3329`, `genIndex:6541`, `genCall:8288`, `genLvalueWithHint:8717` (331/342/358 are internal recursion)
 
 ### Lower the four place kinds
 

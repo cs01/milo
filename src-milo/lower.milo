@@ -242,7 +242,34 @@ fn hoistKind(k: Expr, ownerId: u32, fnRetType: &TypeKind, ck: &Checker, cx: &mut
             return Expr.IndexAccess(o, hoistNode(index, fnRetType, ck, cx))
         }
         Expr.EnumLit(enumName, variant, args) => {
-            return Expr.EnumLit(enumName, variant, hoistNodes(args, fnRetType, ck, cx))
+            // `Type.method(...)` on a GENERIC type parses as an enum literal, and the
+            // concrete callee is only known after the checker inferred the type
+            // arguments. Codegen re-walks the raw AST, where those arguments were never
+            // written, so it cannot redo that inference — it would look up `Pair`, find
+            // no such struct (only `Pair_i64_string` is registered) and emit nonsense.
+            //
+            // Lowering is the right place to close that gap: it holds the Checker, so it
+            // can read the type already recorded for this node and bake the concrete name
+            // in. That is what a lowering phase is FOR — resolve once, here, instead of
+            // making every later phase re-derive it.
+            var name = enumName.clone()
+            match ck.exprTypes.get(ownerId) {
+                Option.Some(t) => {
+                    match t {
+                        TypeKind.TStruct(mono) => {
+                            let prefix = enumName.clone() + "_"
+                            if mono != enumName && mono.len > prefix.len && mono.substr(0, prefix.len) == prefix {
+                                name = mono.clone()
+                            }
+                        }
+                        _ => {
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+            return Expr.EnumLit(name, variant, hoistNodes(args, fnRetType, ck, cx))
         }
         Expr.Unwrap(operand) => {
             return Expr.Unwrap(hoistNode(operand, fnRetType, ck, cx))

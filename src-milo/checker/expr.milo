@@ -2476,6 +2476,57 @@ pub fn checkEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args:
         if ck.genericEnums.contains(enumName) {
             return checkGenericEnumLit(ck, enumName, variant, args, span)
         }
+        // Static method on a GENERIC struct with no turbofish: `Pair.new(1, "x")`,
+        // `Promise.blocking(f)`. Every such call used to die at "unknown enum 'Pair'",
+        // because the arm below only knows monomorphized structs and the type arguments
+        // were never written.
+        //
+        // Infer them the way a generic enum literal does — unify each declared parameter
+        // against the actual argument — then monomorphize and let the concrete path
+        // resolve the method. Recording the RESULT type is what lets lowering bake the
+        // concrete name in for codegen; see hoistKind's EnumLit case.
+        if ck.genericStructs.contains(enumName) {
+            match findGenericStaticMethod(ck, enumName, variant) {
+                Option.Some(gm) => {
+                    var inferred: HashMap<string, TypeKind> = HashMap.new()
+                    var tps: Vec<string> = Vec.new()
+                    for ti in 0..gm.typeParams.len {
+                        tps.push(gm.typeParams[ti].clone())
+                    }
+                    let lim = if args.len < gm.params.len {
+                        args.len
+                    } else {
+                        gm.params.len
+                    }
+                    for ai in 0..lim {
+                        let at = checkExpr(ck, *args[ai])
+                        inferInto(tps, typeFromAst(gm.params[ai]), at, inferred)
+                    }
+                    var typeArgs: Vec<TypeKind> = Vec.new()
+                    var complete = true
+                    for ti2 in 0..tps.len {
+                        if inferred.contains(tps[ti2]) {
+                            typeArgs.push(inferred.get(tps[ti2])!.clone())
+                        } else {
+                            complete = false
+                        }
+                    }
+                    if complete {
+                        let monoName = monomorphizeStruct(ck, enumName, typeArgs)
+                        match resolveMethod(ck, monoName, variant) {
+                            Option.Some(fnName2) => {
+                                var noTA2: Vec<MiloType> = Vec.new()
+                                return checkCall(ck, fnName2, args, noTA2, span)
+                            }
+                            Option.None => {
+                            }
+                        }
+                    }
+                }
+                Option.None => {
+                }
+            }
+        }
         // Static method on a struct: File.open(...) parses as an enum literal
         if ck.structs.contains(enumName) {
             match resolveMethod(ck, enumName, variant) {
@@ -2622,6 +2673,27 @@ pub fn inferInto(typeParams: &Vec<string>, declTy: &TypeKind, argTy: &TypeKind, 
             match argTy {
                 TypeKind.TVec(ai) => {
                     inferInto(typeParams, *inner, *ai, inferred)
+                }
+                _ => {
+                }
+            }
+        }
+        // A function type carries type parameters in its params AND its return, and
+        // without this arm none of them were recoverable: `Promise.blocking(f: move () => T)`
+        // could not learn T from the closure it was handed, so every bare
+        // `Promise.blocking(...)` failed to resolve.
+        TypeKind.TFn(dparams, dret) => {
+            match argTy {
+                TypeKind.TFn(aparams, aret) => {
+                    let lim = if dparams.len < aparams.len {
+                        dparams.len
+                    } else {
+                        aparams.len
+                    }
+                    for pi in 0..lim {
+                        inferInto(typeParams, dparams[pi], aparams[pi], inferred)
+                    }
+                    inferInto(typeParams, *dret, *aret, inferred)
                 }
                 _ => {
                 }
@@ -2781,6 +2853,52 @@ pub fn checkGenericCall(ck: &mut Checker, func: &string, args: &Vec<Heap<ExprNod
     }
     let sig = ck.functions.get(mangled)!
     return sig.ret.clone()
+}
+
+// The declared shape of a static method on a generic struct, before monomorphization:
+// the impl's type parameters and the parameter types as written. Used to infer type
+// arguments for a call that supplied none.
+pub struct GenericStaticMethod {
+    typeParams: Vec<string>,
+    params: Vec<MiloType>,
+}
+
+pub fn findGenericStaticMethod(ck: &Checker, typeName: &string, method: &string): Option<GenericStaticMethod> {
+    for ii in 0..ck.genericImpls.len {
+        let gi = ck.genericImpls[ii].clone()
+        if gi.typeName != typeName {
+            continue
+        }
+        for mi in 0..gi.methods.len {
+            if gi.methods[mi].name != method {
+                continue
+            }
+            // A static method takes no self; an instance method is unreachable through
+            // `Type.method(...)`.
+            var isStatic = true
+            if gi.methods[mi].params.len > 0 {
+                if gi.methods[mi].params[0].name == "self" {
+                    isStatic = false
+                }
+            }
+            if !isStatic {
+                continue
+            }
+            var tps: Vec<string> = Vec.new()
+            for ti in 0..gi.typeParams.len {
+                tps.push(gi.typeParams[ti].name.clone())
+            }
+            var ps: Vec<MiloType> = Vec.new()
+            for pi in 0..gi.methods[mi].params.len {
+                ps.push(gi.methods[mi].params[pi].ty.clone())
+            }
+            return Option.Some(GenericStaticMethod {
+                typeParams: tps, params: ps
+            }
+            )
+        }
+    }
+    return Option.None
 }
 
 pub fn checkGenericEnumLit(ck: &mut Checker, enumName: &string, variant: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {

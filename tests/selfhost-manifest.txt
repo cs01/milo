@@ -224,6 +224,7 @@ genericRefClosure
 genericRefInfer
 genericResult
 genericStack
+genericStaticInfer
 genericStruct
 genericStructFn
 genericStructMulti
@@ -358,6 +359,7 @@ matchTempBindMutate
 mime
 module_globals
 moduleWrapping
+moveClosureCaptureConsumed
 moveClosureType
 moveFieldThenReassign
 moveIfElse

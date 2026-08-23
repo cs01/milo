@@ -5542,6 +5542,18 @@ pub fn genMethodCall(cg: &mut Cgen, object: &ExprNode, method: &string, args: &V
             v: out, ty: "bool"
         }
     }
+    // isEmpty(): len == 0. Kept beside len rather than lowered to `.len() == 0` in the
+    // checker, because the checker records a type for the isEmpty CALL and a rewrite
+    // there would leave that record pointing at a node lowering no longer emits.
+    if isVecTy(obj.ty) && method == "isEmpty" {
+        let elenT = nextTemp(cg)
+        emit(cg, "  " + elenT + " = extractvalue %Vec " + obj.v + ", 1\n")
+        let cmpT = nextTemp(cg)
+        emit(cg, "  " + cmpT + " = icmp eq i64 " + elenT + ", 0\n")
+        return Val {
+            v: cmpT, ty: "i1"
+        }
+    }
     if isVecTy(obj.ty) && method == "len" {
         let lenT = nextTemp(cg)
         emit(cg, "  " + lenT + " = extractvalue %Vec " + obj.v + ", 1\n")

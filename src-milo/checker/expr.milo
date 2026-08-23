@@ -3479,12 +3479,52 @@ pub fn checkCast(ck: &mut Checker, operand: &ExprNode, targetType: &MiloType, sp
 
 // -- Method calls --
 
+// The combinator names an array or slice may borrow from Vec. Kept as two functions
+// rather than one set because a fixed array must not re-tag `clone` — see checkMethodCall.
+fn isArrayCombinator(m: &string): bool {
+    return m == "sum" || m == "map" || m == "filter" || m == "fold" || m == "reduce"
+    || m == "each" || m == "enumerate" || m == "find" || m == "position"
+    || m == "indexOf" || m == "any" || m == "all" || m == "contains"
+    || m == "isEmpty" || m == "join" || m == "first" || m == "last"
+    || m == "min" || m == "max"
+}
+
+fn isSliceCombinator(m: &string): bool {
+    return isArrayCombinator(m) || m == "get" || m == "clone"
+}
+
 pub fn checkMethodCall(ck: &mut Checker, obj: &ExprNode, method: &string, args: &Vec<Heap<ExprNode>>, span: &Option<Span>): TypeKind {
     var objType = checkExpr(ck, obj)
     // auto-deref references
     match objType.clone() {
         TypeKind.TRef(inner, mutable) => {
             objType = inner.clone()
+        }
+        _ => {
+        }
+    }
+
+    // A fixed array or a slice reaches the same combinator set a Vec does, so re-tag it
+    // and let the Vec arm below be the only implementation. src/checker.ts does exactly
+    // this; without it `[i64]` had no `sum`, `isEmpty`, `map` or `fold` at all, which is
+    // three fixtures and any program that calls a combinator on an array.
+    //
+    // `clone` is deliberately NOT in the fixed-array set: cloning a fixed array should
+    // yield an array, and re-tagging would change the result type to a Vec.
+    match objType.clone() {
+        TypeKind.TArray(elem, size) => {
+            var retag = false
+            match size {
+                Option.None => {
+                    retag = isSliceCombinator(method)
+                }
+                Option.Some(_n) => {
+                    retag = isArrayCombinator(method)
+                }
+            }
+            if retag {
+                objType = TypeKind.TVec(Heap(elem.clone()))
+            }
         }
         _ => {
         }
@@ -3989,6 +4029,14 @@ pub fn checkVecMethod(ck: &mut Checker, obj: &ExprNode, elem: &TypeKind, method:
             optArgs.push(elem.clone())
             let mangled = monomorphizeEnum(ck, "Option", optArgs)
             return TypeKind.TEnum(mangled)
+        }
+        return tyBool()
+    }
+    // isEmpty(): the oracle has it on Vec, arrays and slices; milo-self only had it on
+    // HashMap, so `v.isEmpty()` was "no method 'isEmpty' on Vec".
+    if method == "isEmpty" {
+        if args.len != 0 {
+            error(ck, "'isEmpty' takes no arguments", cloneSpan(span))
         }
         return tyBool()
     }

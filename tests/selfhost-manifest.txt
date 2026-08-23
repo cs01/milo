@@ -1,4 +1,3 @@
-
 addressOf
 aesGcmLengthGuards
 aliasBehindRef
@@ -7,6 +6,8 @@ arena_clear
 arenaBasic
 arenaContracts
 arenaCrossArena
+arenaFreeze
+arenaGrowOnly
 arenaHandles
 arenaMemCoexist
 arenaMethod
@@ -16,6 +17,7 @@ arenaWith
 argparseAbsentVsEmpty
 arithmetic
 array_index_clone
+arrayCombinators
 arrayCopy
 arrayLen
 arrayMutate
@@ -74,6 +76,7 @@ checkedDivRem
 checkedNeg
 cLayout
 cLayoutOpaque
+closureArgEnvOwnership
 closureBasic
 closureBlock
 closureCapture
@@ -230,6 +233,7 @@ genericTraitDrop
 getOrDefaultOwnedResult
 global_ptr
 globalArrayInit
+globalBorrowArgSafe
 globalConstFold
 globalInitOrder
 globalRefFold
@@ -289,6 +293,7 @@ importNamedMulti
 importString
 importTransitive
 indexCloneNoLeak
+indexResourceAllowed
 inflateCorruptInput
 inflateGzip
 intConstCoerce
@@ -462,6 +467,7 @@ signalTwoPipes
 sigpipeIgnored
 sizeOf
 sliceCloneReassign
+sliceCombinators
 sliceI32Bounds
 sliceScopeRelease
 sliceView
@@ -514,6 +520,7 @@ stringParseRange
 stringParseTotal
 stringParseView
 stringPushLiteral
+stringPushLiteralGrow
 stringPushStr
 stringSlice
 stringSliceArg
@@ -525,6 +532,7 @@ stringViewIter
 stringViewReturn
 stringViewSplitParity
 stringWithCapacity
+strShardScan
 struct_field_shorthand
 structCloneOutOfContainer
 structCopy
@@ -548,6 +556,7 @@ tcpGreenConnectRefused
 tcpIpv6
 tcpListenerPort
 temp_name_collision
+tempReceiverLookup
 termSize
 testingAsserts
 totpRfc

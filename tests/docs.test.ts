@@ -42,7 +42,6 @@ const SNIPPETS_NOT_YET_CHECKED = new Set([
   "docs/site/language/index.md",
   "docs/site/language/modules.md",
   "docs/site/language/ownership.md",
-  "docs/site/language/patterns.md",
   "docs/site/language/safety.md",
   "docs/site/language/strings.md",
   "docs/site/language/traits.md",

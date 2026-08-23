@@ -15,6 +15,7 @@ For most concurrent work, reach for `Promise<T>`.
 | Fleet of fire-and-forget workers | `Task.spawn` + `WaitGroup` |
 | Wait on first-of-many sources | `std/select` |
 | CPU-bound work or blocking FFI | `Promise.blocking(fn)` → `.await()!`; fan out across cores via `Promise.all` |
+| Transform a big buffer across cores | `parallelMap(v, n, f)`: `std/shard` divides ownership, so nothing is copied and nothing is shared |
 | Shared state across parallel workers | channels (pass ownership) or atomics (counters, flags) |
 
 Most programs need only the first row. `Promise` is the familiar promise/await model with no event loop and no function coloring, and `await()` frees the promise's resources itself — there is nothing to `destroy()`.
@@ -395,68 +396,92 @@ fn main(): i32 {
 
 ## Sharing State Across Parallel Workers
 
-Green tasks never run in parallel, so plain sequencing protects task-to-task state. Across `Promise.blocking` workers, which *do* run in parallel, share through **channels** (pass ownership) or **atomics** (lock-free counters and flags) rather than a lock. Move-capture gives each worker its own copy of what it captures, so a fan-out that returns results through `await` needs no synchronization at all.
+Green tasks never run in parallel, so plain sequencing is enough between them. Only
+`Promise.blocking` workers run at the same time, and there are three ways to get data to
+them, in the order you should reach for them:
+
+| You want to | Use | What crosses the thread |
+|-------------|-----|-------------------------|
+| Transform a big buffer across cores | `parallelMap` / `shatter` ([`std/shard`](/stdlib/shard)) | disjoint owned windows, no copy |
+| Return a result, or stream work out | `Channel`, `Promise` | ownership |
+| Share one counter or flag | `AtomicI64` and friends ([`std/sync`](/stdlib/sync)) | one cell |
+
+There is no mutex in std, because the first two rows do not need one.
+
+### Divide the Data, Share Nothing
+
+The usual reason to want shared state is a large `Vec` several cores should work on.
+Don't share it, divide its ownership. `shatter` consumes the `Vec` and hands out
+disjoint owned windows; each worker takes one **by move**, writes into it in place, and
+gives it back. No reference crosses a thread, and nothing is copied.
+
+```milo
+from "std/shard" import { Shard, parallelMap }
+
+fn shade(w: Shard<f64>): Shard<f64> {
+    var s = w
+    var i: i64 = 0
+    while i < s.len() {
+        s.set(i, s.get(i) * 2.0)
+        i = i + 1
+    }
+    return s
+}
+```
+
+`parallelMap(pixels, 4, shade)!` is the whole divide/run/reassemble cycle in one call.
+The buffer is moved in and comes back transformed in the same allocation. It is also the
+form in which `weld` cannot fail: every window is made, handed out, awaited and welded
+inside that call, so none of your code runs in between.
+
+`f` is a plain function rather than a closure because each worker needs its own copy: a
+capturing closure is moved into the first worker and gone for the rest. Everything the
+work depends on therefore travels in the window, which is the same thing that keeps
+workers from sharing anything. Use `w.start()` when a worker needs to know which slice of
+the original buffer it holds.
+
+Reach for `shatter`/`windows`/`weld` directly only when the workers must differ from each
+other. [`std/shard`](/stdlib/shard) also has the read-only string half (`shatterStr`, with
+overlapping windows so a scanner never loses a match at a seam).
 
 ### Atomics
 
-Lock-free atomic types for cross-thread counters and flags. No mutex needed.
+One shared cell, no mutex, for the counters and flags every worker touches.
 
 ```milo
 from "std/sync" import { AtomicI64, AtomicI32, AtomicU64, AtomicBool }
 
 fn main(): i32 {
     let counter = AtomicI64.new(0)
-    counter.add(1)                  // returns old value
+    counter.add(1)                  // returns the OLD value
     print(counter.load())           // 1
     counter.store(42)
-    let old = counter.cas(42, 99)   // compare-and-swap, returns old value
+    let old = counter.cas(42, 99)   // compare-and-swap, returns the old value
 
     let flag = AtomicBool.new(false)
-    flag.store(true)
-    let prev = flag.swap(false)     // returns old value
-    // counter and flag free themselves when the last owner drops
+    let prev = flag.swap(true)      // returns the old value
     return 0
 }
 ```
 
-Four types: `AtomicI64`, `AtomicI32`, `AtomicU64`, `AtomicBool`. The integer ones carry
-`load`, `store`, `add`, `sub`, `swap`, `cas`; `AtomicBool` carries `load`, `store`,
-`swap`, `cas`. `add`/`sub`/`swap`/`cas` all return the **old** value.
+`AtomicI64`, `AtomicI32` and `AtomicU64` carry `load`, `store`, `add`, `sub`, `swap`,
+`cas`; `AtomicBool` carries all but `add`/`sub`. Every read-modify-write returns the
+**old** value.
 
-**Every operation is sequentially consistent (`seq_cst`)** — a `cas` is seq_cst on both
-its success and its failure ordering. There is no ordering parameter and there are no
-acquire/release/relaxed forms: the cheaper orderings are a correctness cliff invisible
-in the source, and nothing in std or its consumers has been bound by the difference.
-Read every atomic call as a full barrier.
-
-`add` and `sub` **wrap** on overflow, unlike ordinary Milo arithmetic, which traps. No
-atomic read-modify-write instruction has a checked form; to detect overflow, write a
-`cas` loop and inspect the old value yourself.
-
-There is no `AtomicPtr`. A raw pointer is only dereferenceable inside `unsafe`, so an
-`AtomicPtr` would be `AtomicI64` plus a cast with no safety added — and Milo has no way
-to state that the pointee outlives the load, so a safe-looking `AtomicPtr` would be a
-lifetime claim the compiler cannot check. Store an index into a `Vec` or an arena
-`Handle` instead.
-
-Each atomic is a reference-counted handle: `.clone()` gives another task or worker its
-own owner, and the storage frees when the last one drops. All four use audited
-`unsafe impl Send` / `Sync` markers because their raw-pointer internals are reached
-only through those atomic operations.
+- **Every operation is `seq_cst`**, on both the success and failure path of a `cas`. There is no ordering parameter and no acquire/release/relaxed forms, so read each call as a full barrier. The cheaper orderings are a correctness cliff invisible in the source.
+- **`add` and `sub` wrap** on overflow, unlike ordinary Milo arithmetic, which traps. No atomic read-modify-write has a checked form; to detect it, write a `cas` loop and inspect the old value.
+- **There is no `AtomicPtr`.** It would be an `AtomicI64` plus an `unsafe` cast with nothing gained, and Milo cannot state that the pointee outlives the load. Store a `Vec` index or an arena `Handle` instead.
 
 ### Once and lazy statics
 
 `Once` runs one initializer exactly once, however many green tasks or `Promise.blocking`
-threads reach it at the same time. The losers block until the winner finishes, so every
-caller that returns from `run` has seen the initializer's writes.
+threads reach it together. The losers block until the winner finishes, so every caller
+returning from `run` has seen the initializer's writes. It is correct under both worlds:
+a green task parks and the scheduler keeps running, a plain OS thread waits on a condition
+variable. Re-entering `run` from inside its own initializer aborts rather than hanging.
 
-Correct under both worlds: a green task waits by parking (the scheduler keeps running),
-a plain OS thread waits on a condition variable, and the main thread with a live
-scheduler drives it. Re-entering `run` from inside its own initializer would wait for
-itself forever, so it aborts with that message instead of hanging.
-
-**You often need no `Once` at all.** A module-level `var` already runs a real
-initializer — in dependency order, before `main`:
+**You often need no `Once` at all.** A module-level `var` already runs a real initializer,
+in dependency order, before `main`:
 
 ```milo
 var gTable: Vec<i64> = buildTable()   // eager, runs before main
@@ -480,8 +505,8 @@ pub fn ensureTable(): void {
 ```
 
 Callers do `ensureTable()` and then read `gTable` directly. There is no `Lazy<T>` or
-`OnceCell<T>`: with no way to return a reference, every `get()` would deep-copy the
-cached value, turning a cache into a per-access allocation.
+`OnceCell<T>`: with no way to return a reference, every `get()` would deep-copy the cached
+value, turning a cache into a per-access allocation.
 
 ## Pitfalls
 
@@ -504,6 +529,8 @@ cached value, turning a cache into a per-access allocation.
 | `Promise<T>.blocking(fn)` | Run `fn` on an OS thread (CPU-bound / blocking FFI) |
 | `p.await()` | Wait for a promise's result |
 | `Promise.all(v)` / `Promise.race(v)` | Collect all results / first to finish |
+| `parallelMap(v, n, f)` | Divide a `Vec` across `n` OS threads, transform in place, reassemble (`std/shard`) |
+| `shatter(v, n)` / `.windows()` / `.weld(v)` | The same cycle by hand, when workers must differ from each other |
 | `Channel.new(cap)` | Create bounded channel |
 | `ch.send(val)` | Send value (blocks if full) |
 | `ch.recv()` | Receive value (blocks if empty) |

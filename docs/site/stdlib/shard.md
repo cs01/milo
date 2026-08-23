@@ -1,6 +1,8 @@
 # std/shard
 
-`shatter` splits a `Vec` into disjoint owned windows so several threads can transform it in place, with no copies and no shared references.
+A `Shard` is an owned window over part of a `Vec`. Splitting a buffer into disjoint shards lets several threads transform it in place, with no copies and no shared references.
+
+`parallelMap` runs that whole cycle in one call and is what most uses want. `shatter`, `windows` and `weld` are the same cycle by hand, for when the workers must differ from each other.
 
 ## Why this module exists
 
@@ -11,7 +13,7 @@ Parallel transforms are where that restriction costs something. The standard mov
 So this module divides the *ownership* instead of the borrow. `shatter` consumes the `Vec` and hands out windows, each an ordinary owned value that a worker receives by move like anything else. No reference crosses a thread because no reference exists, and the aliasing argument is the move checker that already shipped rather than a new rule to trust.
 
 ```milo
-from "std/shard" import { Shard, shatter }
+from "std/shard" import { Shard, shatter, parallelMap }
 ```
 
 ## Quick start

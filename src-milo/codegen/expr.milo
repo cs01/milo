@@ -9664,7 +9664,12 @@ pub fn genExpr(cg: &mut Cgen, e: &ExprNode, locs: &Vec<Local>, sigs: &Vec<CgFnSi
         Expr.CastExpr(inner, targetType) => {
             // full astTypeStr, not just .name: `x as *i64` must keep pointer-ness
             // (otherwise the target reads as plain i64 and the cast result loses it)
-            return genAsCast(cg, *inner, astTypeStr(targetType), locs, sigs)
+            //
+            // Resolved rather than raw: genAsCast uses this string as a Val's type without
+            // resolving it, so a cast to a generic used to carry the reconstructed bracket
+            // form onward instead of the mangled name the checker registered. Going through
+            // resolveTyStr both fixes the name and picks up its fail-closed check.
+            return genAsCast(cg, *inner, resolveTyStr(cg, astTypeStr(targetType)), locs, sigs)
         }
         Expr.MethodCall(object, method, args) => {
             return genMethodCall(cg, *object, method, args, locs, sigs)

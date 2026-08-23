@@ -10,7 +10,8 @@ last-verified: 2026-08-02
 
 `@` marks something the compiler handles, not the runtime. It is the whole mechanism —
 there is no preprocessor, no `#[cfg]`, no macro system. Everything spelled with an `@`
-is one of the eight constructs below.
+is one of the constructs below. `bun run src/main.ts lang --json` is the authority on that
+list, and `tests/langInfo.test.ts` fails if this table omits an attribute it reports.
 
 | Construct | Goes on | What it does |
 |---|---|---|
@@ -23,6 +24,11 @@ is one of the eight constructs below.
 | `@cLayout(cType, header)` | `extern struct` | Verifies field offsets against a C header |
 | `@cValue(cName, header)` | global `let` | Verifies an integer constant against a C macro |
 | `@cOpaque` | struct field | Marks filler with no C counterpart, so `@cLayout` skips it |
+| `@noCopy` | struct | Opts a struct out of the all-fields-Copy rule, so move checking engages for a type that wraps a handle |
+| `@wrapping` | `fn`, method | Arithmetic inside wraps instead of trapping, for inherently modular code; `@!wrapping` applies it to a whole file |
+| `@pure` | `fn`, method | Asserts the function reads no global or module state; the checker enforces it |
+| `@thread` | `fn`, method | Declares that this function hands a closure to a real OS thread, so the checker holds its captures to `Send` |
+| `@synchronized` | method | Declares that the method provides mutual exclusion, so a global written inside it is not racing |
 
 Two of these are **builtins** — they appear where a value does, and evaluate while
 compiling. The rest are **attributes** — they sit above a declaration.

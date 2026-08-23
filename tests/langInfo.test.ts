@@ -118,3 +118,22 @@ test("the annotations the checker enforces are documented for humans too", () =>
       .toEqual({ attribute: name, documented: true });
   }
 });
+
+// The internal reference above was complete; the PUBLISHED page was not. It claimed to
+// list "the eight constructs" spelled with an `@`, carried nine rows, and omitted five
+// attributes the compiler enforces — including @noCopy, @thread and @synchronized, three
+// of the four that exist for safety. A reader of the site could not discover them.
+//
+// Checks the TABLE, not the page: prose elsewhere on the page mentions some of these in
+// passing, which would satisfy a bare includes() while the reference table stayed wrong.
+test("the published annotations table lists every attribute", () => {
+  const page = readFileSync(
+    join(import.meta.dir, "..", "docs", "site", "language", "annotations.md"), "utf-8");
+  const rows = page.split("\n").filter(l => /^\| `@/.test(l));
+  expect(rows.length).toBeGreaterThan(10); // a table that stopped matching is not a pass
+  const listed = rows.join("\n");
+  for (const name of ATTRIBUTE_NAMES) {
+    expect({ attribute: name, inTable: listed.includes(`@${name}`) })
+      .toEqual({ attribute: name, inTable: true });
+  }
+});

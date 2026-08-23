@@ -48,7 +48,11 @@ export const STATS: Record<string, () => number> = {
 };
 
 // Docs whose counts are current claims, not a dated record.
-const TRACKED = ["CLAUDE.md", "AGENTS.md", "README.md", "docs/testing.md", "docs/roadmap.md"];
+// docs/site/roadmap.md is a hand-condensed copy of docs/roadmap.md for the published
+// site. Its counts drifted 61 fixtures and 45 error-fixtures behind before it was tracked
+// here — the internal roadmap was gated and the public one, which is what users actually
+// read, was not.
+const TRACKED = ["CLAUDE.md", "AGENTS.md", "README.md", "docs/testing.md", "docs/roadmap.md", "docs/site/roadmap.md"];
 
 // The placeholder in AGENTS.md's own table documents this syntax, so it is written
 // `stat:<name>` — the angle brackets keep it out of `[a-z-]+` and stop the generator

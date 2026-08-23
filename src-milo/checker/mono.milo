@@ -817,6 +817,26 @@ pub fn resolveMonoType(ck: &mut Checker, ty: &MiloType): TypeKind {
             return base
         }
     }
+    // A function type carries types in its params and its return, and the guard at the
+    // top of this function skips it (`!ty.isFn`), so none of them were ever monomorphized:
+    // `f: (Shard<T>) => Shard<T>` inside a monomorphized fn kept the raw base name and
+    // calling `f(w)` reported "expected Shard, got Shard_u32". typeFromAst cannot do it —
+    // it has no knowledge of genericStructs and drops type arguments outright.
+    if ty.isFn {
+        var mparams: Vec<TypeKind> = Vec.new()
+        for pi in 0..ty.fnParams.len {
+            mparams.push(resolveMonoType(ck, ty.fnParams[pi]))
+        }
+        var mret = tyVoid()
+        match ty.fnRet {
+            Option.Some(r) => {
+                mret = resolveMonoType(ck, *r)
+            }
+            Option.None => {
+            }
+        }
+        return TypeKind.TFn(mparams, Heap(mret))
+    }
     // normalize so a bare enum name (NodeKind) becomes TEnum, not the uppercase
     // TStruct fallback — otherwise Option<NodeKind>'s payload mismatches the enum.
     return normalizeEnumNames(ck, typeFromAst(ty))

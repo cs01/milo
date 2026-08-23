@@ -22,7 +22,6 @@ arrayCopy
 arrayLen
 arrayMutate
 arrayMutRef
-arrayOfGenericElements
 arrayRepeat
 arrayRepeatStruct
 arrays

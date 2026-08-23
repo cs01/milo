@@ -1385,9 +1385,14 @@ pub fn checkCall(ck: &mut Checker, func: &string, args: &Vec<Heap<ExprNode>>, ty
     if dotIdx > 0 && typeArgs.len > 0 {
         let base = func[0..dotIdx].clone()
         let methodName = func[dotIdx + 1..func.len].clone()
+        // resolveAstType, not typeFromAst: an explicit type argument can itself be a
+        // generic instantiation (`Promise<Shard<T>>.blocking(...)`), and typeFromAst
+        // drops the inner type arguments — the outer name then mangled as
+        // `Promise_Shard` instead of `Promise_Shard_u32`, and every use of the result
+        // reported "expected () => Shard, got () => Shard_u32".
         var tks: Vec<TypeKind> = Vec.new()
         for ti in 0..typeArgs.len {
-            tks.push(normalizeEnumNames(ck, typeFromAst(typeArgs[ti])))
+            tks.push(normalizeEnumNames(ck, resolveAstType(ck, typeArgs[ti])))
         }
         var mangled = ""
         if ck.genericStructs.contains(base) {

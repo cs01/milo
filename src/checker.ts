@@ -2387,6 +2387,7 @@ export class TypeChecker {
     // over the call graph, so every callee has to be resolvable before it runs.
     this.checkGlobalBorrowInvalidation(program);
     this.lintManualShatterCycle(program);
+    this.lintArenaNeverFrees(program);
 
     // An expectation that never fired means the code it excused was fixed and the
     // suppression outlived its cause. Reported here, after every warning has had its
@@ -3773,6 +3774,67 @@ export class TypeChecker {
       }
     }
     return writes;
+  }
+
+  // An arena that is read but never freed, where a tier exists that would make the
+  // read infallible. See docs/ownership-patterns.md, pattern 2.
+  //
+  // `Arena.get` returns `Option<T>` because a slot can be freed and reused, so a stale
+  // handle must be catchable. A program that never frees is unwrapping an Option that
+  // cannot be None at every call site, and `sealGrowth()` removes exactly the operation
+  // it is paying for while still allowing `alloc`.
+  //
+  // Keyed to a LOCAL arena so the whole of its life is visible here: an arena reaching
+  // this function as a parameter may well be freed by its owner, and guessing otherwise
+  // would be advice that is wrong more often than right.
+  private lintArenaNeverFrees(program: Program): void {
+    if (this.warningConfig.allowed.has("arena-never-frees")) return;
+    for (const f of [...program.functions]) {
+      if (!f.body) continue;
+      if (f.sourceFile?.includes("std/arena")) continue;
+      // name -> declaration span, for locals declared as an Arena
+      const locals = new Map<string, Span | undefined>();
+      const frees = new Set<string>();
+      const reads = new Set<string>();
+      const receiver = (n: Record<string, unknown>): string | undefined => {
+        const o = n.object as Record<string, unknown> | undefined;
+        return o && o.kind === "Ident" && typeof o.name === "string" ? o.name : undefined;
+      };
+      const walk = (node: unknown) => {
+        if (!node || typeof node !== "object") return;
+        if (Array.isArray(node)) { for (const n of node) walk(n); return; }
+        const n = node as Record<string, unknown> & { kind?: string; name?: unknown; method?: unknown; span?: unknown };
+        if ((n.kind === "VarDecl" || n.kind === "LetDecl") && typeof n.name === "string") {
+          const t = n.type as { name?: string } | undefined;
+          if (t?.name === "Arena") locals.set(n.name, n.span as Span | undefined);
+        }
+        if (n.kind === "MethodCall" && typeof n.method === "string") {
+          const r = receiver(n);
+          if (r) {
+            if (n.method === "free" || n.method === "clear") frees.add(r);
+            // Handing the arena on by value, or sealing it, ends our view of its life.
+            if (n.method === "freeze" || n.method === "sealGrowth") frees.add(r);
+            if (n.method === "get" || n.method === "valid") reads.add(r);
+          }
+        }
+        // Passed to a function: its callee may free it, so stop guessing.
+        if (n.kind === "Call") {
+          for (const a of (n.args as Expr[] | undefined) ?? []) {
+            if (a.kind === "Ident" && typeof a.name === "string") frees.add(a.name);
+          }
+        }
+        for (const k of Object.keys(n)) if (k !== "span") walk(n[k]);
+      };
+      walk(f.body);
+      for (const [name, span] of locals) {
+        if (frees.has(name) || !reads.has(name)) continue;
+        this.warn("arena-never-frees",
+          `'${name}' is never freed, so every 'get' unwraps an Option that cannot be None`,
+          span,
+          `'${name}.sealGrowth()' gives an infallible 'get' and keeps 'alloc'; ` +
+          `'${name}.freeze()' also gives up 'alloc'. See docs/ownership-patterns.md.`);
+      }
+    }
   }
 
   // `shatter` … `weld` written out by hand, where `parallelMap` does the whole cycle.

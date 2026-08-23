@@ -412,6 +412,108 @@ pub fn arenaHandles<T>(arena: &Arena<T>): Vec<Handle<T>> {
 // and no path survives through which a slot could be freed after the freeze.
 //
 // The generation counters are not carried over because nothing can bump them.
+// An arena that can still ALLOCATE but can no longer free, clear or reuse a slot.
+//
+// The middle tier, and the one most builders actually want. `freeze` gives an
+// infallible `get` by ending the build phase; that is no use to a symbol table or an
+// AST that is still growing. Removing only `free` is enough: a slot is never recycled,
+// so no handle this arena ever minted can come to name a different value, and `get`
+// returns T with no Option to unwrap — while `alloc` keeps working.
+//
+// Growth does not disturb it. Appending moves the backing storage but not the slot
+// INDICES, and a handle names an index, so every handle minted before a growth still
+// resolves to the same value after it.
+//
+// `freeze()` is the terminal state when the building really is done.
+pub struct GrowOnlyArena<T> {
+    id: i64,
+    data: Vec<T>,
+}
+
+// Consume an arena into the grow-only tier. Refused, like `freeze`, for an arena that
+// ever freed a slot: a freed-and-reused slot leaves stale handles naming a live slot
+// holding a different value, and this tier removes the generation check that would
+// catch them. The refusal hands the arena back.
+pub fn arenaSealGrowth<T>(a: Arena<T>): Result<GrowOnlyArena<T>, FreezeRejected<T>> {
+    var bad: i64 = -1
+    var i: i64 = 0
+    while i < a.gens.len {
+        if a.gens[i] != 1 {
+            bad = i
+            i = a.gens.len
+        } else {
+            i = i + 1
+        }
+    }
+    if bad >= 0 {
+        var r: FreezeRejected<T> = FreezeRejected {
+            arena: a, slot: bad
+        }
+        return Result.Err(r)
+    }
+    var g: GrowOnlyArena<T> = GrowOnlyArena {
+        id: a.id, data: a.data
+    }
+    return Result.Ok(g)
+}
+
+impl GrowOnlyArena<T> {
+    // Append a value and return a handle to it. The only mutating operation this
+    // tier has: nothing here frees, clears or recycles.
+    fn alloc(self: &mut Self, val: T): Handle<T> {
+        let idx = self.data.len
+        assert(idx <= 2147483647, "arena slot capacity exceeded")
+        self.data.push(val)
+        var h: Handle<T> = Handle {
+            arenaId: self.id, index: idx as i32, generation: 1
+        }
+        return h
+    }
+
+    // The value at `h`, with no Option to unwrap. Infallible for any handle this
+    // arena or the one it was sealed from minted: no slot is ever recycled, so a
+    // handle cannot come to name something else.
+    fn get(self: &Self, h: Handle<T>): T {
+        assert(h.arenaId == self.id, "grow-only arena: handle was minted by a different arena")
+        let idx = h.index as i64
+        assert(idx >= 0, "grow-only arena: handle index is negative")
+        assert(idx < self.data.len, "grow-only arena: handle index is past the end of this arena")
+        let copied: Option<T> = Option.Some(self.data[idx])
+        return copied!
+    }
+
+    // Borrow rather than copy. Prefer this when T owns heap storage.
+    fn read(self: &Self, h: Handle<T>, f: (&T) => void): void {
+        assert(h.arenaId == self.id, "grow-only arena: handle was minted by a different arena")
+        let idx = h.index as i64
+        assert(idx >= 0 && idx < self.data.len, "grow-only arena: handle index out of range")
+        f(self.data[idx])
+    }
+
+    // Whether `h` names a slot here. Branch on this for a handle that might be foreign.
+    fn holds(self: &Self, h: Handle<T>): bool {
+        if h.arenaId != self.id {
+            return false
+        }
+        let idx = h.index as i64
+        return idx >= 0 && idx < self.data.len
+    }
+
+    // Slots held; every one is live.
+    fn len(self: &Self): i64 {
+        return self.data.len
+    }
+
+    // Building is over: give up `alloc` too. Cannot fail, because this tier never
+    // freed anything.
+    fn freeze(self: Self): FrozenArena<T> {
+        var f: FrozenArena<T> = FrozenArena {
+            id: self.id, data: self.data
+        }
+        return f
+    }
+}
+
 pub struct FrozenArena<T> {
     id: i64,
     data: Vec<T>,
@@ -621,6 +723,12 @@ impl Arena<T> {
     // refused rather than papered over.
     fn freeze(self: Self): Result<FrozenArena<T>, FreezeRejected<T>> {
         return arenaFreeze(self)
+    }
+
+    // End freeing, but keep allocating. The middle tier: `get` becomes infallible
+    // while `alloc` still works. See GrowOnlyArena.
+    fn sealGrowth(self: Self): Result<GrowOnlyArena<T>, FreezeRejected<T>> {
+        return arenaSealGrowth(self)
     }
 }
 

@@ -1,0 +1,64 @@
+// @expect: root
+// @expect: after growth root still resolves: root
+// @expect: leaf added later: leaf
+// @expect: len=3
+// @expect: foreign=false
+// @expect: refused: freed
+// @expect: frozen still resolves: root
+// The middle tier. `freeze` buys an infallible `get` by ending the build phase, which
+// is no use to a symbol table that is still growing. Removing only `free` is enough:
+// no slot is ever recycled, so no handle can come to name a different value, and `get`
+// returns T while `alloc` keeps working.
+from "std/arena" import {
+    Arena, GrowOnlyArena, Handle
+}
+
+pub fn main(): i32 {
+    var a: Arena<string> = Arena<string>.new()
+    let root = a.alloc("root")
+
+    var g = a.sealGrowth()!
+    print(g.get(root))
+
+    // Allocating moves the backing storage but not the slot indices, so a handle
+    // minted before the growth still resolves afterwards.
+    var i: i64 = 0
+    while i < 64 {
+        let _filler = g.alloc("filler")
+        i = i + 1
+    }
+    print("after growth root still resolves: " + g.get(root))
+
+    var b: Arena<string> = Arena<string>.new()
+    let r2 = b.alloc("root")
+    var g2 = b.sealGrowth()!
+    let leaf = g2.alloc("leaf")
+    print("leaf added later: " + g2.get(leaf))
+    let _third = g2.alloc("third")
+    print("len=" + g2.len().toString())
+
+    // A handle from another arena is not held here.
+    print("foreign=" + g2.holds(root).toString())
+
+    // Same refusal as freeze: an arena that ever freed cannot drop the generation
+    // check, because a reused slot would leave stale handles naming live values.
+    var churn: Arena<i64> = Arena<i64>.new()
+    let c1 = churn.alloc(7)
+    let c2 = churn.alloc(8)
+    churn.free(c2)
+    match churn.sealGrowth() {
+        Result.Ok(_g) => {
+            print("WRONG: sealed an arena that freed")
+        }
+        Result.Err(rej) => {
+            print("refused: freed")
+            var recovered = rej.arena
+            let _still = recovered.get(c1)!
+        }
+    }
+
+    // Building over: give up alloc too. Cannot fail, since this tier never freed.
+    let frozen = g2.freeze()
+    print("frozen still resolves: " + frozen.get(r2))
+    return 0
+}

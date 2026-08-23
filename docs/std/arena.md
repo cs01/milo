@@ -130,6 +130,15 @@ that owns heap (a string, a Vec, a nested struct): `get` clones the whole
 value out of the slot on every call. False (and `f` not called) if `h` is
 stale. Take the result out through a captured `var`.
 
+### `Arena.sealGrowth`
+
+```milo
+fn Arena.sealGrowth(self: Arena): Result<GrowOnlyArena<T>, FreezeRejected<T>>
+```
+
+End freeing, but keep allocating. The middle tier: `get` becomes infallible
+while `alloc` still works. See GrowOnlyArena.
+
 ### `Arena.set`
 
 ```milo
@@ -282,6 +291,17 @@ the borrowing paths. That gap is why real programs reach for a bare index into
 a Vec instead of a Handle, so the ergonomic read path is the one that decides
 whether generational safety gets used at all.
 
+### `arenaSealGrowth`
+
+```milo
+pub fn arenaSealGrowth<T>(a: Arena<T>): Result<GrowOnlyArena<T>, FreezeRejected<T>>
+```
+
+Consume an arena into the grow-only tier. Refused, like `freeze`, for an arena that
+ever freed a slot: a freed-and-reused slot leaves stale handles naming a live slot
+holding a different value, and this tier removes the generation check that would
+catch them. The refusal hands the arena back.
+
 ### `arenaSet`
 
 ```milo
@@ -385,3 +405,55 @@ pub fn frozenRead<T>(a: &FrozenArena<T>, h: Handle<T>, f: (&T) => void): void
 
 Borrow the value at `h` instead of copying it. Prefer this to `get` when T
 owns heap storage, since `get` hands back a copy.
+
+### `GrowOnlyArena.alloc`
+
+```milo
+fn GrowOnlyArena.alloc(self: &mut GrowOnlyArena, val: T): Handle<T>
+```
+
+Append a value and return a handle to it. The only mutating operation this
+tier has: nothing here frees, clears or recycles.
+
+### `GrowOnlyArena.freeze`
+
+```milo
+fn GrowOnlyArena.freeze(self: GrowOnlyArena): FrozenArena<T>
+```
+
+Building is over: give up `alloc` too. Cannot fail, because this tier never
+freed anything.
+
+### `GrowOnlyArena.get`
+
+```milo
+fn GrowOnlyArena.get(self: &GrowOnlyArena, h: Handle<T>): T
+```
+
+The value at `h`, with no Option to unwrap. Infallible for any handle this
+arena or the one it was sealed from minted: no slot is ever recycled, so a
+handle cannot come to name something else.
+
+### `GrowOnlyArena.holds`
+
+```milo
+fn GrowOnlyArena.holds(self: &GrowOnlyArena, h: Handle<T>): bool
+```
+
+Whether `h` names a slot here. Branch on this for a handle that might be foreign.
+
+### `GrowOnlyArena.len`
+
+```milo
+fn GrowOnlyArena.len(self: &GrowOnlyArena): i64
+```
+
+Slots held; every one is live.
+
+### `GrowOnlyArena.read`
+
+```milo
+fn GrowOnlyArena.read(self: &GrowOnlyArena, h: Handle<T>, f: (&T) => void): void
+```
+
+Borrow rather than copy. Prefer this when T owns heap storage.

@@ -2833,6 +2833,7 @@ A conforming implementation shall accept this program, and running it shall writ
 - `after growth root still resolves: root`
 - `leaf added later: leaf`
 - `len=3`
+- `mutated: leaf-renamed!`
 - `foreign=false`
 - `refused: freed`
 - `frozen still resolves: root`

@@ -450,6 +450,14 @@ fn GrowOnlyArena.len(self: &GrowOnlyArena): i64
 
 Slots held; every one is live.
 
+### `GrowOnlyArena.modifyMut`
+
+```milo
+fn GrowOnlyArena.modifyMut(self: &mut GrowOnlyArena, h: Handle<T>, f: (&mut T) => void): void
+```
+
+Mutate the value at `h` in place, without copying it out and back.
+
 ### `GrowOnlyArena.read`
 
 ```milo
@@ -457,3 +465,16 @@ fn GrowOnlyArena.read(self: &GrowOnlyArena, h: Handle<T>, f: (&T) => void): void
 ```
 
 Borrow rather than copy. Prefer this when T owns heap storage.
+
+### `GrowOnlyArena.set`
+
+```milo
+fn GrowOnlyArena.set(self: &mut GrowOnlyArena, h: Handle<T>, val: T): void
+```
+
+Overwrite the value at `h`.
+
+Mutating a slot's CONTENTS is not what makes a handle stale — only recycling a
+slot is, and this tier cannot recycle. So a graph whose nodes keep changing is
+exactly the shape that belongs here, and locking it out would have left the tier
+usable only by data that never moves.

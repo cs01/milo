@@ -482,6 +482,27 @@ impl GrowOnlyArena<T> {
         return copied!
     }
 
+    // Overwrite the value at `h`.
+    //
+    // Mutating a slot's CONTENTS is not what makes a handle stale — only recycling a
+    // slot is, and this tier cannot recycle. So a graph whose nodes keep changing is
+    // exactly the shape that belongs here, and locking it out would have left the tier
+    // usable only by data that never moves.
+    fn set(self: &mut Self, h: Handle<T>, val: T): void {
+        assert(h.arenaId == self.id, "grow-only arena: handle was minted by a different arena")
+        let idx = h.index as i64
+        assert(idx >= 0 && idx < self.data.len, "grow-only arena: handle index out of range")
+        self.data[idx] = val
+    }
+
+    // Mutate the value at `h` in place, without copying it out and back.
+    fn modifyMut(self: &mut Self, h: Handle<T>, f: (&mut T) => void): void {
+        assert(h.arenaId == self.id, "grow-only arena: handle was minted by a different arena")
+        let idx = h.index as i64
+        assert(idx >= 0 && idx < self.data.len, "grow-only arena: handle index out of range")
+        f(self.data[idx])
+    }
+
     // Borrow rather than copy. Prefer this when T owns heap storage.
     fn read(self: &Self, h: Handle<T>, f: (&T) => void): void {
         assert(h.arenaId == self.id, "grow-only arena: handle was minted by a different arena")

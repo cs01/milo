@@ -14,7 +14,7 @@ Let's start with regular closures.
 The simplest closure is a one-liner. The syntax is `(params) => expression` — the return value is the expression itself, no `return` needed.
 
 ```milo
-fn apply(f: fn(i32): i32, x: i32): i32 {
+fn apply(f: (i32) => i32, x: i32): i32 {
     return f(x)
 }
 
@@ -26,6 +26,10 @@ let result = apply((x: i32) => x * 2, 21)   // 42
 When you need more than one line, use a block body with curly braces. You must `return` explicitly.
 
 ```milo
+fn apply(f: (i32) => i32, x: i32): i32 {
+    return f(x)
+}
+
 let result = apply((x: i32): i32 => {
     let doubled = x * 2
     return doubled + 1
@@ -46,7 +50,7 @@ print(inc(5))   // 6
 Closures can read and write variables from the enclosing scope. Regular closures capture by reference, so mutations inside the closure are visible outside.
 
 ```milo
-fn callIt(f: fn(): void) {
+fn callIt(f: () => void) {
     f()
 }
 
@@ -88,10 +92,10 @@ let doubled = nums.map((n) => n * 2)
 let evenSquares = nums.filter((n) => n % 2 == 0).map((n) => n * n)
 ```
 
-Closures also work well as callbacks. Any function that accepts a `fn(...): ...` parameter can take a closure.
+Closures also work well as callbacks. Any function that accepts a `(...) => ...` parameter can take a closure.
 
 ```milo
-fn doTwice(f: fn(): void) {
+fn doTwice(f: () => void) {
     f()
     f()
 }

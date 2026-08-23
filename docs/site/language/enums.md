@@ -21,11 +21,17 @@ let s = Shape.Circle(3.14)
 Use `match` to branch on an enum's variant. The compiler checks that you've covered every case -- leave one out and you get a compile error, not a runtime bug.
 
 ```milo
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Point,
+}
+
 fn area(s: Shape): f64 {
     match s {
-        Shape.Circle(r)  => 3.14159 * r * r
-        Shape.Rect(w, h) => w * h
-        Shape.Point      => 0.0
+        Shape.Circle(r)  => { return 3.14159 * r * r }
+        Shape.Rect(w, h) => { return w * h }
+        Shape.Point      => { return 0.0 }
     }
 }
 ```
@@ -33,9 +39,16 @@ fn area(s: Shape): f64 {
 When you don't need to handle every variant individually, use `_` as a catch-all wildcard.
 
 ```milo
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Point,
+}
+
+let s = Shape.Circle(3.14)
 match s {
-    Shape.Circle(r) => print("circle")
-    _ => print("something else")
+    Shape.Circle(r) => { print("circle") }
+    _ => { print("something else") }
 }
 ```
 
@@ -43,7 +56,9 @@ match s {
 
 Enums can be generic, letting the variant data vary by type parameter.
 
-```milo
+```milo skip
+// Illustrative only: Option and Result are builtins, so this exact source is
+// rejected with "'Option' is a builtin enum and cannot be redeclared".
 enum Option<T> {
     Some(T),
     None,

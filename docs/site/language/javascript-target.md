@@ -33,7 +33,7 @@ The JS backend targets **pure computation plus stdout**. Supported:
 - `Result` / `Option` / `?`
 - `match`, `if let`, `let else`
 - contracts (`requires` / `ensures`) — lowered to runtime assertions
-- integer arithmetic with correct width and wrapping, bitwise and shift ops
+- integer arithmetic with correct width and **overflow trapping**, matching the native backend, plus bitwise and shift ops
 
 ## What does not run
 

@@ -66,6 +66,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | [`std/runtime`](runtime) | `Task.spawn`, `Promise` / `Promise.blocking`, green scheduler |
 | [`std/event`](event) | kqueue/epoll/IOCP readiness polling — the layer `std/runtime` drives |
 | [`std/sync`](sync) | `Channel`, `WaitGroup`, `AtomicI64`, `AtomicBool` — all method-based |
+| [`std/shard`](shard) | `parallelMap`, `shatter` — divide a buffer's ownership across cores, no copy, nothing shared |
 
 ## Database & Network
 
@@ -79,6 +80,7 @@ Most utilities are **namespaced**: call a static on the namespace (`Path.join`, 
 | Module | What it provides |
 |--------|-----------------|
 | [`std/string`](string) | String **methods** — `s.contains`, `s.split`, `s.replace`, `s.trim`, case conversion |
+| [`std/seal`](seal) | `Sealed` — freeze a string so stored `Span`s can never be invalidated |
 | [`std/fmt`](fmt) | Template formatting (`fmt1`–`fmt4`), `padLeft`/`padRight`, `join` |
 | [`std/strconv`](strconv) | `parseInt`, `parseFloat`, `parseBool`, radix conversions, `formatFloat`, `quoteString`/`unquoteString` |
 | [`std/unicode`](unicode) | Character classification — `asciiIsDigit`, `asciiIsAlpha`, `asciiToLower` |

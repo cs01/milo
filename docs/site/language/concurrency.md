@@ -397,8 +397,7 @@ fn main(): i32 {
 ## Sharing State Across Parallel Workers
 
 Green tasks never run in parallel, so plain sequencing is enough between them. Only
-`Promise.blocking` workers run at the same time, and there are three ways to get data to
-them, in the order you should reach for them:
+`Promise.blocking` workers run at the same time. The ways to get data to them, best first:
 
 | You want to | Use | What crosses the thread |
 |-------------|-----|-------------------------|

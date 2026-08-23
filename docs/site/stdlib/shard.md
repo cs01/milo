@@ -49,7 +49,7 @@ sharing anything. The ergonomics and the safety property are the same choice.
 
 ## Why this is safe
 
-Three things, none of them a new language rule:
+The three things that make it safe are all rules Milo already had:
 
 - **`shatter` consumes the `Vec`.** After it there is no binding through which the buffer can be reached except the windows. Touching the original is `error: use of moved variable`.
 - **The windows are disjoint by construction.** Window `i` covers exactly `[i*chunk, (i+1)*chunk)`, computed inside `windows()`, never supplied by you.

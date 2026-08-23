@@ -29,7 +29,7 @@ pub fn main(): i32 {
 
 ## Why the offsets stay valid
 
-Two things are true at once, and together they are the whole guarantee:
+The whole guarantee is these two facts holding at once:
 
 - `seal` **consumes** the buffer. The old binding is moved, so the compiler rejects any later use of it. `buf.push('x')` after the seal does not compile.
 - `Sealed` **has no mutating method**. There is no `push`, no `set`, no `resize`. Mutation is not rejected by a check that could have a hole in it; it is absent from the type.

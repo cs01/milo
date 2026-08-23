@@ -17,7 +17,7 @@
 //     ... hand each window to a worker by move, transform in place ...
 //     let back = owner.weld(returned)! // the original Vec, same allocation
 //
-// Three things make that safe, and none of them is a new language rule:
+// The three things that make that safe are all rules Milo already had:
 //
 //   - `shatter` consumes the Vec, so after it there is no binding through which
 //     the buffer can be reached except the windows.
@@ -283,7 +283,7 @@ pub fn parallelMap<T>(v: Vec<T>, workers: i64, f: (Shard<T>) => Shard<T>): Resul
 // the copy would eat the parallelism it was bought for.
 //
 // So this is the read-only half: the owner keeps the string, the windows are views,
-// and nothing mutates. Two things follow from nobody writing:
+// and nothing mutates. The two consequences of nobody writing are:
 //
 //   - windows may OVERLAP. A literal that straddles a boundary is missed by disjoint
 //     windows, and the usual fix is to scan the seams afterwards. Overlap is sound

@@ -405,7 +405,7 @@ Green tasks never run in parallel, so plain sequencing is enough between them. O
 | Return a result, or stream work out | `Channel`, `Promise` | ownership |
 | Share one counter or flag | `AtomicI64` and friends ([`std/sync`](/stdlib/sync)) | one cell |
 
-There is no mutex in std, because the first two rows do not need one.
+std exposes no `Mutex` for you to hold. `Channel` owns one internally (a pthread mutex and two condvars), audited once, so a producer/consumer queue costs you no lock at the call site.
 
 ### Divide the Data, Share Nothing
 

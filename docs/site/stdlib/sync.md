@@ -6,7 +6,9 @@ Channel, wait-group, once, and atomic primitives for coordinating green tasks an
 from "std/sync" import { Channel, WaitGroup, Once, AtomicI64, AtomicI32, AtomicU64, AtomicBool }
 ```
 
-There is no `Mutex` or `RwLock`: green tasks never run in parallel, and parallel `Promise.blocking` workers do not share. They divide ownership with [`std/shard`](shard) (`parallelMap` over a big buffer), pass it through channels, or share a single lock-free cell through an atomic. See [Concurrency](/language/concurrency).
+There is no `Mutex` or `RwLock` for you to hold. The locking still happens: `Channel` is a shared bounded queue over a pthread mutex and two condition variables, written once here and audited behind `unsafe impl Send`/`Sync`, so producers and consumers coordinate without a lock at your call sites. What crosses the boundary is ownership, since `send` moves a value in and `recv` moves it out. `Channel<T>` is `Send` only when `T` is.
+
+When several cores transform one large buffer, divide its ownership with [`std/shard`](shard) rather than queueing the elements. See [Concurrency](/language/concurrency).
 
 Every type here is a reference-counted handle. `.clone()` gives another task or worker its own owner, and the shared object frees itself when the last owner drops — there is no `destroy`.
 

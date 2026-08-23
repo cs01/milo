@@ -1171,6 +1171,102 @@ pub fn resolveStructName(cg: &Cgen, base: &string): string {
 // A milo type string that still carries generic args ("Result<i32,string>")
 // resolves to the registered mangled decl. Vec/HashMap/Heap keep their
 // built-in lowering; everything else falls through unchanged.
+// The built-in type names, spelled out. A capitalised unknown is a type parameter, not a
+// struct, so no shape heuristic can stand in for this list.
+pub fn isPrimitiveTyName(t: &string): bool {
+    if t == "i8" || t == "i16" || t == "i32" || t == "i64" {
+        return true
+    }
+    if t == "u8" || t == "u16" || t == "u32" || t == "u64" {
+        return true
+    }
+    if t == "f32" || t == "f64" || t == "float" || t == "double" {
+        return true
+    }
+    if t == "bool" || t == "string" || t == "String" || t == "char" {
+        return true
+    }
+    if t == "void" || t == "ptr" || t == "fn" {
+        return true
+    }
+    return false
+}
+
+// Does every type argument in a bracketed name denote something concrete?
+//
+// The discriminator between a generic TEMPLATE and a broken INSTANTIATION. `Wrapper<T>`
+// carries a type parameter: `T` names no primitive and no registered decl, so the name is
+// a template form and legitimately unregistered. `Option<Vec<u8>>` carries only concrete
+// arguments, so if nothing is registered under it the backend rebuilt a name the checker
+// never made — the bug astTypeStr's own comment warns about.
+//
+// Scans at bracket depth 1 so a nested `Vec<u8>` is examined as one argument.
+pub fn typeArgsAllConcrete(cg: &Cgen, s: &string): bool {
+    var depth: i64 = 0
+    var cur = ""
+    var seen = false
+    var i: i64 = 0
+    while i < s.len {
+        let c = s[i]
+        if c == 60 {
+            depth = depth + 1
+            if depth == 1 {
+                i = i + 1
+                continue
+            }
+        }
+        if c == 62 {
+            depth = depth - 1
+            if depth == 0 {
+                if cur.len > 0 && !argIsConcrete(cg, cur) {
+                    return false
+                }
+                seen = true
+                cur = ""
+                i = i + 1
+                continue
+            }
+        }
+        if c == 44 && depth == 1 {
+            if cur.len > 0 && !argIsConcrete(cg, cur) {
+                return false
+            }
+            cur = ""
+            i = i + 1
+            continue
+        }
+        if depth >= 1 {
+            cur = cur + s[i..i + 1].clone()
+        }
+        i = i + 1
+    }
+    return seen
+}
+
+// A single type argument names something the backend can point at.
+fn argIsConcrete(cg: &Cgen, a: &string): bool {
+    var bare = a.clone()
+    while bare.len > 0 && bare[0] == 42 {
+        bare = bare[1..bare.len].clone()
+    }
+    // A nested generic is concrete exactly when its own arguments are.
+    for i in 0..bare.len {
+        if bare[i] == 60 {
+            return typeArgsAllConcrete(cg, bare)
+        }
+    }
+    // Deliberately NOT llType: it maps any capitalised unknown to "%Name", so `T` came
+    // back as "%T" and read as concrete — which is exactly backwards, since a bare
+    // capital is the shape of a type parameter.
+    if isPrimitiveTyName(bare) {
+        return true
+    }
+    if cg.structs.contains(bare) || cg.enums.contains(bare) || cg.typeAliases.contains(bare) {
+        return true
+    }
+    return false
+}
+
 pub fn resolveTyStr(cg: &Cgen, s: &string): string {
     // Vec/HashMap keep their built-in lowering, but their element types must still
     // mangle (Vec<Handle<Node>> → Vec<Handle_Node>) so unwrapVec/genSizeOf don't
@@ -1264,6 +1360,37 @@ pub fn resolveTyStr(cg: &Cgen, s: &string): string {
     let st = resolveStructName(cg, base)
     if st != base {
         return st
+    }
+    // Everything above failed, and `s` still carries a '<' — a bare primitive left
+    // through the lt <= 0 branch far above, and Vec/HashMap returned before that. So this
+    // is a generic instantiation that matches nothing the checker registered: not a
+    // mangled decl, not Result sugar, not an enum, not a struct.
+    //
+    // Returning it unchanged is how `Option<Vec<u8>>` used to travel onward as a type
+    // name nothing declares, surfacing much later as "unsupported method 'isSome' on
+    // %Option<Vec<u8>>" or as invalid LLVM — a failure whose message points nowhere near
+    // the reconstruction that caused it. The comment on astTypeStr describes this exact
+    // bug and warns that any future attempt must consult the checker's mangling rather
+    // than reconstruct it. This is that warning made enforceable.
+    // A template form (`Wrapper<T>`) is legitimately unregistered — its type parameter is
+    // still unbound, and monomorphization registers the instantiations, not the template.
+    // A name whose arguments are ALL concrete is a different animal: something should be
+    // registered under it, and nothing is.
+    // "fn" and "fn:<ret>" are astTypeStr's own encoding for a function type, carried so an
+    // indirect closure call can recover R. They are markers, not declarations, so nothing
+    // is ever registered under them and their type arguments belong to the return type.
+    var isFnMarker = false
+    if s.len >= 3 && s[0..3].clone() == "fn:" {
+        isFnMarker = true
+    }
+    if s == "fn" {
+        isFnMarker = true
+    }
+    if !isFnMarker && typeArgsAllConcrete(cg, s) {
+        eprint("internal error: '" + s.clone() + "' resolves to no registered type — the backend rebuilt a name the checker never registered")
+        unsafe {
+            exit(1)
+        }
     }
     return s.clone()
 }

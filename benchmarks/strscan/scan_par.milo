@@ -41,20 +41,17 @@ pub fn main(): i32 {
     }
     let needle: string = "milo"
     let content = readFile(path)!
-    let total = content.len
 
     let t0 = epochMillis()
     var owner = shatterStr(content, workers)
-    let chunk = total / owner.count()
     var windows = owner.windows(needle.len - 1)
     var ps: Vec<Promise<i64>> = Vec.new()
     while windows.len > 0 {
         let w = windows.pop()!
-        let idx = w.index()
-        var own = chunk
-        if idx == workers - 1 {
-            own = total - idx * chunk
-        }
+        // The window knows its own pre-overlap range. Recomputing it here meant
+        // repeating the divider's arithmetic, including the last window's uneven
+        // remainder, and getting that wrong loses or double-counts matches silently.
+        let own = w.ownLen()
         // Each worker needs its OWN needle: the closure takes its captures with it,
         // so a single shared one would be gone after the first iteration. The compiler
         // rejects the shared version outright now.

@@ -99,6 +99,11 @@ Keep the owner alive until `weld`. A window is a pointer into the owner's buffer
 
 `weld` checks what it can: every window must carry this shatter's identity and the set must cover the buffer exactly. A missing window means some worker may still be holding a pointer, so `weld` refuses rather than handing the `Vec` back.
 
+`windows()` hands its set out once, and a second call aborts naming the double call. A
+second set would be a second batch of pointers into the same storage, which is the alias
+this design exists to prevent; and since `windows()` only borrows the owner, a refusal
+would have nothing to give back and the caller nothing to do with it.
+
 A refusal does not cost you the buffer. `weld` consumes both the owner and the windows, so an error that was only a message would destroy the very thing this module exists to avoid copying. Instead it returns a `WeldRejected<T>` holding the owner (`shards`), the windows exactly as you handed them in (`returned`), a `reason` you can branch on and the `index` of the offending window. Fix the set and weld again.
 
 ```milo
@@ -282,7 +287,24 @@ string across workers rather than an escape hatch.
 
 Because nothing writes, its windows may overlap: `windows(needle.len - 1)` finds a match
 straddling a boundary without a second pass over the seams. Count only matches that
-BEGIN inside a window's own range, or two neighbours will both claim one.
+BEGIN inside a window's own range, which is `w.ownLen()`, the window's length before the
+overlap was added. Ask it rather than recomputing `total / count`: the last window takes
+the remainder of an uneven division, so the derived figure is wrong for exactly one
+window and the miscount is silent.
+
+`weld` on this side asks for the same completeness the writing side does: every window it
+handed out must come back exactly once, by `index`, and must carry this shatter's
+identity. What it does *not* ask is that the windows cover the bytes disjointly, because
+overlapping ranges share bytes by design and a coverage-of-bytes test would reject the
+recommended usage.
+
+Read-only does not exempt it from that check. The owner is the only thing keeping the
+string alive, so handing it back while a window is still out lets you mutate or drop a
+buffer a live `StrShard` still points into. Overlap is sound because reads do not race;
+a dangling read is not sound at all. A refusal returns a `StrWeldRejected` holding the
+string's owner (`shards`), the windows as you handed them in (`returned`), a `reason`
+and an `index`, so fixing the set costs nothing. An owner that never called `windows()`
+has nothing outstanding and gets its string back with `reclaim()`.
 
 See `benchmarks/strscan/` for the worked example: 51.3 MiB, 35 ms sequential against
 10 ms on eight windows, with the runner failing if any windowing disagrees with the

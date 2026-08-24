@@ -13,7 +13,7 @@
 //
 //     var data: Vec<f64> = Vec.filled(n, 1.0)
 //     var owner = shatter(data, 4)     // `data` is moved; nothing else can reach it
-//     let windows = owner.windows()!   // 4 disjoint Shard<f64>
+//     let windows = owner.windows()    // 4 disjoint Shard<f64>, once
 //     ... hand each window to a worker by move, transform in place ...
 //     let back = owner.weld(returned)! // the original Vec, same allocation
 //
@@ -183,18 +183,21 @@ var nextShatterId: i64 = 1
 //
 // `n` is clamped to at least 1 and at most the element count, so a caller asking
 // for more windows than elements gets one window per element rather than a pile
-// of empty ones aliasing the same address.
+// of empty ones aliasing the same address. An EMPTY Vec is the case that has to
+// clamp up rather than down: `min(n, v.len)` would be 0 there, and a count of 0
+// divides by zero in `windows`, so the lower bound wins and an empty buffer is
+// one empty window.
 pub fn shatter<T>(v: Vec<T>, n: i64): Shards<T> {
     var id: i64 = 0
     unsafe {
         id = _atomicAddI64((nextShatterId.addrOf()) as *u8, 1)
     }
     var wanted = n
+    if wanted > v.len {
+        wanted = v.len
+    }
     if wanted < 1 {
         wanted = 1
-    }
-    if v.len > 0 && wanted > v.len {
-        wanted = v.len
     }
     var s: Shards<T> = Shards {
         buf: v,
@@ -216,14 +219,18 @@ impl Shards<T> {
         return self.buf.len
     }
 
-    // ESCAPE HATCH (see `shatter`). The windows, once. A second call returns an empty
-    // Vec rather than a second set of pointers to the same storage, which would hand
-    // out aliases and defeat the whole design.
+    // ESCAPE HATCH (see `shatter`). The windows, once.
+    //
+    // A second call aborts rather than returning anything. It cannot hand out a
+    // second set of pointers to the same storage without creating the aliases the
+    // whole design exists to prevent, and it cannot refuse into a `WeldRejected`
+    // either: this borrows the owner instead of consuming it, so there is nothing
+    // of the caller's to hand back and nothing a caller could do about it except
+    // stop asking twice. Returning an empty Vec used to defer the report to `weld`,
+    // which then blamed the wrong step ("expected 4 windows, got 0").
     fn windows(self: &mut Self): Vec<Shard<T>> {
+        assert(!self.handedOut, "shard: windows() called twice on one shatter; the first set is still outstanding")
         var out: Vec<Shard<T>> = Vec.new()
-        if self.handedOut {
-            return out
-        }
         self.handedOut = true
         let total = self.buf.len
         let chunk = total / self.count
@@ -474,15 +481,21 @@ pub fn parallelMapWith<T, S>(v: Vec<T>, windows: i64, states: Vec<S>, f: (Shard<
 //     here precisely because these are reads, so `windows(overlap)` lets a scanner
 //     ask for `needle.len - 1` bytes of slack and stop thinking about seams. Mind
 //     that a match inside the overlap is found by BOTH neighbours, so a counter must
-//     ignore hits that begin at or past its own `len` minus the overlap.
-//   - `weld` is only about giving the string back. There is no coverage obligation
-//     the way there is for the writing side, but the identity check stays, because
-//     welding a window from another shatter still means the caller lost track.
+//     ignore hits that begin at or past its own `ownLen()`. Ask the window; `len`
+//     minus the overlap is wrong for the last one, which was never extended.
+//   - overlap removes the COVERAGE-OF-BYTES check, not the liveness one. Two windows
+//     legally sharing bytes means `weld` cannot ask which window owns which byte, so
+//     it does not. It still asks that every window it handed out has come back
+//     exactly once, by `index`, which stays unique per window however much the ranges
+//     overlap. That check is about lifetime, not about writes: a returned `string`
+//     can be mutated or dropped while a live StrShard still points into it, so a
+//     window that never came home is the same dangling pointer the Vec side refuses.
 
 @noCopy
 pub struct StrShard {
     base: *u8,
     len: i64,
+    own: i64,
     start: i64,
     shatterId: i64,
     index: i64,
@@ -492,6 +505,18 @@ impl StrShard {
     // Bytes in this window, including any overlap it was given.
     fn len(self: &Self): i64 {
         return self.len
+    }
+
+    // Bytes in this window BEFORE the overlap was added: the range no other window
+    // owns. A scanner must count only matches beginning below this, or the two
+    // neighbours that can both see a match in the overlap will both count it.
+    //
+    // It is a field rather than something the caller derives because the last
+    // window is the odd one out: it takes the remainder of an uneven division, so
+    // `total / count` is wrong for exactly one window and a caller that re-derives
+    // it silently miscounts there instead of failing.
+    fn ownLen(self: &Self): i64 {
+        return self.own
     }
 
     // Where this window begins in the original string.
@@ -555,17 +580,32 @@ pub struct StrWeldRejected {
     shards: StrShards,
     // The windows exactly as they were handed in.
     returned: Vec<StrShard>,
-    // Always `Foreign` today: reads have no coverage obligation, so identity is
-    // the only thing this side can refuse over.
+    // `Foreign`, `CountMismatch` or `NotCovered`, the same three the writing side
+    // refuses over. `NoWorkers` belongs to `parallelMapWith` and cannot appear here.
     reason: WeldReason,
-    // The window that came from another shatter.
+    // The window the refusal is about, or -1 when no single window is at fault.
     index: i64,
 }
 
 impl StrWeldRejected {
     // A sentence for a human; `reason` and `index` are the machine-readable form.
     fn message(self: &Self): string {
-        return "weld: window " + self.index.toString() + " did not come from this shatter"
+        match self.reason {
+            WeldReason.CountMismatch => {
+                return "weld: expected " + self.shards.count.toString() + " windows, got " + self.returned.len.toString()
+            }
+            WeldReason.NotCovered => {
+                return "weld: window " + self.index.toString() + " came back twice, or never came back"
+            }
+            WeldReason.Foreign => {
+                return "weld: window " + self.index.toString() + " did not come from this shatter"
+            }
+            // Unreachable: nothing on this side constructs `NoWorkers`. The arm
+            // exists because the match must be exhaustive over the shared enum.
+            WeldReason.NoWorkers => {
+                return "weld: no workers"
+            }
+        }
     }
 }
 
@@ -580,11 +620,11 @@ pub fn shatterStr(s: string, n: i64): StrShards {
         id = _atomicAddI64((nextShatterId.addrOf()) as *u8, 1)
     }
     var wanted = n
+    if wanted > s.len {
+        wanted = s.len
+    }
     if wanted < 1 {
         wanted = 1
-    }
-    if s.len > 0 && wanted > s.len {
-        wanted = s.len
     }
     var out: StrShards = StrShards {
         buf: s,
@@ -609,11 +649,14 @@ impl StrShards {
     // The windows, once. `overlap` extends each window that far into the next, so a
     // scanner looking for an `m`-byte needle passes `m - 1` and never has to stitch
     // the seams. Pass 0 for exactly disjoint windows.
+    //
+    // A second call aborts, for the reason the writing side's `windows` does: this
+    // borrows the owner rather than consuming it, so a refusal has nothing to hand
+    // back, and a silent empty Vec only moved the report to `weld`, which then
+    // named the wrong step.
     fn windows(self: &mut Self, overlap: i64): Vec<StrShard> {
+        assert(!self.handedOut, "shard: windows() called twice on one shatter; the first set is still outstanding")
         var out: Vec<StrShard> = Vec.new()
-        if self.handedOut {
-            return out
-        }
         self.handedOut = true
         let total = self.buf.len
         let chunk = total / self.count
@@ -633,6 +676,7 @@ impl StrShards {
                 var sh: StrShard = StrShard {
                     base: ((p as i64) + lo) as *u8,
                     len: end - lo,
+                    own: hi - lo,
                     start: lo,
                     shatterId: self.shatterId,
                     index: i,
@@ -644,22 +688,80 @@ impl StrShards {
         return out
     }
 
-    // Give the string back. Windows are reads, so unlike the writing side there is no
-    // coverage obligation; the identity check stays because a foreign window means the
-    // caller has lost track of which shatter it is holding.
+    // Give the string back, once every window has come home.
+    //
+    // What is checked and what is not: the windows must all carry this shatter's
+    // identity, and every `index` this shatter handed out must appear exactly once.
+    // What is NOT checked is that the returned windows cover the bytes disjointly,
+    // because `windows(overlap)` hands out ranges that deliberately share bytes and
+    // a coverage-of-bytes test would reject the module's own recommended usage.
+    //
+    // The count and the seen-set are not about writes. This owner is the only thing
+    // keeping the string alive: hand it back while a window is still out and the
+    // caller can mutate or drop a buffer that a live StrShard still points into,
+    // which is the use-after-free the writing side refuses for the same reason.
+    // Reads make overlap sound; they do not make a dangling read sound.
     fn weld(self: Self, returned: Vec<StrShard>): Result<string, StrWeldRejected> {
+        var reason: WeldReason = WeldReason.CountMismatch
         var bad: i64 = -1
-        for w in returned {
-            if w.shatterId != self.shatterId {
-                bad = w.index
-                break
+        var ok = returned.len == self.count
+        if ok {
+            var seen: Vec<bool> = Vec.new()
+            var i: i64 = 0
+            while i < self.count {
+                seen.push(false)
+                i = i + 1
+            }
+            // Verdict first, rejection built once at the bottom: returning from
+            // inside the loop would move `returned` while the loop borrows it.
+            for w in returned {
+                if w.shatterId != self.shatterId || w.index < 0 || w.index >= self.count {
+                    reason = WeldReason.Foreign
+                    bad = w.index
+                    ok = false
+                    break
+                }
+                if seen[w.index] {
+                    reason = WeldReason.NotCovered
+                    bad = w.index
+                    ok = false
+                    break
+                }
+                seen[w.index] = true
+            }
+            if ok {
+                var j: i64 = 0
+                while j < self.count {
+                    if !seen[j] {
+                        reason = WeldReason.NotCovered
+                        bad = j
+                        ok = false
+                        j = self.count
+                    } else {
+                        j = j + 1
+                    }
+                }
             }
         }
-        if bad >= 0 {
+        if !ok {
             var r: StrWeldRejected = StrWeldRejected {
-                shards: self, returned: returned, reason: WeldReason.Foreign, index: bad
+                shards: self, returned: returned, reason: reason, index: bad
             }
             return Result.Err(r)
+        }
+        return Result.Ok(self.buf)
+    }
+
+    // Take the string back from an owner that never handed a window out.
+    //
+    // `weld` now requires the full set, so an owner that was shattered and then
+    // abandoned before dividing had no route home at all: it would refuse an empty
+    // Vec on the count. `handedOut` marks the moment a pointer into the string
+    // escaped, and before that moment there is nothing to wait for. Same shape as
+    // the writing side's `reclaim`.
+    fn reclaim(self: Self): Result<string, StrShards> {
+        if self.handedOut {
+            return Result.Err(self)
         }
         return Result.Ok(self.buf)
     }

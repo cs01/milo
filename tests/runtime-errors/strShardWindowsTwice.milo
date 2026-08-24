@@ -1,0 +1,16 @@
+// The reading side has the same guard as the writing side: overlap makes a second
+// set of views harmless to read, but `weld` now requires every window it handed out
+// to come back by index, and a second set would make that set unsatisfiable.
+// @runtime-error: windows() called twice
+from "std/shard" import {
+    shatterStr
+}
+
+pub fn main(): i32 {
+    var owner = shatterStr("milo milo milo".clone(), 2)
+    let first = owner.windows(3)
+    print("first: " + first.len.toString())
+    let second = owner.windows(3)
+    print("WRONG: second: " + second.len.toString())
+    return 0
+}

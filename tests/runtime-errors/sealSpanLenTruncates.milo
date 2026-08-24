@@ -1,0 +1,22 @@
+// @runtime-error: span length must be in 0..2GB
+
+// Span.len is an i32 and `len as i32` does not trap, so a length past 2^32 used to wrap
+// into a small positive number: spanOf(0, 2^32 + 4) handed back a valid-looking 4-byte
+// span that _bufferId matched and holds() accepted. Wrong, plausible, and silent, which
+// is exactly the failure the brand exists to abolish, so the narrowing is checked here
+// rather than discovered downstream.
+from "std/seal" import {
+    Sealed, Span, seal
+}
+
+// Through a function so the length is not a constant the optimiser can fold.
+fn wideLen(base: i64): i64 {
+    return base + 4
+}
+
+pub fn main(): i32 {
+    let a = seal("hello world aaaa")
+    let sp = a.spanOf(0, wideLen(4294967296))
+    print(a.text(sp))
+    return 0
+}

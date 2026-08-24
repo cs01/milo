@@ -123,6 +123,62 @@ pub enum WeldReason {
     NoWorkers,
 }
 
+// The verdict of a weld check, so both welds share one implementation of it. To this
+// logic a window is an id and an index, and both sides have those, so a second copy
+// would only be somewhere for the two to drift apart. They already did once: the
+// string side shipped with the count and coverage checks missing, justified by a
+// comment about overlap that applies to neither of them.
+struct WeldVerdict {
+    ok: bool,
+    reason: WeldReason,
+    bad: i64,
+}
+
+// `ids` and `indices` are the windows handed back, paired by position. Overlap is
+// irrelevant here: `index` stays unique per window whether or not the byte ranges
+// overlap, so the same coverage argument holds for reading and writing windows.
+fn weldVerdict(count: i64, shatterId: i64, ids: &Vec<i64>, indices: &Vec<i64>): WeldVerdict {
+    if ids.len != count {
+        return WeldVerdict {
+            ok: false, reason: WeldReason.CountMismatch, bad: -1
+        }
+    }
+    var seen: Vec<bool> = Vec.new()
+    var i: i64 = 0
+    while i < count {
+        seen.push(false)
+        i = i + 1
+    }
+    var k: i64 = 0
+    while k < ids.len {
+        let idx = indices[k]
+        if ids[k] != shatterId || idx < 0 || idx >= count {
+            return WeldVerdict {
+                ok: false, reason: WeldReason.Foreign, bad: idx
+            }
+        }
+        if seen[idx] {
+            return WeldVerdict {
+                ok: false, reason: WeldReason.NotCovered, bad: idx
+            }
+        }
+        seen[idx] = true
+        k = k + 1
+    }
+    var j: i64 = 0
+    while j < count {
+        if !seen[j] {
+            return WeldVerdict {
+                ok: false, reason: WeldReason.NotCovered, bad: j
+            }
+        }
+        j = j + 1
+    }
+    return WeldVerdict {
+        ok: true, reason: WeldReason.CountMismatch, bad: -1
+    }
+}
+
 // Owns the buffer while it is divided. Hold this until weld.
 pub struct Shards<T> {
     buf: Vec<T>,
@@ -269,51 +325,16 @@ impl Shards<T> {
     // A refusal costs nothing: the `WeldRejected` hands the owner and every window
     // back, so the caller fixes the set and welds again.
     fn weld(self: Self, returned: Vec<Shard<T>>): Result<Vec<T>, WeldRejected<T>> {
-        var reason: WeldReason = WeldReason.CountMismatch
-        var bad: i64 = -1
-        var ok = returned.len == self.count
-        if ok {
-            var seen: Vec<bool> = Vec.new()
-            var i: i64 = 0
-            while i < self.count {
-                seen.push(false)
-                i = i + 1
-            }
-            // Every check records its verdict and leaves; the rejection is built
-            // once, at the bottom. Returning from inside the loop instead would
-            // mean moving `returned` while the loop still borrows it.
-            for w in returned {
-                if w.shatterId != self.shatterId || w.index < 0 || w.index >= self.count {
-                    reason = WeldReason.Foreign
-                    bad = w.index
-                    ok = false
-                    break
-                }
-                if seen[w.index] {
-                    reason = WeldReason.NotCovered
-                    bad = w.index
-                    ok = false
-                    break
-                }
-                seen[w.index] = true
-            }
-            if ok {
-                var j: i64 = 0
-                while j < self.count {
-                    if !seen[j] {
-                        reason = WeldReason.NotCovered
-                        bad = j
-                        ok = false
-                        j = self.count
-                    } else {
-                        j = j + 1
-                    }
-                }
-            }
+        var ids: Vec<i64> = Vec.new()
+        var indices: Vec<i64> = Vec.new()
+        for w in returned {
+            ids.push(w.shatterId)
+            indices.push(w.index)
         }
-        if !ok {
+        let v = weldVerdict(self.count, self.shatterId, ids, indices)
+        if !v.ok {
             var r: WeldRejected<T> = WeldRejected {
-                shards: self, returned: returned, reason: reason, index: bad
+                shards: self, returned: returned, reason: v.reason, index: v.bad
             }
             return Result.Err(r)
         }
@@ -702,50 +723,16 @@ impl StrShards {
     // which is the use-after-free the writing side refuses for the same reason.
     // Reads make overlap sound; they do not make a dangling read sound.
     fn weld(self: Self, returned: Vec<StrShard>): Result<string, StrWeldRejected> {
-        var reason: WeldReason = WeldReason.CountMismatch
-        var bad: i64 = -1
-        var ok = returned.len == self.count
-        if ok {
-            var seen: Vec<bool> = Vec.new()
-            var i: i64 = 0
-            while i < self.count {
-                seen.push(false)
-                i = i + 1
-            }
-            // Verdict first, rejection built once at the bottom: returning from
-            // inside the loop would move `returned` while the loop borrows it.
-            for w in returned {
-                if w.shatterId != self.shatterId || w.index < 0 || w.index >= self.count {
-                    reason = WeldReason.Foreign
-                    bad = w.index
-                    ok = false
-                    break
-                }
-                if seen[w.index] {
-                    reason = WeldReason.NotCovered
-                    bad = w.index
-                    ok = false
-                    break
-                }
-                seen[w.index] = true
-            }
-            if ok {
-                var j: i64 = 0
-                while j < self.count {
-                    if !seen[j] {
-                        reason = WeldReason.NotCovered
-                        bad = j
-                        ok = false
-                        j = self.count
-                    } else {
-                        j = j + 1
-                    }
-                }
-            }
+        var ids: Vec<i64> = Vec.new()
+        var indices: Vec<i64> = Vec.new()
+        for w in returned {
+            ids.push(w.shatterId)
+            indices.push(w.index)
         }
-        if !ok {
+        let v = weldVerdict(self.count, self.shatterId, ids, indices)
+        if !v.ok {
             var r: StrWeldRejected = StrWeldRejected {
-                shards: self, returned: returned, reason: reason, index: bad
+                shards: self, returned: returned, reason: v.reason, index: v.bad
             }
             return Result.Err(r)
         }

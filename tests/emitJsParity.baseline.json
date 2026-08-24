@@ -214,6 +214,7 @@
   "stdoutOrder.milo": "noEmit",
   "strDataPtr.milo": "crash",
   "strShardScan.milo": "noEmit",
+  "strShardWeldCoverage.milo": "noEmit",
   "strconvBoolQuote.milo": "noEmit",
   "stringCstr.milo": "crash",
   "stringIgnoreCase.milo": "crash",

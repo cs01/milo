@@ -48,16 +48,11 @@ pub fn main(): i32 {
     var over = shatterStr(corpus(), 2)
     var ow = over.windows(needle.len - 1)
     var oTotal: i64 = 0
-    var idx: i64 = 0
     for w in ow {
         // Count only matches BEGINNING in this window's own range, or the overlap
-        // would let two neighbours count the same one.
-        var own = 20
-        if w.index() == 1 {
-            own = 20
-        }
-        oTotal = oTotal + countIn(w, needle, own)
-        idx = idx + 1
+        // would let two neighbours count the same one. The window carries that
+        // length, so an uneven last window needs no arithmetic here.
+        oTotal = oTotal + countIn(w, needle, w.ownLen())
     }
     print("overlap finds it: " + oTotal.toString())
 

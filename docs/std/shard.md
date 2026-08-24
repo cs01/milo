@@ -147,9 +147,15 @@ back, so the caller fixes the set and welds again.
 fn Shards.windows(self: &mut Shards): Vec<Shard<T>>
 ```
 
-ESCAPE HATCH (see `shatter`). The windows, once. A second call returns an empty
-Vec rather than a second set of pointers to the same storage, which would hand
-out aliases and defeat the whole design.
+ESCAPE HATCH (see `shatter`). The windows, once.
+
+A second call aborts rather than returning anything. It cannot hand out a
+second set of pointers to the same storage without creating the aliases the
+whole design exists to prevent, and it cannot refuse into a `WeldRejected`
+either: this borrows the owner instead of consuming it, so there is nothing
+of the caller's to hand back and nothing a caller could do about it except
+stop asking twice. Returning an empty Vec used to defer the report to `weld`,
+which then blamed the wrong step ("expected 4 windows, got 0").
 
 ### `shatter`
 
@@ -166,7 +172,10 @@ its storage. O(1): nothing is copied, and the Vec's buffer is untouched.
 
 `n` is clamped to at least 1 and at most the element count, so a caller asking
 for more windows than elements gets one window per element rather than a pile
-of empty ones aliasing the same address.
+of empty ones aliasing the same address. An EMPTY Vec is the case that has to
+clamp up rather than down: `min(n, v.len)` would be 0 there, and a count of 0
+divides by zero in `windows`, so the lower bound wins and an empty buffer is
+one empty window.
 
 ### `shatterStr`
 
@@ -214,6 +223,21 @@ Whether this window's bytes at `i` match `needle`. Bounded by the window, so a
 needle running past the end is simply not a match here; give the window an
 overlap if you need to catch one that straddles the boundary.
 
+### `StrShard.ownLen`
+
+```milo
+fn StrShard.ownLen(self: &StrShard): i64
+```
+
+Bytes in this window BEFORE the overlap was added: the range no other window
+owns. A scanner must count only matches beginning below this, or the two
+neighbours that can both see a match in the overlap will both count it.
+
+It is a field rather than something the caller derives because the last
+window is the odd one out: it takes the remainder of an uneven division, so
+`total / count` is wrong for exactly one window and a caller that re-derives
+it silently miscounts there instead of failing.
+
 ### `StrShard.start`
 
 ```milo
@@ -238,15 +262,39 @@ fn StrShards.len(self: &StrShards): i64
 
 Bytes in the underlying string, across all windows.
 
+### `StrShards.reclaim`
+
+```milo
+fn StrShards.reclaim(self: StrShards): Result<string, StrShards>
+```
+
+Take the string back from an owner that never handed a window out.
+
+`weld` now requires the full set, so an owner that was shattered and then
+abandoned before dividing had no route home at all: it would refuse an empty
+Vec on the count. `handedOut` marks the moment a pointer into the string
+escaped, and before that moment there is nothing to wait for. Same shape as
+the writing side's `reclaim`.
+
 ### `StrShards.weld`
 
 ```milo
 fn StrShards.weld(self: StrShards, returned: Vec<StrShard>): Result<string, StrWeldRejected>
 ```
 
-Give the string back. Windows are reads, so unlike the writing side there is no
-coverage obligation; the identity check stays because a foreign window means the
-caller has lost track of which shatter it is holding.
+Give the string back, once every window has come home.
+
+What is checked and what is not: the windows must all carry this shatter's
+identity, and every `index` this shatter handed out must appear exactly once.
+What is NOT checked is that the returned windows cover the bytes disjointly,
+because `windows(overlap)` hands out ranges that deliberately share bytes and
+a coverage-of-bytes test would reject the module's own recommended usage.
+
+The count and the seen-set are not about writes. This owner is the only thing
+keeping the string alive: hand it back while a window is still out and the
+caller can mutate or drop a buffer that a live StrShard still points into,
+which is the use-after-free the writing side refuses for the same reason.
+Reads make overlap sound; they do not make a dangling read sound.
 
 ### `StrShards.windows`
 
@@ -257,6 +305,11 @@ fn StrShards.windows(self: &mut StrShards, overlap: i64): Vec<StrShard>
 The windows, once. `overlap` extends each window that far into the next, so a
 scanner looking for an `m`-byte needle passes `m - 1` and never has to stitch
 the seams. Pass 0 for exactly disjoint windows.
+
+A second call aborts, for the reason the writing side's `windows` does: this
+borrows the owner rather than consuming it, so a refusal has nothing to hand
+back, and a silent empty Vec only moved the report to `weld`, which then
+named the wrong step.
 
 ### `StrWeldRejected.message`
 

@@ -1,0 +1,21 @@
+// A second `windows()` call is a program bug with no recovery: the first set is out
+// in the world and handing out a second would alias it. It used to return an empty
+// Vec, so the report surfaced two steps later at `weld` as "expected 4 windows, got
+// 0", which blames the weld for what the divider did. Abort where the mistake is.
+// @runtime-error: windows() called twice
+from "std/shard" import {
+    shatter
+}
+
+pub fn main(): i32 {
+    var data: Vec<i64> = Vec.new()
+    for i in 0..8 {
+        data.push(i)
+    }
+    var owner = shatter(data, 4)
+    let first = owner.windows()
+    print("first: " + first.len.toString())
+    let second = owner.windows()
+    print("WRONG: second: " + second.len.toString())
+    return 0
+}

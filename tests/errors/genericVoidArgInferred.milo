@@ -1,0 +1,18 @@
+// The void guard used to live on the annotation path only, so a type argument the
+// checker INFERRED slipped past it: `identity(nothing())` monomorphized at void and
+// emitted `call void @identity_void(void void)`, which LLVM rejects at the link step
+// against a temp .ll file with no source location. The guard now sits in
+// monomorphizeFn, where every instantiation passes, spelled or inferred.
+// @error: cannot be instantiated with 'void'
+
+pub fn identity<T>(x: T): T {
+    return x
+}
+
+pub fn nothing(): void {
+}
+
+pub fn main(): i32 {
+    identity(nothing())
+    return 0
+}

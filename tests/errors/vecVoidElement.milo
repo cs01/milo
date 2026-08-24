@@ -1,0 +1,14 @@
+// `Vec` is a builtin tag rather than a monomorphized struct, so it reached codegen with
+// a void element and emitted `getelementptr void`. An empty `Vec<void>` was worse: it
+// compiled and ran, because the element type only materializes on the first push.
+// @error: 'Vec' cannot be instantiated with 'void'
+
+pub fn nothing(): void {
+}
+
+pub fn main(): i32 {
+    var v: Vec<void> = Vec.new()
+    v.push(nothing())
+    print(v.len())
+    return 0
+}

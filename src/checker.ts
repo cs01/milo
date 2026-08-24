@@ -535,6 +535,27 @@ export class TypeChecker {
     this.diagnostics.push({ severity: "error", span, message: msg, hint });
   }
 
+  // `void` has no runtime representation, so anything that gives it a storage slot (a
+  // generic instantiated at void, a local bound to a void call) lowers to `alloca void`,
+  // `call void @f(void void)` or `getelementptr void`, all of which LLVM rejects at the
+  // link step against a temp .ll file with no source location. Reject here, where a span
+  // may still exist. `Unit` (std/prelude, auto-imported) is the value-shaped spelling.
+  // Real zero-sized-type support would make this legal; until then, failing in the right
+  // place with the right advice beats failing in the linker with none.
+  private rejectVoidTypeArgs(owner: string, args: TypeKind[], sp?: Span): boolean {
+    if (!args.some(a => a.tag === "void")) return false;
+    // One report per compilation, not per generic: `Promise<void>` instantiates Channel,
+    // Result and Option with the same void, and four copies of one mistake buries the fix.
+    // A second, genuinely independent void mistake surfaces on the next run.
+    const first = this.voidGenericReported.size === 0;
+    this.voidGenericReported.add(owner);
+    if (first) {
+      this.error(`'${owner}' cannot be instantiated with 'void': 'void' has no runtime representation`, sp,
+        `use 'Unit' for a value that carries no data: '${owner}<Unit>', constructed as 'Unit {}'`);
+    }
+    return true;
+  }
+
   // Every method name callable on `t`, for "did you mean" only. Builtin receivers
   // dispatch through hand-written if-chains with no symbol table, so their names
   // come from the lists in suggest.ts; user types read their real impl blocks.
@@ -1094,6 +1115,14 @@ export class TypeChecker {
     const typeArgs = ty.typeArgs ?? [];
     if (typeArgs.length > 0) {
       const resolvedArgs = typeArgs.map(a => this.resolve(a));
+      // A user generic bails out: `Promise<void>` would otherwise instantiate Channel,
+      // Result and Option with the same void and report the one mistake four times.
+      // A builtin container has no such body, so it keeps its resolved type rather than
+      // degrading to `<unknown>` and cascading "cannot infer element type" behind it.
+      if (this.rejectVoidTypeArgs(ty.name, resolvedArgs)
+          && (this.genericStructs.has(ty.name) || this.genericEnums.has(ty.name))) {
+        return { tag: "unknown" };
+      }
       let result: TypeKind;
       if (ty.name === "Heap") {
         if (resolvedArgs.length !== 1) { this.error(`'Heap' expects 1 type argument, got ${resolvedArgs.length}`); return { tag: "unknown" }; }
@@ -1130,24 +1159,6 @@ export class TypeChecker {
           if (gs) {
             if (resolvedArgs.length !== gs.typeParams.length) {
               this.error(`'${ty.name}' expects ${gs.typeParams.length} type args, got ${resolvedArgs.length}`);
-              return { tag: "unknown" };
-            }
-            // `void` has no runtime representation, so instantiating a generic with it
-            // emits `load void` and `void %param`, both of which LLVM rejects outright.
-            // That surfaced as a link-step IR error with no source location attached —
-            // `Promise<void>` reported as "void type only allowed for function results"
-            // against a temp .ll file. Reject it here, where there is still a span to
-            // point at. Real zero-sized-type support would make this legal; until then
-            // failing in the right place with the right advice beats failing in the
-            // linker with none.
-            if (resolvedArgs.some(a => a.tag === "void")) {
-              // One report per generic: `Promise<void>` instantiates Channel, Result and
-              // friends with the same void, and 30 copies of one mistake buries the fix.
-              if (!this.voidGenericReported.has(ty.name)) {
-                this.voidGenericReported.add(ty.name);
-              this.error(`'${ty.name}' cannot be instantiated with 'void' — 'void' has no runtime representation`, undefined,
-                `carry a placeholder payload instead: '${ty.name}<i32>' whose closure ends in 'return 0'`);
-              }
               return { tag: "unknown" };
             }
             result = { tag: "struct", name: this.monomorphizeStruct(ty.name, resolvedArgs) };
@@ -1219,7 +1230,8 @@ export class TypeChecker {
     }
   }
 
-  private monomorphizeEnum(baseName: string, typeArgs: TypeKind[]): string {
+  private monomorphizeEnum(baseName: string, typeArgs: TypeKind[], sp?: Span): string {
+    this.rejectVoidTypeArgs(baseName, typeArgs, sp);
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.enums.has(mangled)) return mangled;
 
@@ -1304,7 +1316,8 @@ export class TypeChecker {
     return args.length === 0 ? info.baseName : `${info.baseName}<${args}>`;
   }
 
-  private monomorphizeStruct(baseName: string, typeArgs: TypeKind[]): string {
+  private monomorphizeStruct(baseName: string, typeArgs: TypeKind[], sp?: Span): string {
+    this.rejectVoidTypeArgs(baseName, typeArgs, sp);
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.structs.has(mangled)) return mangled;
 
@@ -1455,7 +1468,8 @@ export class TypeChecker {
     return ty;
   }
 
-  private monomorphizeFn(baseName: string, typeArgs: TypeKind[]): string {
+  private monomorphizeFn(baseName: string, typeArgs: TypeKind[], sp?: Span): string {
+    this.rejectVoidTypeArgs(baseName, typeArgs, sp);
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.functions.has(mangled)) return mangled;
 
@@ -1535,7 +1549,8 @@ export class TypeChecker {
   // and any recursive call can be checked, then check it. The mangled name is what codegen
   // emits, so two instantiations of `map<R>` are two functions, exactly as two
   // instantiations of a generic free fn are.
-  private monomorphizeMethod(key: string, typeArgs: TypeKind[]): string | null {
+  private monomorphizeMethod(key: string, typeArgs: TypeKind[], sp?: Span): string | null {
+    this.rejectVoidTypeArgs(key.replace("$", "."), typeArgs, sp);
     const tpl = this.genericMethods.get(key);
     if (!tpl) return null;
     const names = (tpl.decl.typeParams ?? []).map(t => t.name);
@@ -5222,6 +5237,14 @@ export class TypeChecker {
         const newlyFrozen: VarInfo[] = [];
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) newlyFrozen.push(vi);
         const bindingType = hint ?? valType;
+        // A void binding gets a storage slot it cannot have: `alloca void`. The value
+        // side of "no data" is `Unit`; `void` is only a function return type. Silent once a
+        // void generic has been reported: the bindings inside a monomorphized std body are
+        // that one mistake propagating, at spans the programmer never wrote.
+        if (bindingType.tag === "void" && this.voidGenericReported.size === 0) {
+          this.error(`'${stmt.name}' cannot have type 'void': 'void' has no runtime representation`, sp,
+            `drop the binding and call the function as a statement, or return 'Unit {}' instead of nothing`);
+        }
         if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
         this.declare(stmt.name, { type: bindingType, mutable: false, moved: false, borrowed: false, read: false, span: sp, ...(stmt.value && this.onceClosures.has(stmt.value) && { callsOnce: true }), ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
         // An unannotated `let x = <const-int-value>` stays width-adaptable until
@@ -5276,6 +5299,14 @@ export class TypeChecker {
           const newlyFrozen: VarInfo[] = [];
           for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed && !frozenBeforeRhs.has(vi)) newlyFrozen.push(vi);
           const bindingType = hint ?? valType;
+          // A void binding gets a storage slot it cannot have: `alloca void`. The value
+          // side of "no data" is `Unit`; `void` is only a function return type. Silent once a
+          // void generic has been reported: the bindings inside a monomorphized std body are
+          // that one mistake propagating, at spans the programmer never wrote.
+          if (bindingType.tag === "void" && this.voidGenericReported.size === 0) {
+            this.error(`'${stmt.name}' cannot have type 'void': 'void' has no runtime representation`, sp,
+              `drop the binding and call the function as a statement, or return 'Unit {}' instead of nothing`);
+          }
           if (bindingType.tag !== "ref") for (const vi of newlyFrozen) this.unfreeze(vi);
           this.declare(stmt.name, { type: bindingType, mutable: true, moved: false, borrowed: false, read: false, span: sp, ...(stmt.value && this.onceClosures.has(stmt.value) && { callsOnce: true }), ...(bindingType.tag === "ref" && newlyFrozen.length > 0 && { freezes: newlyFrozen }) });
           if (bindingType.tag === "array") this.lintStackArray(stmt.name, bindingType, sp);
@@ -7883,7 +7914,7 @@ export class TypeChecker {
       }
 
       const typeArgs = genericFn.typeParams.map(p => must(typeMap, p, "type map"));
-      const mangled = this.monomorphizeFn(expr.func, typeArgs);
+      const mangled = this.monomorphizeFn(expr.func, typeArgs, sp);
       this.rewrittenCalls.set(expr, mangled);
 
       const concreteSig = must(this.functions, mangled, "functions");
@@ -8505,7 +8536,7 @@ export class TypeChecker {
         return this.setType(expr, { tag: "unknown" });
       }
       const typeArgs = genericInfo.typeParams.map(p => must(typeMap, p, "type map"));
-      const mangled = this.monomorphizeEnum(expr.enumName, typeArgs);
+      const mangled = this.monomorphizeEnum(expr.enumName, typeArgs, sp);
       this.rewrittenEnums.set(expr, mangled);
       return this.setType(expr, { tag: "enum", name: mangled });
     }
@@ -9963,7 +9994,7 @@ export class TypeChecker {
           `nothing in the arguments or the expected return type fixes it — annotate the call's result, or the closure's return type`);
         return this.setType(expr, { tag: "unknown" });
       }
-      const mangled = this.monomorphizeMethod(genericKey, typeArgs);
+      const mangled = this.monomorphizeMethod(genericKey, typeArgs, sp);
       if (mangled) return this.dispatchMangledMethod(expr, mangled, sp);
     }
 

@@ -1,0 +1,12 @@
+// A local of type void asks for a storage slot void cannot have: `alloca void`. `void`
+// is a function return type; `Unit` is the value that carries no data.
+// @error: cannot have type 'void'
+
+pub fn nothing(): void {
+}
+
+pub fn main(): i32 {
+    let x: void = nothing()
+    print("unreachable")
+    return 0
+}

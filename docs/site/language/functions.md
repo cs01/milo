@@ -34,7 +34,7 @@ let s = identity("hello")  // T inferred as string
 | `@targetOs()` | The OS being compiled for, as a string |
 
 The `@` marks a compiler-level construct: it runs while compiling, not at runtime. See
-[Annotations & Builtins](./annotations) for the full `@` surface.
+[Annotations & Builtins](/features/annotations) for the full `@` surface.
 
 ## Reference parameters
 

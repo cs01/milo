@@ -8,7 +8,7 @@ from "std/sync" import { Channel, WaitGroup, Once, AtomicI64, AtomicI32, AtomicU
 
 There is no `Mutex` or `RwLock` for you to hold. The locking still happens: `Channel` is a shared bounded queue over a pthread mutex and two condition variables, written once here and audited behind `unsafe impl Send`/`Sync`, so producers and consumers coordinate without a lock at your call sites. What crosses the boundary is ownership, since `send` moves a value in and `recv` moves it out. `Channel<T>` is `Send` only when `T` is.
 
-When several cores transform one large buffer, divide its ownership with [`std/shard`](shard) rather than queueing the elements. See [Concurrency](/language/concurrency).
+When several cores transform one large buffer, divide its ownership with [`std/shard`](shard) rather than queueing the elements. See [Concurrency](/features/concurrency).
 
 Every type here is a reference-counted handle. `.clone()` gives another task or worker its own owner, and the shared object frees itself when the last owner drops — there is no `destroy`.
 

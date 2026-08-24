@@ -16,13 +16,13 @@ Pick what you have in mind. Each row jumps to real, runnable examples further do
 
 | I want to build… | See it working | Learn the pieces |
 |---|---|---|
-| **A game or console emulator** | [Emulators](#emulators-desktop-and-browser), [graphics demos](#terminal-graphics-apps) | [Ownership](/language/ownership), [Concurrency](/language/concurrency), [FFI (SDL)](/language/ffi) |
-| **A web server or API** | [Servers & network apps](#servers-network-apps) | [Error handling](/language/error-handling), [Concurrency](/language/concurrency), [Get started](/getting-started/quickstart) |
+| **A game or console emulator** | [Emulators](#emulators-desktop-and-browser), [graphics demos](#terminal-graphics-apps) | [Ownership](/language/ownership), [Concurrency](/features/concurrency), [FFI (SDL)](/features/ffi) |
+| **A web server or API** | [Servers & network apps](#servers-network-apps) | [Error handling](/language/error-handling), [Concurrency](/features/concurrency), [Get started](/getting-started/quickstart) |
 | **A command-line tool** | [CLI tools](#cli-tools) | [Your first program](/getting-started/quickstart), [Strings](/language/strings), [Collections](/language/collections) |
-| **A terminal app (TUI)** | [Terminal & graphics apps](#terminal-graphics-apps) | [Concurrency: green tasks & Select](/language/concurrency) |
-| **A debugger or dev tool** | [Debugger: dapweb, java-dap](#debugger) | [FFI](/language/ffi), [Modules](/language/modules) |
+| **A terminal app (TUI)** | [Terminal & graphics apps](#terminal-graphics-apps) | [Concurrency: green tasks & Select](/features/concurrency) |
+| **A debugger or dev tool** | [Debugger: dapweb, java-dap](#debugger) | [FFI](/features/ffi), [Modules](/language/modules) |
 | **A language or interpreter** | [Data & interpreters](#data-interpreters), [the prover and formatter](#the-language-feeding-itself) | [Enums & pattern matching](/language/enums), [Ownership](/language/ownership) |
-| **Low-level / embedded** | [flightController](#terminal-graphics-apps) | [Safety](/language/safety), [FFI](/language/ffi) |
+| **Low-level / embedded** | [flightController](#terminal-graphics-apps) | [Safety](/language/safety), [FFI](/features/ffi) |
 
 ## Emulators: desktop and browser
 

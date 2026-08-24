@@ -140,7 +140,7 @@ let t = Task.spawn(move (): void => {
 t.join()
 ```
 
-A `Promise.blocking` closure runs on a real OS thread, so its captures must additionally be `Send` — the compiler enforces this. See [Concurrency](/language/concurrency).
+A `Promise.blocking` closure runs on a real OS thread, so its captures must additionally be `Send` — the compiler enforces this. See [Concurrency](/features/concurrency).
 
 ### When to use `move`
 

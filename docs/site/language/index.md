@@ -477,7 +477,7 @@ print(a == b)   // true — generated field-by-field comparison
 
 `@derive(Eq)` auto-generates `==` and `!=`. You can also implement `Add`, `Sub`, `Mul`, and `Div` traits to overload arithmetic operators on your types.
 
-`@` always means the compiler handles it — there is no preprocessor and no macro system. See [Annotations & Builtins](./annotations) for the whole set.
+`@` always means the compiler handles it — there is no preprocessor and no macro system. See [Annotations & Builtins](/features/annotations) for the whole set.
 
 ## Interfaces
 
@@ -574,7 +574,7 @@ fn main(): i32 {
 
 This example uses `Promise.blocking` for the producer, which runs it on a real system thread — the right choice for CPU-heavy work that must run in true parallel with the consumer. The compiler checks that anything crossing that thread boundary is safe to share. The standard library also includes wait groups and atomics for coordinating parallel workers.
 
-[Learn more](/language/concurrency)
+[Learn more](/features/concurrency)
 
 ## Modules and Packages
 

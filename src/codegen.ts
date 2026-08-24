@@ -256,7 +256,7 @@ export class Codegen {
   public entryAllocas: string[] = [];
   // Every atomic intrinsic is sequentially consistent (seq_cst on both the success and
   // failure orderings of a cmpxchg). Milo deliberately exposes no ordering parameter —
-  // see docs/site/language/concurrency.md. `bool` widths hold an i1 in a byte of memory.
+  // see docs/site/features/concurrency.md. `bool` widths hold an i1 in a byte of memory.
   private static ATOMIC_INTRINSICS: Record<string, { kind: "load" | "store" | "rmw" | "cas"; rmwOp?: string; ty: string; align: number; isBool?: boolean }> = {
     _atomicLoadI64: { kind: "load", ty: "i64", align: 8 },
     _atomicStoreI64: { kind: "store", ty: "i64", align: 8 },

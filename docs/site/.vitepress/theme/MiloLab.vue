@@ -10,7 +10,7 @@
 <template>
   <div class="lab" ref="rootEl">
     <div class="lab-head">
-      <a class="sub-link" :href="base + 'language/javascript-target'">Runs in your browser via the emit-js backend →</a>
+      <a class="sub-link" :href="base + 'features/javascript-target'">Runs in your browser via the emit-js backend →</a>
     </div>
 
     <!-- rail: Sandbox (free play) first, then the 10 lessons -->

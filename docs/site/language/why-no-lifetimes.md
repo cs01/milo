@@ -38,7 +38,7 @@ a handle) keep every fact about a value readable at the value: no declaration me
 anything beyond what it says. The same property is why the concurrency story stays
 simple, since a type that cannot store a borrow is a type you can hand to another
 task without a `Send` proof unwinding a borrow chain behind it; see
-[Concurrency](/language/concurrency).
+[Concurrency](/features/concurrency).
 
 The cost is not uniform, so it is stated per pattern. A parser restructures
 gracefully and arguably reads better than its `<'a>` original. An iterator yielding

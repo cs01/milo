@@ -29,7 +29,7 @@ import { readdirSync } from "fs";
 // snippets with elided `...` bodies, undeclared variables, and APIs the page describes
 // but the stdlib does not have.
 const SNIPPETS_NOT_YET_CHECKED = new Set([
-  "docs/site/language/ffi.md",
+  "docs/site/features/ffi.md",
   "docs/site/language/ownership.md",
   "docs/site/language/variables.md",
   "docs/site/language/warnings-and-errors.md",

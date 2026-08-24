@@ -10,7 +10,7 @@ from "std/runtime" import { Task, schedulerCurrent, schedulerYield, schedulerWai
 Most programs never import this. `std/io`, `std/net`, `std/fetch`, `std/timer`,
 `std/sync` and `std/select` are built on it and already yield at the right moments —
 reach for `std/runtime` when you are writing your own async primitive, or driving a
-raw fd that no stdlib module wraps. See [Concurrency](/language/concurrency).
+raw fd that no stdlib module wraps. See [Concurrency](/features/concurrency).
 
 Tasks are green, not threads: they never run in parallel, so nothing here needs a
 lock. Parallelism comes from `Promise.blocking`, which runs a closure on a worker.

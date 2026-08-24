@@ -128,7 +128,7 @@ print(Point { x: 1, y: 2 } == Point { x: 1, y: 2 })   // true
 ```
 
 `Eq` is the only derivable trait. Every field must itself implement `Eq`. Other
-operators are implemented by hand — see [Traits](./traits) for overloading `Add`, `Sub`,
+operators are implemented by hand — see [Traits](/language/traits) for overloading `Add`, `Sub`,
 `Mul`, and `Div`.
 
 ## Linkage
@@ -237,6 +237,6 @@ Note that the C checks run when a program is actually built (`milo build`, `milo
 Contract clauses — `requires`, `ensures`, `invariant`, `decreases` — are ordinary keywords in
 the declaration, not `@` annotations, because they are type-checked expressions rather than
 instructions to the compiler. `old(e)`, which names a parameter's entry value inside an
-`ensures`, is contract-only syntax for the same reason. See [Contracts & Safety](./safety).
+`ensures`, is contract-only syntax for the same reason. See [Contracts & Safety](/language/safety).
 
 Next: [C FFI](./ffi)

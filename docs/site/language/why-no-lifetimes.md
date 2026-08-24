@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: lifetimes-rationale
+purpose: why Milo has no lifetimes: the census behind the bet and what the 13% costs
+key-files: src/checker.ts, scripts/lifetime-census.py
+update-when: the reference model changes, or the lifetime census is re-run
+last-verified: 2026-08-24
+-->
+
 # Why There Are No Lifetimes
 
 Milo makes one big bet: **a reference can never be stored.**

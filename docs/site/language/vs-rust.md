@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: memory-safety-vs-rust
+purpose: where Rust and Milo each catch a memory bug, and the Rust-shape translation table
+key-files: src/checker.ts, src/safety.ts, rust-comparison/
+update-when: a safety check moves between compile time and runtime in either language
+last-verified: 2026-08-24
+-->
+
 # Memory Safety vs Rust
 
 Where each language catches a problem. Every row is a probe built [in both

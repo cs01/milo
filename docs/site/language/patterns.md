@@ -1,3 +1,11 @@
+<!-- doc-meta
+system: lifetime-free-patterns
+purpose: cookbook of the seven shapes that replace Rust lifetime-carrying types
+key-files: std/seal, std/arena, src/checker.ts
+update-when: a pattern's API changes, or a new substitute for a stored borrow ships
+last-verified: 2026-08-24
+-->
+
 # Patterns Without Lifetimes
 
 Milo has no lifetimes: a reference can never be stored. What that costs, and the census

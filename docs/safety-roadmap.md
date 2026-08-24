@@ -3,7 +3,7 @@ system: safety-roadmap
 purpose: shipped safety mechanisms, explicit trust boundaries, and remaining soundness work
 key-files: src/checker.ts, src/codegen.ts, std/arena.milo, std/runtime.milo, std/sync.milo, tests/errors/, tests/runtime-errors/
 update-when: a safety check ships, a trust boundary changes, or a roadmap gap closes
-last-verified: 2026-07-22
+last-verified: 2026-08-24
 -->
 
 # Safety Roadmap: Closing the Gaps
@@ -147,6 +147,55 @@ Implemented for arenas in debug and release. Handles carry arena identity, slot,
 | `performance` | Moves + invalidation tracking | None | Hot paths, benchmarks |
 
 Via `milo build --profile strict` or per-module annotation.
+
+## Open gap: a `pub struct` cannot protect its own fields
+
+Found 2026-08-24. Safe code with no `unsafe` block anywhere can segfault:
+
+```milo
+from "std/cstr" import { CStr }
+
+pub fn main(): i32 {
+    let c = CStr { _ptr: 0 as *u8, _len: 5 }   // forged, in safe code
+    print(c.toString())                        // std derefs it internally
+    return 0
+}
+```
+
+```
+exit 139 (SIGSEGV)
+```
+
+Each step is individually defensible, which is why it went unnoticed:
+
+| Step | Allowed in safe code | Correct on its own |
+|---|---|---|
+| `0 as *u8` | yes | a pointer that cannot be dereferenced is inert |
+| `p[0]` on it | **no**, `unsafe` required | yes, this is the check working |
+| `CStr { _ptr: … }` | yes | **the gap** |
+| `c.toString()` derefs `_ptr` in its own `unsafe` | yes | yes, a module may trust its own invariant |
+
+The break is the third row. `pub struct` exposes every field (there is no per-field
+visibility), so a struct literal or a field assignment from another file can put anything
+into a field the module's `unsafe` blocks then trust. The module's invariant is not
+enforceable by the module.
+
+Scope: 25 `pub struct`s across `std/` already mark 44 fields with a leading underscore to
+mean "do not touch", which is the convention standing in for the missing feature. Several
+hold raw pointers or OS handles: `CStr._ptr`, `Regex._preg`, `sqlite.Database._handle`,
+`Task._ptr`, `Pty._hpcon`. Others hold logic invariants where the failure is a wrong
+answer rather than a crash: `Sealed._bufferId`, `Select._state`.
+
+Two candidate fixes, neither designed yet:
+
+- **Field visibility.** A field without `pub` is file-private, matching how declarations
+  already work ("the unit of privacy is the file"). Changes the meaning of every existing
+  `pub struct`, so it is a breaking change and wants `docs/breaking-changes.md`.
+- **Readonly fields.** Readable anywhere, writable only in the defining file. Weaker, and
+  it does not stop the struct-literal path above, which is the one that forges the pointer.
+
+Until one lands, the honest statement is that a module's invariants hold by convention at
+the field boundary, not by construction. `std/seal` documents this at its own type.
 
 ## Design Principles
 

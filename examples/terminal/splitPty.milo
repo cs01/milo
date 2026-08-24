@@ -243,10 +243,10 @@ pub fn main(): void {
                                 Result.Ok(_) => {
                                     drawBorder("ls -G (colored)", "PTY device info", half, paneRows)
 
-                                    let f1 = fcntl(pty1.masterFd, fGetfl())
-                                    fcntl(pty1.masterFd, fSetfl(), f1 | oNonblock())
-                                    let f2 = fcntl(pty2.masterFd, fGetfl())
-                                    fcntl(pty2.masterFd, fSetfl(), f2 | oNonblock())
+                                    let f1 = fcntl(pty1.fd(), fGetfl())
+                                    fcntl(pty1.fd(), fSetfl(), f1 | oNonblock())
+                                    let f2 = fcntl(pty2.fd(), fGetfl())
+                                    fcntl(pty2.fd(), fSetfl(), f2 | oNonblock())
 
                                     var out1 = ""
                                     var out2 = ""
@@ -260,8 +260,8 @@ pub fn main(): void {
                                         // poll, no timer — every source is an fd.
                                         var sel = Select.new()
                                         sel.onRead(0)
-                                        sel.onRead(pty1.masterFd)
-                                        sel.onRead(pty2.masterFd)
+                                        sel.onRead(pty1.fd())
+                                        sel.onRead(pty2.fd())
                                         if winchFd >= 0 {
                                             sel.onRead(winchFd)
                                         }

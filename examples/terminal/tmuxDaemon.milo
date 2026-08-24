@@ -151,7 +151,7 @@ pub fn reTile(ptys: &Vec<Pty>, terms: &mut Vec<Term>, paneWin: &Vec<i64>, active
     var j: i64 = 0
     while j < m {
         let gi = idxs[j]
-        setPtySize(ptys[gi].masterFd, gridRows, paneW)
+        setPtySize(ptys[gi].fd(), gridRows, paneW)
         terms[gi] = newTerm(gridRows, paneW)
         j = j + 1
     }
@@ -252,7 +252,7 @@ pub fn serveMulti(listenFd: i32, shell: &string, rows: i64, cols0: i64): void {
     while k < 2 {
         match openAndSpawn(shell, sa) {
             Result.Ok(p) => {
-                setNonblock(p.masterFd)
+                setNonblock(p.fd())
                 ptys.push(p)
                 terms.push(newTerm(gridRows, 1))
                 paneWin.push(0)
@@ -281,7 +281,7 @@ pub fn serveMulti(listenFd: i32, shell: &string, rows: i64, cols0: i64): void {
         var ai: i64 = 0
         while ai < ptys.len {
             if paneWin[ai] >= 0 { // skip closed panes (marked -1)
-                sel.onRead(ptys[ai].masterFd)
+                sel.onRead(ptys[ai].fd())
             }
             ai = ai + 1
         }
@@ -301,7 +301,7 @@ pub fn serveMulti(listenFd: i32, shell: &string, rows: i64, cols0: i64): void {
         while di < ptys.len {
             if paneWin[di] >= 0 {
                 unsafe {
-                    let nn = read(ptys[di].masterFd, buf as *u8, 4096)
+                    let nn = read(ptys[di].fd(), buf as *u8, 4096)
                     if nn == 0 {
                         ptys[di].close()
                         ptys[di].wait()
@@ -475,7 +475,7 @@ pub fn serveMulti(listenFd: i32, shell: &string, rows: i64, cols0: i64): void {
                             if ptys.len < 12 {
                                 match openAndSpawn(shell, sa) {
                                     Result.Ok(p) => {
-                                        setNonblock(p.masterFd)
+                                        setNonblock(p.fd())
                                         ptys.push(p)
                                         terms.push(newTerm(gridRows, 1))
                                         paneWin.push(activeWin)
@@ -492,7 +492,7 @@ pub fn serveMulti(listenFd: i32, shell: &string, rows: i64, cols0: i64): void {
                             if ptys.len < 12 {
                                 match openAndSpawn(shell, sa) {
                                     Result.Ok(p) => {
-                                        setNonblock(p.masterFd)
+                                        setNonblock(p.fd())
                                         ptys.push(p)
                                         terms.push(newTerm(gridRows, 1))
                                         paneWin.push(winCount)
@@ -545,7 +545,7 @@ pub fn serveMulti(listenFd: i32, shell: &string, rows: i64, cols0: i64): void {
                 }
                 if fwdN > 0 {
                     unsafe {
-                        write(ptys[focus].masterFd, fwd as *u8, fwdN)
+                        write(ptys[focus].fd(), fwd as *u8, fwdN)
                     }
                 }
             }

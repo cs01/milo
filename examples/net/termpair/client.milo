@@ -340,13 +340,13 @@ pub fn main(): i32 {
 
     // extract raw values so each move-closure gets its own copy
     // (move zeroes the source — can't move the same var into multiple closures)
-    let ptyFd1 = pty.masterFd
-    let ptyFd2 = pty.masterFd
-    let ptyFd3 = pty.masterFd
-    let wsFd1 = ws.fd
-    let wsFd3 = ws.fd
-    let wsSsl1 = ws.ssl
-    let wsSsl3 = ws.ssl
+    let ptyFd1 = pty.fd()
+    let ptyFd2 = pty.fd()
+    let ptyFd3 = pty.fd()
+    let wsFd1 = ws.fd()
+    let wsFd3 = ws.fd()
+    let wsSsl1 = ws.tlsHandle()
+    let wsSsl3 = ws.tlsHandle()
     let done1 = AtomicBool {
         _ptr: done._ptr
     }

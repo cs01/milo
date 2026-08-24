@@ -43,6 +43,17 @@ fn Pty.close(self: &mut Pty): void
 Idempotent: closing the master also unwedges a child blocked writing to a
 full PTY buffer (its write returns EIO), letting a pending SIGKILL land.
 
+### `Pty.fd`
+
+```milo
+fn Pty.fd(self: &Pty): i32
+```
+
+The OS file descriptor for the master side. Callers poll, select and fcntl on it,
+which is why it is exposed at all; reading it through a method rather than the
+field is what will let the field go private when Milo gets field visibility
+(docs/safety-roadmap.md).
+
 ### `Pty.kill`
 
 ```milo
@@ -71,6 +82,14 @@ raw output chunks. The caller only `recv`s the channel — no read(),
 EAGAIN handling, or hand-written pump loop. The channel is closed when the
 child exits (read returns <= 0). This is node-pty's `.onData` ergonomics
 with green-task semantics underneath.
+
+### `Pty.pid`
+
+```milo
+fn Pty.pid(self: &Pty): i32
+```
+
+The spawned child's pid, or -1 before spawn.
 
 ### `Pty.read`
 

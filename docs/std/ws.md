@@ -43,6 +43,16 @@ fn WsConn.close(self: &mut WsConn): void
 
 Send close frame and mark connection closed.
 
+### `WsConn.fd`
+
+```milo
+fn WsConn.fd(self: &WsConn): i32
+```
+
+The socket fd. Callers select and poll on it, which is why it is reachable at all;
+going through a method is what lets the field go private once Milo has field
+visibility (docs/safety-roadmap.md).
+
 ### `WsConn.ping`
 
 ```milo
@@ -74,6 +84,15 @@ fn WsConn.sendText(self: &WsConn, msg: &string): Result<i32, string>
 ```
 
 Send a text message.
+
+### `WsConn.tlsHandle`
+
+```milo
+fn WsConn.tlsHandle(self: &WsConn): i64
+```
+
+The TLS handle, 0 for plain TCP. Opaque to callers: pass it back to std, never
+construct one.
 
 ### `wsConnect`
 

@@ -34,6 +34,17 @@ fn Pty.close(self: &mut Pty): void
 
 _Undocumented._
 
+### `Pty.fd`
+
+```milo
+fn Pty.fd(self: &Pty): i32
+```
+
+The OS file descriptor for the master side. Callers poll, select and fcntl on it,
+which is why it is exposed at all; reading it through a method rather than the
+field is what will let the field go private when Milo gets field visibility
+(docs/safety-roadmap.md).
+
 ### `Pty.kill`
 
 ```milo
@@ -57,6 +68,14 @@ fn Pty.output(self: &Pty): Channel<string>
 ```
 
 _Undocumented._
+
+### `Pty.pid`
+
+```milo
+fn Pty.pid(self: &Pty): i32
+```
+
+The spawned child's pid, or -1 before spawn.
 
 ### `Pty.read`
 

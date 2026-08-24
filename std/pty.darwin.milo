@@ -69,6 +69,19 @@ pub fn isInteractive(): bool {
 }
 
 impl Pty {
+    // The OS file descriptor for the master side. Callers poll, select and fcntl on it,
+    // which is why it is exposed at all; reading it through a method rather than the
+    // field is what will let the field go private when Milo gets field visibility
+    // (docs/safety-roadmap.md).
+    fn fd(self: &Pty): i32 {
+        return self.masterFd
+    }
+
+    // The spawned child's pid, or -1 before spawn.
+    fn pid(self: &Pty): i32 {
+        return self.childPid
+    }
+
     fn open(): Result<Pty, string> {
         unsafe {
             // O_RDWR=2 | O_NOCTTY=0x20000

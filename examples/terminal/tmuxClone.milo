@@ -590,10 +590,10 @@ pub fn main(): void {
                         }
                     }
                     if ok0 && ok1 {
-                        let f0 = fcntl(pty0.masterFd, fGetfl())
-                        fcntl(pty0.masterFd, fSetfl(), f0 | oNonblock())
-                        let f1 = fcntl(pty1.masterFd, fGetfl())
-                        fcntl(pty1.masterFd, fSetfl(), f1 | oNonblock())
+                        let f0 = fcntl(pty0.fd(), fGetfl())
+                        fcntl(pty0.fd(), fSetfl(), f0 | oNonblock())
+                        let f1 = fcntl(pty1.fd(), fGetfl())
+                        fcntl(pty1.fd(), fSetfl(), f1 | oNonblock())
 
                         var term0 = newTerm(paneRows, paneCols)
                         var term1 = newTerm(paneRows, paneCols)
@@ -611,8 +611,8 @@ pub fn main(): void {
                             // a fd is readable (std/select is kqueue-backed).
                             var sel = Select.new()
                             sel.onRead(0)
-                            sel.onRead(pty0.masterFd)
-                            sel.onRead(pty1.masterFd)
+                            sel.onRead(pty0.fd())
+                            sel.onRead(pty1.fd())
                             if winchFd >= 0 {
                                 sel.onRead(winchFd)
                             }

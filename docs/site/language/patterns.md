@@ -45,7 +45,7 @@ Slice it. That is the whole thing:
 ```milo
 pub fn main(): i32 {
     let line = "host=localhost"
-    let key = line[0..4]       // a view into line, nothing copied
+    let key = line[0..4]  // a view into line, nothing copied
     print(key)
     return 0
 }
@@ -58,15 +58,15 @@ host
 ::: code-group
 
 ```rust [Rust]
-let key = &line[0..4];      // &str — needs a lifetime once it leaves this scope
+let key = &line[0..4];  // &str, needs a lifetime once it leaves this scope
 ```
 
 ```cpp [C++]
-std::string_view key{line.data(), 4};   // dangles if line changes
+std::string_view key{line.data(), 4};  // dangles if line changes
 ```
 
 ```ts [TypeScript]
-const key = line.slice(0, 4);           // copies
+const key = line.slice(0, 4);  // copies
 ```
 
 :::
@@ -157,7 +157,7 @@ from "std/seal" import { seal }
 
 pub fn main(): i32 {
     let src = seal("host=localhost".clone())
-    let key = src.spanOf(0, 4)         // the same "host" as above, but storable
+    let key = src.spanOf(0, 4)  // the same "host" as above, but storable
     print(src.text(key))
     print(src.eq(key, "host").toString())
     return 0
@@ -179,7 +179,7 @@ pub fn main(): i32 {
     let a = seal("host=localhost".clone())
     let b = seal("port=8080".clone())
     let key = a.spanOf(0, 4)
-    print(b.text(key))                 // measured against `a`, resolved against `b`
+    print(b.text(key))  // measured against `a`, resolved against `b`
     return 0
 }
 ```
@@ -196,21 +196,21 @@ See [Memory Safety vs Rust](/language/vs-rust).
 
 ```rust [Rust]
 struct Lexer<'a> {
-    src: &'a str,               // the lifetime is here
+    src: &'a str,  // the lifetime is here
     pos: usize,
 }
 ```
 
 ```cpp [C++]
 struct Lexer {
-    std::string_view src;       // dangles if the owner dies
+    std::string_view src;  // dangles if the owner dies
     size_t pos;
 };
 ```
 
 ```milo skip [Milo]
 pub struct Lexer {
-    src: string,                // owns its text — nothing to outlive
+    src: string,  // owns its text, so nothing can outlive anything
     pos: i64,
 }
 ```
@@ -333,17 +333,17 @@ the next section.
 ::: code-group
 
 ```rust [Rust]
-type Link = Rc<RefCell<Node>>;   // runtime borrow check, can leak cycles
+type Link = Rc<RefCell<Node>>;  // runtime borrow check, can leak cycles
 // or: slotmap / arena + generational index
 ```
 
 ```cpp [C++]
-struct Node { Node* parent; };   // raw pointers, no checking at all
+struct Node { Node* parent; };  // raw pointers, no checking at all
 ```
 
 ```milo skip [Milo]
 var arena: Arena<Node> = Arena<Node>.new()
-let h = arena.alloc(node)        // Handle: index + generation
+let h = arena.alloc(node)  // Handle: index + generation
 ```
 
 :::
@@ -361,7 +361,7 @@ pub fn main(): i32 {
     let idx = slots.len - 1
     slots.remove(idx)
     slots.push("carol")
-    print(slots[idx])                  // idx meant alice
+    print(slots[idx])  // idx meant alice
     return 0
 }
 ```
@@ -384,7 +384,7 @@ pub fn main(): i32 {
     var arena: Arena<Session> = Arena<Session>.new()
     let h = arena.alloc(Session { user: "alice" })
     arena.free(h)
-    let _carol = arena.alloc(Session { user: "carol" })   // reuses the slot
+    let _carol = arena.alloc(Session { user: "carol" })  // reuses the slot
     match arena.get(h) {
         Option.Some(s) => { print(s.user) }
         Option.None => { print("None") }

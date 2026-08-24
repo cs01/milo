@@ -345,10 +345,46 @@ pub fn main(): i32 {
 ```
 assertion failed at std/seal.milo:156:5: sealed: span was measured against a different buffer
 ```
+:::
+
+In that example a compiler could obviously see it: two locals, one span, no ambiguity. The
+reason the check is not at compile time is that the obvious case is not the general one.
+The moment a span is useful, its buffer stops being statically known:
+
+```milo
+from "std/seal" import { seal, Sealed, Span }
+
+// Which buffer does `sp` belong to? Nothing in the signature says, and nothing
+// can: the whole point of a Span is that it travels separately from its buffer.
+fn render(src: &Sealed, sp: Span): string {
+    return src.text(sp)
+}
+
+pub fn main(): i32 {
+    let a = seal("host=localhost".clone())
+    var spans: Vec<Span> = Vec.new()
+    spans.push(a.spanOf(0, 4))
+    print(render(a, spans[0]))
+    return 0
+}
+```
+
+```
+host
+```
+
+Once a span is in a `Vec`, crosses a function boundary, or is picked by a branch, the
+compiler can no longer name its buffer. Making it able to is precisely what a lifetime
+parameter does: `Span<'a>` tied to `Sealed<'a>`, which is the annotation this language
+does not have. **You cannot have both.** Either spans are ordinary values you can store
+and pass, or the compiler tracks their buffer, and this page exists because Milo chose
+the first.
+
+A partial compile-time check that caught only the two-locals case would be worse than
+none: it would pass on every toy and stay silent on the code that actually ships.
 
 See [Memory Safety vs Rust](/language/vs-rust).
 
-:::
 
 ## Write a parser or cursor over text you do not own
 

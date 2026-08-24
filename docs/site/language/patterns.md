@@ -10,7 +10,33 @@ signatures**, and second-class references cover the ones whose borrow lives for 
 which is most of them; a signature that *returns* a borrow tied to a parameter
 (`fn longest<'a>(a: &'a str, b: &'a str) -> &'a str`) is the part of that bucket Milo
 restructures instead. The remaining 13% are *types* that store a borrow, `Parser<'a>`
-and friends, and those cannot be written here at all.
+and friends, and that Rust shape cannot be written here.
+
+Read that 13% carefully, because it is easy to misread in both directions. It is not
+13% of code: it is 337 type declarations across five entire codebases, and they
+cluster (62% of axum's sit in three files of serde plumbing). And none of it is
+unwritable or unsafe: every one of those programs still gets written, restructured
+around ownership, and every restructuring on this page is statically memory-safe.
+What actually moves is one check, the tie between a stored offset and its buffer,
+which becomes a named runtime failure where Rust's invariant lifetime is a compile
+error. That is the whole price. Nothing here degrades to `unsafe` or to unchecked
+access.
+
+What the restructuring buys is local reasoning. A lifetime on a type is infectious:
+store a `Parser<'a>` and your struct grows `<'a>`, then the struct holding that one,
+until a signature three modules away carries an annotation whose reason is no longer
+visible from where it stands. Milo's substitutes (own the buffer, carry a `Span`, use
+a handle) keep every fact about a value readable at the value: no declaration means
+anything beyond what it says. The same property is why the concurrency story stays
+simple, since a type that cannot store a borrow is a type you can hand to another
+task without a `Send` proof unwinding a borrow chain behind it; see
+[Concurrency](/language/concurrency).
+
+The cost is not uniform, so this page states it per pattern. A parser restructures
+gracefully and arguably reads better than its `<'a>` original. An iterator yielding
+borrows restructures into an index loop or a callback, and a long Rust adapter chain
+genuinely reads better than that. The **Checked** column and the boxes below are
+this page keeping score honestly.
 
 That 13% is what this page is about: the patterns we landed on to keep the language
 usable, concise, and pleasant without first-class references, and what each one costs

@@ -32,9 +32,9 @@ pub fn main(): i32 {
 The whole guarantee is these two facts holding at once:
 
 - `seal` **consumes** the buffer. The old binding is moved, so the compiler rejects any later use of it. `buf.push('x')` after the seal does not compile.
-- `Sealed` **has no mutating method**. There is no `push`, no `set`, no `resize`. Mutation is not rejected by a check that could have a hole in it; it is absent from the type.
+- `Sealed` **has no mutating method**. There is no `push`, no `set`, no `resize`. Nothing in the API changes the bytes.
 
-So there is no path, safe or otherwise, that changes the bytes a span points at while the `Sealed` is alive.
+So no *method* changes the bytes a span points at. One gap is worth naming rather than glossing: Milo has no per-field visibility, so `pub struct Sealed` exposes `data` and `_bufferId` to anyone who names the type. A caller holding one as `var` can assign `s.data = ...` directly, and a same-length replacement leaves every existing span resolving happily against different bytes, with the id matching and the bounds check passing. The API maintains the invariant and the underscore marks the boundary, but the type cannot enforce it. Closing that needs field-level visibility, which the language does not have.
 
 ## Spans are branded
 
@@ -156,9 +156,10 @@ pub fn main(): i32 {
 }
 ```
 
-Sharing is normally unsafe because a reader can observe a write. Here no operation
-writes: immutability is the absence of a method, not a promise, so N readers over one
-buffer need no lock, no ordering, and no check on the read path. `Send` and `Sync` are
+Sharing is normally unsafe because a reader can observe a write. Here no operation in the
+API writes, so N readers over one buffer need no lock, no ordering, and no check on the
+read path. That rests on callers not reaching past the API into the fields, per the caveat
+above. `Send` and `Sync` are
 audited rather than derived, and the only mutable state is the holder count, which moves
 under an atomic.
 

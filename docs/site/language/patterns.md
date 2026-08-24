@@ -300,11 +300,17 @@ pub struct Span {
 }
 ```
 
-`seal` consumes the buffer and hands back the `Sealed`, which has no mutating method, so
-offsets into it can never be invalidated. A `Span` is 16 bytes and **holds no text at
+`seal` consumes the buffer and hands back the `Sealed`. No method on it mutates, so
+offsets into it stay valid for the whole life of the value. A `Span` is 16 bytes and **holds no text at
 all**: a start, a length, and the id of the buffer it was measured against. On its own it
 means nothing. Paired with its `Sealed` it means a slice, and `src.text(sp)` is what turns
 it back into characters.
+
+One honest caveat, since the fields are right there: Milo has no per-field visibility, so
+a `pub struct` exposes everything it holds. Nothing stops a caller writing `s.data = ...`
+directly, and a same-length replacement would leave every existing span resolving happily
+against different bytes. The underscore and the doc comments are the only thing marking
+that boundary. The methods maintain the invariant; the type cannot enforce it.
 
 That matching `_bufferId` on both sides is the tie, and the leading underscore is the
 convention for a field you are not meant to set: a hand-built `Span` gets 0, which no
@@ -364,9 +370,9 @@ it only for the tokens you actually read. `src.eq(t, "host")` compares without o
 :::
 
 ::: warning ⚠ CAUGHT, BUT ONLY WHEN IT RUNS
-Nothing here can dangle: a `Sealed` owns its bytes and has no mutating method, so there is
-no use-after-free to prevent. What the `_bufferId` catches is a *logic* error, resolving a span
-against the wrong buffer and reading bytes that are in bounds and simply wrong:
+Nothing here can dangle: a `Sealed` owns its bytes, so there is no use-after-free to
+prevent. What the `_bufferId` catches is a *logic* error, resolving a span against the
+wrong buffer and reading bytes that are in bounds and simply wrong:
 
 ```milo
 from "std/seal" import { seal }

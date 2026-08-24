@@ -1,0 +1,16 @@
+// eq() used sealedHolds() as its only guard, and holds() answers "does this span fit
+// here" — a foreign span makes it false, so eq() reported "not equal" for a question the
+// caller never asked. Here b's bytes at 0..4 ARE "host", so the old code returned false
+// while the true answer to the question asked was neither true nor false: the span was
+// not b's to resolve. text() has always aborted on this; eq() now agrees with it.
+// @expect: same-buffer=true
+from "std/seal" import {
+    seal
+}
+
+pub fn main(): i32 {
+    let a = seal("host=localhost".clone())
+    let sp = a.spanOf(0, 4)
+    print("same-buffer=" + a.eq(sp, "host").toString())
+    return 0
+}

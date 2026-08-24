@@ -1,0 +1,15 @@
+// A span resolved against a different buffer must abort by name, in eq() exactly as in
+// text(). b's bytes at 0..4 are also "host", so a silent `false` here would look like an
+// ordinary comparison result rather than a mistake.
+// @runtime-error: span was measured against a different buffer
+from "std/seal" import {
+    seal
+}
+
+pub fn main(): i32 {
+    let a = seal("host=localhost".clone())
+    let b = seal("host=other".clone())
+    let sp = a.spanOf(0, 4)
+    print(b.eq(sp, "host").toString())
+    return 0
+}

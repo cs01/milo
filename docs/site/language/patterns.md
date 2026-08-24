@@ -290,18 +290,21 @@ from "std/seal" import { seal, Sealed, Span }
 // One span per word. Spans are plain values, so they survive the return.
 fn words(src: &Sealed): Vec<Span> {
     var out: Vec<Span> = Vec.new()
-    var i: i64 = 0
-    while i < src.len() {
-        while i < src.len() && src.byteAt(i) == ' ' {
-            i = i + 1
+    var start: i64 = -1
+    for i in 0..src.len() {
+        if src.byteAt(i) == ' ' {
+            if start >= 0 {
+                out.push(src.spanOf(start, i - start))
+                start = -1
+            }
+        } else {
+            if start < 0 {
+                start = i
+            }
         }
-        let start = i
-        while i < src.len() && src.byteAt(i) != ' ' {
-            i = i + 1
-        }
-        if i > start {
-            out.push(src.spanOf(start, i - start))
-        }
+    }
+    if start >= 0 {
+        out.push(src.spanOf(start, src.len() - start))
     }
     return out
 }

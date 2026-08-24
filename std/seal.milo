@@ -162,6 +162,13 @@ pub fn sealedText(s: &Sealed, sp: Span): string {
 // a scanner's keyword checks off the allocator: the common operation on a
 // retained piece is comparing it, not owning it.
 pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
+    // Assert the brand rather than leaning on sealedHolds for it. holds() answers
+    // "does this span fit here", and a foreign span makes it false, which eq then
+    // returned as "not equal" — the wrong answer to a question the caller never
+    // asked, and the one silent failure the brand exists to stop. text() has always
+    // aborted on this; eq() disagreed with it. A caller who genuinely wants the
+    // tolerant behaviour calls holds() first.
+    assert(sp.brand == s.brand, "sealed: span was measured against a different buffer")
     if !sealedHolds(s, sp) {
         return false
     }

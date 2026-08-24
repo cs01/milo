@@ -3,6 +3,11 @@
 What to write when the Rust shape you know reaches for `<'a>`, `Box`, or
 `Rc<RefCell>`. Every linked example compiles today.
 
+Each pattern below is shown twice: the form to write, and the form that fails. The
+failures are labelled by *who catches them* — **✗ the compiler stops you** is the
+protection working and costs nothing at runtime; **⚠ caught when it runs** is safe but
+later; **✗ nothing catches it** is the one to actually avoid.
+
 | Problem | Rust | Milo |
 |---|---|---|
 | Zero-copy view inside a scope | `&s[6..11]` | `s[6..11]`, a `&string` view, no allocation |
@@ -32,7 +37,7 @@ Zero-copy, checked at compile time. A method may return a view of storage reacha
 through `self` — never of a local or another `&` parameter — and the call **freezes the
 receiver** while the binding lives.
 
-**Works.** `key()` hands back the `host` part of the line without copying it:
+**✓ Do this.** `key()` hands back the `host` part of the line without copying it:
 
 ```milo
 pub struct Config {
@@ -58,9 +63,9 @@ pub fn main(): i32 {
 host
 ```
 
-**Does not compile.** A view cannot be stored, so there is no way to keep one past the
-expression that made it — no `Vec` of them, no struct field, no return to a caller
-that outlives `cfg`:
+**✗ The compiler stops you — this is the protection working.** A view cannot be stored,
+so there is no way to keep one past the expression that made it. In C++ this compiles and
+dangles; here it is rejected before it runs:
 
 ```milo error
 pub struct Config {
@@ -91,8 +96,9 @@ error: 'keys': references cannot be stored in a collection
   hint: references are second-class — store owned values instead
 ```
 
-**Does not compile.** While `k` is alive, `cfg` is frozen — replacing the line would
-leave `k` pointing at text that is no longer there:
+**✗ The compiler stops you — this is the protection working.** While `k` is alive, `cfg`
+is frozen. Replacing the line would leave `k` pointing at text that is no longer there,
+which is precisely the use-after-free Rust spends a lifetime annotation to prevent:
 
 ```milo error
 pub struct Config {
@@ -138,7 +144,7 @@ mutating method, so stored offsets cannot be invalidated. A `Span` is two intege
 plus the identity of the buffer it was measured from, so it can live in a struct,
 a `Vec`, or a map key.
 
-**Works.** The span outlives the call, and comparing through it allocates nothing:
+**✓ Do this.** The span outlives the call, and comparing through it allocates nothing:
 
 ```milo
 from "std/seal" import { seal }
@@ -157,9 +163,9 @@ host
 true
 ```
 
-**Aborts at runtime.** This is the trade: where Rust's `'a` gives a compile error,
-resolving a span against the wrong buffer is a named failure rather than
-wrong-but-plausible bytes:
+**⚠ Caught, but only when it runs.** This is the trade for step 3: where Rust's `'a`
+gives a compile error, Milo gives a named runtime abort. Still safe — you get a message
+naming the cause, not wrong-but-plausible bytes — but later than the two cases above:
 
 ```milo
 from "std/seal" import { seal }
@@ -184,7 +190,8 @@ See [Memory Safety vs Rust](/language/vs-rust).
 When data points at itself, put the values in one pool and refer to them by key.
 The obvious key is a `Vec` position, and that is the trap: positions get reused.
 
-**Wrong answer, no complaint.** The index outlived the element it named:
+**✗ Avoid this — nothing catches it.** The index outlived the element it named. This
+compiles, runs, and hands back the wrong record:
 
 ```milo
 pub fn main(): i32 {
@@ -202,8 +209,9 @@ pub fn main(): i32 {
 carol
 ```
 
-**Works.** `std/arena` gives a `Handle` — the position, plus which arena issued it and
-which occupant of the slot it was for. A stale one reads back as `None`:
+**✓ Do this instead.** `std/arena` gives a `Handle` — the position, plus which arena
+issued it and which occupant of the slot it was for. A stale one reads back as `None`,
+so the mistake becomes a value you must handle rather than a wrong answer:
 
 ```milo
 from "std/arena" import { Arena }
@@ -237,7 +245,7 @@ append-only storage.
 With several arenas, a key from one must not resolve in another. Both types are one
 integer wide, so the check costs nothing at runtime.
 
-**Does not compile:**
+**✗ The compiler stops you:**
 
 ```milo error
 pub struct ExprId { index: i64 }
@@ -262,7 +270,7 @@ error: argument 1 of 'exprAt': expected ExprId, got StmtId
    │                  ^
 ```
 
-**Works:**
+**✓ Do this:**
 
 ```milo
 pub struct ExprId { index: i64 }

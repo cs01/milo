@@ -82,7 +82,7 @@ Not "learn before Rust" — that requires years of pedagogical tooling.
 
 ### 1. Move semantics (default)
 
-Values have a single owner. Assignment transfers ownership; use after move is a compile error. Small value types opt in to copying with `impl Copy for Vec2 {}`.
+Values have a single owner. Assignment transfers ownership; use after move is a compile error. Copyness is structural, with no opt-in: a type whose fields are all Copy (ints, floats, bool, fixed arrays of Copy) is itself Copy and never move-tracked, while anything owning heap or carrying a `Drop` impl moves. `@noCopy` opts an integer-shaped resource handle back into move tracking.
 
 ### 2. Second-class references (no lifetimes)
 

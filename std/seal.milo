@@ -33,9 +33,11 @@
 // brand, and neither exists under this language's axiom, so the tie is checked at
 // runtime instead. See docs/residue-vs-rust.md.
 
-// A start, a length, and the identity of the buffer it was measured from.
+// A start, a length, and `_bufferId`, the identity of the buffer it was measured from.
+// (Called a "brand" in the type-theory sense; named for what it holds instead, since the
+// field is visible to anyone who reads the struct.)
 //
-// The brand is what stops the one silent failure this design had: a span resolved
+// The `_bufferId` is what stops the one silent failure this design had: a span resolved
 // against a DIFFERENT sealed buffer used to read wrong-but-in-bounds bytes and report
 // nothing. Rust prevents that with an invariant lifetime; with no lifetimes to carry
 // the tie, a runtime tag is the honest substitute, and it demotes a wrong answer to a
@@ -44,7 +46,7 @@
 // It costs nothing in space: `len` narrowed to i32 to make room, so a Span is the same
 // 16 bytes it was. That caps one span at 2GB, which is a span, not a buffer.
 //
-// Make them with `src.span(start, len)`; a hand-built Span carries brand 0, which no
+// Make them with `src.span(start, len)`; a hand-built Span carries `_bufferId` 0, which no
 // buffer ever has, so it fails closed rather than reading something plausible.
 // Declared here rather than imported from std/os. std/os also declares the OpenSSL
 // externs, and a module that imports it for malloc drags those symbols into every
@@ -68,7 +70,7 @@ extern fn memset(dst: *u8, c: i32, n: i64): *u8
 pub struct Span {
     start: i64,
     len: i32,
-    brand: i32,
+    _bufferId: i32,
 }
 
 // An immutable byte buffer. Produced by consuming a string with `seal`; the
@@ -78,21 +80,21 @@ pub struct Span {
 // by a check, it is absent from the type.
 pub struct Sealed {
     data: string,
-    brand: i32,
+    _bufferId: i32,
 }
 
 // Brands start at 1 so that a zero-valued Span (hand-built, or a zeroed struct field)
 // never matches a real buffer.
-var nextSealBrand: i64 = 1
+var nextSealBufferId: i64 = 1
 
 // Consume a buffer and return it sealed. O(1): the bytes are moved, not copied.
 pub fn seal(s: string): Sealed {
     var b: i64 = 0
     unsafe {
-        b = _atomicAddI64((nextSealBrand.addrOf()) as *u8, 1)
+        b = _atomicAddI64((nextSealBufferId.addrOf()) as *u8, 1)
     }
     var out: Sealed = Sealed {
-        data: s, brand: b as i32
+        data: s, _bufferId: b as i32
     }
     return out
 }
@@ -116,16 +118,16 @@ pub fn sealedLen(s: &Sealed): i64 {
 // A span covering the whole buffer.
 pub fn sealedSpan(s: &Sealed): Span {
     var sp: Span = Span {
-        start: 0, len: s.data.len as i32, brand: s.brand
+        start: 0, len: s.data.len as i32, _bufferId: s._bufferId
     }
     return sp
 }
 
 // Measure a span against THIS buffer. The only way to get a span that resolves:
-// a hand-built Span carries brand 0, which no buffer ever has.
+// a hand-built Span carries `_bufferId` 0, which no buffer ever has.
 pub fn sealedSpanOf(s: &Sealed, start: i64, len: i64): Span {
     var sp: Span = Span {
-        start: start, len: len as i32, brand: s.brand
+        start: start, len: len as i32, _bufferId: s._bufferId
     }
     return sp
 }
@@ -133,7 +135,7 @@ pub fn sealedSpanOf(s: &Sealed, start: i64, len: i64): Span {
 // Whether `sp` fits inside this buffer. Cheap; use it when a span from an
 // untrusted source might not belong here.
 pub fn sealedHolds(s: &Sealed, sp: Span): bool {
-    if sp.brand != s.brand {
+    if sp._bufferId != s._bufferId {
         return false
     }
     if sp.start < 0 || sp.len < 0 {
@@ -153,7 +155,7 @@ pub fn sealedByteAt(s: &Sealed, i: i64): u8 {
 // the only one: naming it `text` rather than hiding it behind indexing is the
 // point, so a reader can see where the copies are.
 pub fn sealedText(s: &Sealed, sp: Span): string {
-    assert(sp.brand == s.brand, "sealed: span was measured against a different buffer")
+    assert(sp._bufferId == s._bufferId, "sealed: span was measured against a different buffer")
     assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
     return s.data.substr(sp.start, sp.start + (sp.len as i64))
 }
@@ -162,13 +164,13 @@ pub fn sealedText(s: &Sealed, sp: Span): string {
 // a scanner's keyword checks off the allocator: the common operation on a
 // retained piece is comparing it, not owning it.
 pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
-    // Assert the brand rather than leaning on sealedHolds for it. holds() answers
+    // Assert the _bufferId rather than leaning on sealedHolds for it. holds() answers
     // "does this span fit here", and a foreign span makes it false, which eq then
     // returned as "not equal" — the wrong answer to a question the caller never
-    // asked, and the one silent failure the brand exists to stop. text() has always
+    // asked, and the one silent failure the _bufferId exists to stop. text() has always
     // aborted on this; eq() disagreed with it. A caller who genuinely wants the
     // tolerant behaviour calls holds() first.
-    assert(sp.brand == s.brand, "sealed: span was measured against a different buffer")
+    assert(sp._bufferId == s._bufferId, "sealed: span was measured against a different buffer")
     if !sealedHolds(s, sp) {
         return false
     }
@@ -188,7 +190,7 @@ pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
 // Read the span's bytes one at a time without materialising it. The borrowing
 // form: `f` sees each byte, nothing is allocated.
 pub fn sealedEach(s: &Sealed, sp: Span, f: (u8) => void): void {
-    assert(sp.brand == s.brand, "sealed: span was measured against a different buffer")
+    assert(sp._bufferId == s._bufferId, "sealed: span was measured against a different buffer")
     assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
     var i: i64 = 0
     while i < (sp.len as i64) {
@@ -209,7 +211,7 @@ impl Sealed {
     }
 
     // Measure a span against this buffer. Use this rather than building a Span by
-    // hand: a hand-built one carries brand 0 and will not resolve anywhere.
+    // hand: a hand-built one carries _bufferId 0 and will not resolve anywhere.
     fn spanOf(self: &Self, start: i64, len: i64): Span {
         return sealedSpanOf(self, start, len)
     }
@@ -273,7 +275,7 @@ impl Sealed {
 @noCopy
 pub struct Shared {
     _ptr: *u8,
-    brand: i32,
+    _bufferId: i32,
 }
 
 // Safe because nothing here writes the bytes. The only mutable state in the box
@@ -307,7 +309,7 @@ pub struct ThawRejected {
 // buffer is moved into the box, never copied.
 pub fn share(s: Sealed): Shared {
     var tmp: Sealed = s
-    let b = tmp.brand
+    let b = tmp._bufferId
     unsafe {
         let raw = malloc(sizeOf<SharedBox>())
         assert(raw as i64 != 0, "share: out of memory")
@@ -319,7 +321,7 @@ pub fn share(s: Sealed): Shared {
         memcpy(((*box).inner.addrOf()) as *u8, (tmp.addrOf()) as *u8, sizeOf<Sealed>())
         memset((tmp.addrOf()) as *u8, 0, sizeOf<Sealed>())
         var out: Shared = Shared {
-            _ptr: raw, brand: b
+            _ptr: raw, _bufferId: b
         }
         return out
     }
@@ -378,7 +380,7 @@ impl Shared {
     fn clone(self: &Self): Shared {
         _atomicAddI64(self._ptr, 1)
         var out: Shared = Shared {
-            _ptr: self._ptr, brand: self.brand
+            _ptr: self._ptr, _bufferId: self._bufferId
         }
         return out
     }

@@ -290,26 +290,27 @@ The two types come as a pair, and the shape of them is the whole idea:
 // std/seal, in full
 pub struct Sealed {
     data: string,
-    brand: i32,
+    _bufferId: i32,
 }
 
 pub struct Span {
     start: i64,
     len: i32,
-    brand: i32,
+    _bufferId: i32,
 }
 ```
 
 `seal` consumes the buffer and hands back the `Sealed`, which has no mutating method, so
 offsets into it can never be invalidated. A `Span` is 16 bytes and **holds no text at
-all**: a start, a length, and the `brand` of the buffer it was measured against. On its
-own it means nothing. Paired with its `Sealed` it means a slice, and `src.text(sp)` is
-what turns it back into characters.
+all**: a start, a length, and the id of the buffer it was measured against. On its own it
+means nothing. Paired with its `Sealed` it means a slice, and `src.text(sp)` is what turns
+it back into characters.
 
-That `brand` on both sides is the tie. It is why a span can be an ordinary value, kept in
-a `Vec`, a struct field, or a map key, without the compiler tracking where its buffer went:
-the check happens when you resolve it. A hand-built `Span` carries brand 0, which no
-buffer ever has, so a forged one fails closed rather than reading something plausible.
+That matching `_bufferId` on both sides is the tie, and the leading underscore is the
+convention for a field you are not meant to set: a hand-built `Span` gets 0, which no
+buffer ever has, so a forged one fails closed rather than reading something plausible. It
+is why a span can be an ordinary value, kept in a `Vec`, a struct field, or a map key,
+without the compiler tracking where its buffer went. The check happens when you resolve it.
 
 ::: tip ✓ THE WAY TO WRITE IT
 `words` returns a `Vec<Span>` that outlives it, and no token was copied:
@@ -364,7 +365,7 @@ it only for the tokens you actually read. `src.eq(t, "host")` compares without o
 
 ::: warning ⚠ CAUGHT, BUT ONLY WHEN IT RUNS
 Nothing here can dangle: a `Sealed` owns its bytes and has no mutating method, so there is
-no use-after-free to prevent. What the `brand` catches is a *logic* error, resolving a span
+no use-after-free to prevent. What the `_bufferId` catches is a *logic* error, resolving a span
 against the wrong buffer and reading bytes that are in bounds and simply wrong:
 
 ```milo
@@ -422,11 +423,45 @@ the reason you are reading this section at all. When Rust code needs storable to
 reaches for the same design as this one, offsets into a side table: `rustc`'s `Span`
 indexes a `SourceMap`, and lexer crates hand back byte ranges. Those carry no lifetime
 either, and resolving one against the wrong source is unchecked. Measured against the
-alternative that has the same capability, the `brand` catches a bug the usual approach
+alternative that has the same capability, the `_bufferId` catches a bug the usual approach
 does not.
 
 A partial compile-time check that caught only the two-locals case would be worse than
 none: it would pass on every toy and stay silent on the code that actually ships.
+
+### Sealing also buys free sharing
+
+Because a `Sealed` cannot change, handing it to another worker needs no copy and no lock.
+`share()` turns it into a `Shared` that each reader clones for itself:
+
+```milo
+from "std/seal" import { seal }
+from "std/runtime" import { Promise }
+
+pub fn main(): i32 {
+    let src = seal("host=localhost port=8080".clone())
+    let sh = src.share()
+    var mine = sh.clone()          // the worker's own handle, same bytes
+
+    let job = Promise<i64>.blocking(move (): i64 => {
+        return mine.len()          // reads the shared buffer on a real thread
+    })
+
+    print(sh.text(sh.spanOf(0, 4)))
+    print(job.await()!)
+    return 0
+}
+```
+
+```
+host
+24
+```
+
+Spans work against a `Shared` exactly as they do against a `Sealed`, so a tokeniser can run
+on one thread and the spans it produced can be resolved on another. This is the
+`Arc<[u8]>` row from [Memory Safety vs Rust](/language/vs-rust), and immutability is what
+makes it free: there is nothing to lock because there is nothing that can change.
 
 See [Memory Safety vs Rust](/language/vs-rust).
 

@@ -53,6 +53,28 @@ function classify(file: string, dir: string): Status {
 // (MILO_JS_PARITY=1) so it doesn't double the cost of every `bun test`.
 const enabled = !!process.env.CI || !!process.env.MILO_JS_PARITY || !!process.env.MILO_JS_PARITY_UPDATE;
 
+// A silent skip reads exactly like a pass. This gate is the only thing that knows a new
+// fixture cannot emit JS, and skipping quietly let three separate changes reach CI red
+// while every local gate reported green: `bun test tests/emitJsParity.test.ts` printed
+// "0 pass, 1 skip" and exited 0. Say so, and say what to type. Any fixture reaching
+// `addrOf` (anything using std/shard or std/seal) must be named in the baseline, and
+// nothing but this gate will tell you.
+if (!enabled) {
+  console.log(
+    "\n  SKIPPED: emit-js whole-corpus parity (~4 min).\n" +
+    "  Run it:           MILO_JS_PARITY=1 bun test tests/emitJsParity.test.ts\n" +
+    "  Refresh baseline: MILO_JS_PARITY_UPDATE=1 bun test tests/emitJsParity.test.ts\n",
+  );
+}
+
+// Cheap and always on. The comparison below can be skipped; a baseline naming a fixture
+// that no longer exists is drift, and catching it costs milliseconds.
+test("every js-parity baseline entry names a fixture that exists", () => {
+  const present = new Set(readdirSync(FIXTURES).filter(f => f.endsWith(".milo")));
+  const stale = Object.keys(JSON.parse(readFileSync(BASELINE, "utf8"))).filter(f => !present.has(f));
+  expect(stale).toEqual([]);
+});
+
 test.skipIf(!enabled)("emit-js: whole-corpus parity against native", () => {
   const files = readdirSync(FIXTURES).filter(f => f.endsWith(".milo") && !SKIP.has(f)).sort();
   const dir = mkdtempSync(join(tmpdir(), "milo-parity-"));

@@ -2313,6 +2313,19 @@ export class TypeChecker {
       if (fn.contracts && fn.contracts.length > 0) this.fnDecls.set(fn.name, fn);
     }
 
+    // Drop-ness has to be known BEFORE derive synthesis, not after registerImpl runs:
+    // a Drop type is never Copy, and the first copy-ness query decides that from an empty
+    // dropImpls and caches `true`. The auto-derived Clone then reads its field as Copy and
+    // synthesizes `Wrap { inner: self.inner }`, a move out of `&self`, which the checker
+    // rejects with no span on a struct the program never touched. registerImpl adds these
+    // again; a Set makes that idempotent, and it still owns the validation.
+    for (const impl of program.impls) {
+      if (impl.traitName === "Drop" && (this.structs.has(impl.typeName) || this.enums.has(impl.typeName))) {
+        this.dropImpls.add(impl.typeName);
+      }
+    }
+    this.allCopyCache.clear();
+
     // process @derive attributes — synthesize impl decls
     const derivedImpls = this.processDerives(program);
 

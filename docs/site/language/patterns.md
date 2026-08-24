@@ -65,6 +65,10 @@ std::string_view key{line.data(), 4};  // dangles if line changes
 const key = line.slice(0, 4);  // copies
 ```
 
+```milo skip [Milo]
+let key = line[0..4]  // a view, no lifetime, no copy
+```
+
 :::
 
 Slice it. That is the whole thing.
@@ -182,6 +186,12 @@ fn key(line: &str) -> String {
 }
 ```
 
+```cpp [C++]
+std::string key(const std::string& line) {
+    return line.substr(0, 4);  // substr returns an owning string
+}
+```
+
 ```ts [TypeScript]
 function key(line: string): string {
     return line.slice(0, 4);    // already a copy
@@ -249,6 +259,26 @@ pattern is for.
 :::
 
 ## Store many string slices without an allocation each
+
+::: code-group
+
+```rust [Rust]
+struct Token { start: usize, len: usize }  // storable, but nothing ties it to a buffer
+```
+
+```cpp [C++]
+struct Token { std::string_view text; };   // storable, and dangles when the source dies
+```
+
+```ts [TypeScript]
+const tokens = src.split(" ");             // GC: one string object per token
+```
+
+```milo skip [Milo]
+var toks: Vec<Span> = words(src)           // 16 bytes each, tied to their buffer
+```
+
+:::
 
 The tokeniser case: one token per word in a large file, each surviving the function that
 found it, and no allocation per token. A view cannot leave the call, and owning each token
@@ -419,6 +449,12 @@ struct Lexer {
 };
 ```
 
+```ts [TypeScript]
+class Lexer {
+    constructor(public src: string, public pos = 0) {}  // GC owns it
+}
+```
+
 ```milo skip [Milo]
 pub struct Lexer {
     src: string,  // owns its text, so nothing can outlive anything
@@ -507,6 +543,12 @@ struct Expr {
 };
 ```
 
+```ts [TypeScript]
+type Expr =
+    | { kind: "num"; value: number }
+    | { kind: "add"; l: Expr; r: Expr };  // GC handles the recursion
+```
+
 ```milo skip [Milo]
 enum Expr {
     Num(i64),
@@ -581,6 +623,10 @@ type Link = Rc<RefCell<Node>>;  // runtime borrow check, can leak cycles
 struct Node { Node* parent; };  // raw pointers, no checking at all
 ```
 
+```ts [TypeScript]
+class Node { parent?: Node; }  // GC collects cycles for you
+```
+
 ```milo skip [Milo]
 var arena: Arena<Node> = Arena<Node>.new()
 let h = arena.alloc(node)  // Handle: index + generation
@@ -647,6 +693,30 @@ append-only storage.
 :::
 
 ## Stop two kinds of index from being mixed up
+
+::: code-group
+
+```rust [Rust]
+struct NodeId(u32);                  // newtype, checked
+struct EdgeId(u32);
+```
+
+```cpp [C++]
+using NodeId = uint32_t;             // a typedef, NOT a distinct type
+using EdgeId = uint32_t;             // these are interchangeable
+```
+
+```ts [TypeScript]
+type NodeId = number & { __k: "node" };  // branded, erased at runtime
+type EdgeId = number & { __k: "edge" };
+```
+
+```milo skip [Milo]
+pub struct NodeId { index: i64 }     // single-field struct, zero cost
+pub struct EdgeId { index: i64 }
+```
+
+:::
 
 With several arenas, a key from one must not resolve in another. Both types are one
 integer wide, so the check costs nothing at runtime.

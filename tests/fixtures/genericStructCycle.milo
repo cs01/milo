@@ -1,0 +1,70 @@
+// Regression: a generic struct reached again WHILE it is being instantiated.
+// `Rejected<T>` holds an `Owner<T>`, and `Owner<T>`'s own method returns
+// `Rejected<T>`, so resolving the field type walks back into the instantiation
+// that started it. The memo for `Rejected_f64` used to be installed only after
+// its fields resolved, so the re-entry re-ran the whole instantiation and
+// registered every impl method a second time; LLVM then refused the program with
+// `invalid redefinition of function`. It takes a second generic function over
+// the pair to open the window, which is why the shape here is this specific.
+// Nothing about it is shard-specific, so it gets a fixture of its own.
+// @expect: refused: owner held 7
+// @expect: recovered 1.5
+
+struct Owner<T> {
+    v: T,
+}
+
+struct Rejected<T> {
+    owner: Owner<T>,
+    why: i64,
+}
+
+impl Rejected<T> {
+    fn describe(self: &Self): string {
+        return "owner held " + self.why.toString()
+    }
+}
+
+impl Owner<T> {
+    fn take(self: Self, ok: bool): Result<T, Rejected<T>> {
+        if ok {
+            return Result.Ok(self.v)
+        }
+        var r: Rejected<T> = Rejected {
+            owner: self, why: 7
+        }
+        return Result.Err(r)
+    }
+}
+
+fn viaGeneric<T, S>(x: T, s: Vec<S>): Result<T, Rejected<T>> {
+    var o: Owner<T> = Owner {
+        v: x
+    }
+    if s.len == 0 {
+        var idle: Owner<T> = Owner {
+            v: o.take(true)!
+        }
+        var r: Rejected<T> = Rejected {
+            owner: idle, why: 0
+        }
+        return Result.Err(r)
+    }
+    return o.take(false)
+}
+
+pub fn main(): i32 {
+    var s: Vec<i64> = Vec.new()
+    s.push(1)
+    match viaGeneric(1.5, s) {
+        Result.Ok(_v) => {
+            print("WRONG: took it")
+        }
+        Result.Err(rej) => {
+            print("refused: " + rej.describe())
+            let back = rej.owner
+            print("recovered " + back.take(true)!.toString())
+        }
+    }
+    return 0
+}

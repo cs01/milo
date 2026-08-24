@@ -1291,18 +1291,27 @@ export class TypeChecker {
       }
     }
 
-    const fields = generic.decl.fields.map(f => ({
-      name: f.name,
-      type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
-      ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
-    }));
-    this.structs.set(mangled, {
-      fields, baseName, typeArgs,
+    // The memo entry goes in BEFORE the field types are resolved, because
+    // resolving one can lead straight back to this same instantiation: a struct
+    // whose field is `Owner<T>` whose own method returns `Rejected<T>` reaches
+    // `Rejected_f64` again while `Rejected_f64` is still being built. With the
+    // memo installed only afterwards, that re-entry re-ran the whole body and
+    // registered every impl method a second time, and LLVM rejected the program
+    // with `invalid redefinition of function`. Fields are filled in below; the
+    // re-entrant reader only needs the name to exist, not the layout.
+    const entry: StructInfo = {
+      fields: [], baseName, typeArgs,
       // Copy-ness is a property of the declaration, so every instantiation of a
       // `@noCopy` generic inherits it — `Handle<Texture>` is no more copyable than
       // the `Handle<T>` it came from.
       ...(generic.decl.attributes?.some(a => a.name === "noCopy") ? { noCopy: true } : {}),
-    });
+    };
+    this.structs.set(mangled, entry);
+    entry.fields = generic.decl.fields.map(f => ({
+      name: f.name,
+      type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
+      ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
+    }));
 
     const decl: StructDecl = {
       kind: "StructDecl",

@@ -6,15 +6,16 @@ exists only as a parameter, for the duration of one call. That is what buys the 
 annotations. There is no `'a` anywhere, because nothing can outlive anything.
 
 Whether that bet is worth taking comes down to a single question: how much real code can
-you still write? We went and counted. Across roughly 1,200 lifetime annotations in
-ripgrep and deno, about 70% were zero-copy views into owned data (slicing a string,
-iterating a vec, passing a buffer), and second-class references cover every one of those.
-The other 30%, mostly structs holding borrowed fields like `Parser<'a>`, iterators that
-yield borrows, and `Cow<'a, T>`, cannot be written at all.
+you still write? So we counted. Across five Rust codebases of deliberately different
+shape (a web framework, a CLI library, a C++ interop toolchain, a data indexer, and an
+agentic CLI app) there were 2,553 lifetime annotations. **87% of them sit on a function
+signature**, a borrow that lives for one call, and second-class references cover every
+one. The remaining 13% sit on a *type* that stores a borrow, `Parser<'a>` and friends,
+and those cannot be written here at all.
 
-This page is the answer to that 30%. These are the patterns we landed on to keep the
-language usable, concise, and pleasant without first-class references: what to write
-instead, and what each one costs you.
+That 13% is what this page is about: the patterns we landed on to keep the language
+usable, concise, and pleasant without first-class references, and what each one costs
+you. Re-run the count yourself with `scripts/lifetime-census.py`.
 
 Start with the string case, which is where most people hit the wall first.
 

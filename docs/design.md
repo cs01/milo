@@ -3,7 +3,7 @@ system: language-design
 purpose: the why behind Milo's design decisions — memory model, references, concurrency, error handling
 key-files: docs/language-reference.md, src/checker.ts, std/arena.milo
 update-when: a design decision changes, a deferred feature ships, or a fence/tradeoff is revised
-last-verified: 2026-08-23
+last-verified: 2026-08-24
 -->
 
 # Milo Language Design
@@ -98,7 +98,22 @@ fn bad(): &string { ... }       // COMPILE ERROR: can't return a reference
 struct Bad { ref: &string }     // COMPILE ERROR: can't store a reference
 ```
 
-**Why not lifetimes?** We studied ~1,200 lifetime annotations across ripgrep and deno. Roughly 70% were zero-copy views into owned data — slicing a string, iterating a vec, passing a buffer. Second-class refs + zero-copy slices + `for` loops cover all of those. The remaining 30% (structs holding borrowed fields like `Parser<'a>`, iterators yielding borrows, `Cow<'a, T>`) cannot be expressed. Milo's answer: restructure around functions (pass `&string` as a param instead of storing it) or own the data. The tradeoff is real — no `struct LineIter { source: &string }` — but the workaround (a function taking `&string` plus a callback, or a `for` loop) is a 2–3 line difference, and well-structured Rust code gravitates toward this style anyway.
+**Why not lifetimes?** The original read was ~1,200 lifetime annotations across ripgrep and deno: roughly 70% zero-copy views into owned data (slicing a string, iterating a vec, passing a buffer), which second-class refs + zero-copy slices + `for` loops cover, and 30% (structs holding borrowed fields like `Parser<'a>`, iterators yielding borrows, `Cow<'a, T>`) that cannot be expressed. That study left no script and no corpus, so it could not be re-derived, and both codebases are the same shape: scan bytes fast.
+
+Re-measured 2026-08-24 on a wider corpus with `scripts/lifetime-census.py`, which counts where a lifetime SITS (a fn signature, which second-class refs cover, versus a type that stores a borrow, which they cannot):
+
+| Codebase | Kind | On a fn signature | On a type | Inexpressible |
+|---|---|---:|---:|---:|
+| axum | web framework | 159 | 21 | 11.7% |
+| clap | CLI library | 169 | 28 | 14.2% |
+| crubit | C++/Rust interop, codegen | 551 | 75 | 12.0% |
+| cocoindex | data indexing | 144 | 27 | 15.8% |
+| codex | agentic CLI app | 1193 | 186 | 13.5% |
+| **total** | | **2216** | **337** | **13.2%** |
+
+The two measurements have different denominators (annotations versus declarations), so 13% does not refute 30%; it is a second, reproducible reading over five codebases of genuinely different shape, and it lands well under the original.
+
+Where the inexpressible cases sit matters as much as how many. In libraries they cluster: 62% of axum's are in three files, mostly serde `Deserializer<'de>` types, and 54% of clap's are in three. In an application they do not: codex spreads 186 across 127 files. So a library can often confine the problem to one subsystem and reach for an arena there, while application code meets it in many small places at once. Milo's answer: restructure around functions (pass `&string` as a param instead of storing it) or own the data. The tradeoff is real — no `struct LineIter { source: &string }` — but the workaround (a function taking `&string` plus a callback, or a `for` loop) is a 2–3 line difference, and well-structured Rust code gravitates toward this style anyway.
 
 **No `&mut` at the callsite.** Milo auto-borrows arguments — you write `f(x)`, not `f(&mut x)`, even when `f` takes `&mut T`. Rust requires the callsite marker because `&mut` is an *exclusive* borrow and the marker is required for aliasing analysis. Milo's references are second-class — never stored, returned, or aliased — so an exclusive borrow cannot escape a call or overlap another live reference. The aliasing danger that makes Rust's marker earn its keep cannot occur here, so the marker would be pure ceremony. Mutation intent is carried by the function signature and name; reader-side visibility is delegated to the LSP, which will render the elided `&mut` as an inlay hint at the callsite (planned) rather than baking it into the syntax.
 

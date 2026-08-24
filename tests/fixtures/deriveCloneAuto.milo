@@ -1,0 +1,31 @@
+// Clone is auto-derived by the same fixpoint as Eq: every plain struct gets `.clone()`
+// with no annotation, nesting included, so the explicit spelling the index-clone lint
+// asks for is always available. Copy fields are copied, heap fields cloned.
+// @expect: alice
+// @expect: nested
+// @expect: alice
+// @expect: 2
+pub struct Inner {
+    tag: string
+}
+
+pub struct Rec {
+    name: string, inner: Inner, n: i64
+}
+
+pub fn main(): i32 {
+    var v: Vec<Rec> = Vec.new()
+    v.push(Rec {
+        name: "alice", inner: Inner {
+            tag: "nested"
+        }
+        , n: 2
+    }
+    )
+    let c = v[0].clone()
+    print(c.name)
+    print(c.inner.tag)
+    print(v[0].name)
+    print(c.n)
+    return 0
+}

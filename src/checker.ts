@@ -2461,6 +2461,7 @@ export class TypeChecker {
   private processDerives(program: Program): import("./ast").ImplDecl[] {
     const result: import("./ast").ImplDecl[] = [];
     const explicitEq = new Set<string>();
+    const explicitClone = new Set<string>();
     for (const tpl of program.deriveTemplates ?? []) {
       // A template may not take a built-in's name. Silently losing to `Eq` would make a
       // package's derive a no-op that still type-checks, which is the worst failure a
@@ -2500,6 +2501,15 @@ export class TypeChecker {
         if (attr.name !== "derive") continue;
         for (const traitName of attr.args) {
           if (traitName === "Eq") explicitEq.add(s.name);
+          if (traitName === "Clone") {
+            explicitClone.add(s.name);
+            // Checked here, not in deriveClone: dropImpls is not populated until impls
+            // register, which is after synthesis — the method-local check passed a Drop
+            // type clean because it ran too early to see the impl.
+            if (program.impls.some(i => i.traitName === "Drop" && i.typeName === s.name)) {
+              this.error(`cannot derive Clone for '${s.name}': it implements Drop, so each clone would release the resource again on drop`, s.span);
+            }
+          }
           const impl = this.synthesizeDeriveImpl(s, traitName);
           if (impl) result.push(impl);
         }
@@ -2508,6 +2518,7 @@ export class TypeChecker {
     // auto-derive Eq for all structs not explicitly derived and not generic
     // loop until fixpoint (struct A containing struct B needs B derived first)
     const derived = new Set<string>();
+    const cloneDerived = new Set<string>();
     let changed = true;
     while (changed) {
       changed = false;
@@ -2527,8 +2538,104 @@ export class TypeChecker {
           if (impl) { result.push(impl); derived.add(s.name); changed = true; }
         }
       }
+      // Auto-derive Clone by the same fixpoint, so `.clone()` exists on every plain
+      // struct without ceremony — the explicit spelling the index-clone lint asks for
+      // has to actually be available. Fixpoint, because struct A { b: B } is clonable
+      // only once B is.
+      //
+      // Two exclusions Eq does not need: a Drop type (cloning an fd closes it twice —
+      // the TcpStream bug, as a method) and `@noCopy` (the attribute exists precisely
+      // to stop copies of a resource handle; a clone() would be the same hazard with
+      // an explicit spelling).
+      for (const s of program.structs) {
+        if (s.typeParams.length > 0) continue;
+        if (s.isOpaque) continue;
+        if (explicitClone.has(s.name)) continue;
+        if (cloneDerived.has(s.name)) continue;
+        if (program.impls.some(i => i.traitName === "Clone" && i.typeName === s.name)) continue;
+        if (program.impls.some(i => i.traitName === "Drop" && i.typeName === s.name)) continue;
+        if (s.attributes?.some(a => a.name === "noCopy")) continue;
+        let allClone = true;
+        for (const f of s.fields) {
+          const ft = this.resolve(f.type);
+          if (!this.canAutoClone(ft, cloneDerived)) { allClone = false; break; }
+        }
+        if (allClone) {
+          const impl = this.deriveClone(s, true);
+          if (impl) { result.push(impl); cloneDerived.add(s.name); changed = true; }
+        }
+      }
     }
     return result;
+  }
+
+  // A field the synthesized clone() can reproduce: copied when Copy, `.clone()`d when the
+  // builtin or the struct provides one. Enums with payloads have no clone path yet, so a
+  // struct holding one is not auto-clonable — explicit `@derive(Clone)` on it errors with
+  // the field name rather than synthesizing something wrong.
+  // `pending` carries the structs derived earlier in the same fixpoint loop — they are
+  // not in traitImpls yet (registration happens after synthesis), and without them the
+  // fixpoint can never close over `struct A { b: B }`.
+  private canAutoClone(t: TypeKind, pending?: Set<string>): boolean {
+    if (isCopy(t, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))) return true;
+    if (t.tag === "string") return true;
+    // A container clones only what its contents can: Vec<closure> has no clone (an owning
+    // closure's environment cannot be duplicated), and letting it through synthesized a
+    // clone() whose body failed to compile inside std/http.
+    // isCopy accepts a by-ref closure (its environment is a stack slot), but Vec.clone
+    // rejects every closure: the element would be duplicated OUT of the frame that owns
+    // that slot. So "the element is Copy" is not sufficient here — a closure element
+    // disqualifies the container even when the closure itself is copyable.
+    if (t.tag === "vec") return t.element.tag !== "fn" && this.canAutoClone(t.element, pending);
+    if (t.tag === "hashmap") return t.value.tag !== "fn" && this.canAutoClone(t.key, pending) && this.canAutoClone(t.value, pending);
+    if (t.tag === "struct") return this.typeImplementsTrait(t.name, "Clone") || !!pending?.has(t.name);
+    return false;
+  }
+
+  private deriveClone(s: import("./ast").StructDecl, skipValidation = false): import("./ast").ImplDecl {
+    if (!skipValidation) {
+      if (this.dropImpls.has(s.name) || s.attributes?.some(a => a.name === "noCopy")) {
+        this.error(`cannot derive Clone for '${s.name}': it is a resource type (Drop or @noCopy), and duplicating it would release the resource twice`, s.span);
+      }
+      for (const f of s.fields) {
+        const ft = this.resolve(f.type);
+        if (!this.canAutoClone(ft)) {
+          this.error(`cannot derive Clone for '${s.name}': field '${f.name}' of type '${typeName(ft)}' has no clone`, s.span);
+        }
+      }
+    }
+
+    // synthesize: fn clone(self: &Self): Self { return S { f: self.f | self.f.clone(), ... } }
+    const selfParam: import("./ast").Param = { name: "self", type: { name: "Self", isPtr: false, isRef: true, isRefMut: false, isArray: false, arraySize: null } };
+    const fields = s.fields.map(f => {
+      const ft = this.resolve(f.type);
+      const access: Expr = { kind: "FieldAccess" as const, object: { kind: "Ident" as const, name: "self" }, field: f.name };
+      const value: Expr = isCopy(ft, (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n))
+        ? access
+        : { kind: "MethodCall" as const, object: access, method: "clone", args: [] };
+      return { name: f.name, value };
+    });
+    const body: Expr = { kind: "StructLit", name: s.name, fields };
+
+    const cloneFn: Function = {
+      kind: "Function",
+      name: "clone",
+      typeParams: [],
+      params: [selfParam],
+      retType: { name: s.name, isPtr: false, isRef: false, isRefMut: false, isArray: false, arraySize: null },
+      contracts: [],
+      body: [{ kind: "Return" as const, value: body }],
+      isExtern: false,
+      isVariadic: false,
+    };
+
+    return this.stampOrigin({
+      kind: "ImplDecl",
+      traitName: "Clone",
+      typeName: s.name,
+      typeParams: [],
+      methods: [cloneFn],
+    }, s);
   }
 
   private canAutoEq(t: TypeKind): boolean {
@@ -2550,6 +2657,7 @@ export class TypeChecker {
 
   private synthesizeDeriveImpl(s: import("./ast").StructDecl, traitName: string): import("./ast").ImplDecl | null {
     if (traitName === "Eq") return this.deriveEq(s);
+    if (traitName === "Clone") return this.deriveClone(s);
     if (traitName === "Json") return this.deriveJson(s);
     const tpl = this.deriveTemplates.get(traitName);
     if (tpl) {

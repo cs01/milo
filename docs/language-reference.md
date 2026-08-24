@@ -2005,9 +2005,16 @@ struct Point { x: i32, y: i32 }
 struct Config { host: string, port: i32 }
 ```
 
-`Eq` synthesizes field-wise equality. `Json` synthesizes `toJson` / `fromJson` /
+`Eq` synthesizes field-wise equality. `Clone` synthesizes a field-wise `clone()`: Copy
+fields are copied, heap fields cloned. `Json` synthesizes `toJson` / `fromJson` /
 `fromJsonNode` — see [JSON Serialization](#json-serialization). They compose:
-`@derive(Eq, Json)`.
+`@derive(Eq, Clone, Json)`.
+
+`Eq` and `Clone` are also derived **automatically** for every non-generic struct whose
+fields support them, so both work with no annotation on plain data. `Clone` skips resource
+types: a struct with a `Drop` impl or `@noCopy` never receives an automatic `clone()`,
+since each copy would release the resource again, and an explicit `@derive(Clone)` on one
+is an error naming the reason.
 
 ### Writing your own derive
 
@@ -2054,7 +2061,7 @@ readable. A field hole outside `@fields` is an error rather than an empty string
 `@fields` is the only control construct, and it repeats over a list the struct declaration
 fixes, so expansion always terminates — this is deliberately a template mechanism and not
 a macro system. Nesting `@fields` inside `@fields` is an error, a template may not take a
-built-in derive's name (`Eq`, `Json`), and a derive is private to its file unless marked
+built-in derive's name (`Eq`, `Clone`, `Json`), and a derive is private to its file unless marked
 `pub`.
 
 Generic structs are not supported: `@derive` skips a struct with type parameters, built-in

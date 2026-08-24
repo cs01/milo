@@ -1,0 +1,16 @@
+// A Drop type must never get clone(): the clone and the original both run drop, and the
+// resource is released twice. The explicit derive names the reason instead of synthesizing
+// the hazard.
+// @error: cannot derive Clone for 'Fd': it implements Drop
+@derive(Clone)
+pub struct Fd { fd: i32 }
+
+impl Drop for Fd {
+    fn drop(self: &mut Self) {
+        print("close")
+    }
+}
+
+pub fn main(): i32 {
+    return 0
+}

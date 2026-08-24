@@ -1,0 +1,13 @@
+// @noCopy exists to stop copies of an integer-shaped resource handle, so the auto-derive
+// skips it: handing the same type a clone() would be the same hazard with an explicit
+// spelling.
+// @error: type 'Handle' has no method 'clone'
+@noCopy
+pub struct Handle { id: i32 }
+
+pub fn main(): i32 {
+    let h = Handle { id: 7 }
+    let h2 = h.clone()
+    print(h2.id)
+    return 0
+}

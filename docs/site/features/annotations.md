@@ -127,9 +127,13 @@ struct Point { x: i32, y: i32 }
 print(Point { x: 1, y: 2 } == Point { x: 1, y: 2 })   // true
 ```
 
-`Eq` is the only derivable trait. Every field must itself implement `Eq`. Other
-operators are implemented by hand — see [Traits](/language/traits) for overloading `Add`, `Sub`,
-`Mul`, and `Div`.
+Three traits are built-in derivable: `Eq`, `Clone`, and `Json`. `Eq` and `Clone` are
+also derived automatically for any plain struct whose fields support them, so `==` and
+`.clone()` exist with no annotation at all. The exceptions are resource types: a struct
+with a `Drop` impl or `@noCopy` never gets an automatic `clone()`, because duplicating it
+would release the resource twice. A user-written trait becomes derivable with a
+`derive Trait { … }` template. Operators are implemented by hand — see
+[Traits](/language/traits) for overloading `Add`, `Sub`, `Mul`, and `Div`.
 
 ## Linkage
 

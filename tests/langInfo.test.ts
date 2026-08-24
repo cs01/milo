@@ -128,7 +128,7 @@ test("the annotations the checker enforces are documented for humans too", () =>
 // passing, which would satisfy a bare includes() while the reference table stayed wrong.
 test("the published annotations table lists every attribute", () => {
   const page = readFileSync(
-    join(import.meta.dir, "..", "docs", "site", "language", "annotations.md"), "utf-8");
+    join(import.meta.dir, "..", "docs", "site", "features", "annotations.md"), "utf-8");
   const rows = page.split("\n").filter(l => /^\| `@/.test(l));
   expect(rows.length).toBeGreaterThan(10); // a table that stopped matching is not a pass
   const listed = rows.join("\n");

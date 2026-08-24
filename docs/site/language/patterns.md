@@ -1,10 +1,6 @@
 # Patterns Without Lifetimes
 
-Milo makes one big bet: **a reference can never be stored.** Not in a struct, not in a
-collection, and not returned from a function, save one narrow case shown below. `&T`
-exists only as a parameter, for the duration of one call. That is what buys the language
-its total absence of lifetime annotations. There is no `'a` anywhere, because nothing can
-outlive anything.
+Milo makes one big bet: **a reference can never be stored.**
 
 Whether that bet is worth taking comes down to a single question: how much real code can
 you still write? So we counted. Across five Rust codebases of deliberately different

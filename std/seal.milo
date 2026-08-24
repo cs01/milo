@@ -24,8 +24,9 @@
 // to keep. It touches memory only when you resolve it against a Sealed.
 //
 // What makes the offsets safe is not care, it is that `Sealed` exposes no
-// operation that could invalidate them. There is no check to forget and no
-// unsafe block in this file.
+// operation that could invalidate them. There is no check to forget on the
+// reading path. (The `Shared` half below does use unsafe, for a refcount box;
+// the sealed bytes themselves are still never written.)
 //
 // A Span carries the identity of the buffer it was measured from, so resolving
 // one against a different Sealed is a named failure rather than wrong-but-plausible

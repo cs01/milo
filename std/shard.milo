@@ -310,10 +310,18 @@ pub fn parallelMapWith<T, S>(v: Vec<T>, windows: i64, states: Vec<S>, f: (Shard<
     }
     var owner = shatter(v, windows)
     var ws = owner.windows()
-    // Capacity = windows on both queues, so every send below completes without a
-    // waiting reader and no interleaving can deadlock.
-    let jobs = Channel<Shard<T>>.new(windows)!
-    let out = Channel<Shard<T>>.new(windows)!
+    // `shatter` clamps the count to one window per element, so asking for more
+    // windows than the buffer has elements yields FEWER than `windows`. Every
+    // count below has to come from the windows that actually exist: driving the
+    // collection loop off the parameter instead waits for windows nobody will
+    // send, and since this function still holds a sender on `out`, that wait
+    // never ends. Over-partitioning a small input is the exact thing this
+    // function tells callers to do, so the parameter is the wrong source.
+    let made = ws.len
+    // Capacity = one slot per window on both queues, so every send below
+    // completes without a waiting reader and no interleaving can deadlock.
+    let jobs = Channel<Shard<T>>.new(made)!
+    let out = Channel<Shard<T>>.new(made)!
     var ps: Vec<Promise<S>> = Vec.new()
     var sts = states
     while sts.len > 0 {
@@ -338,7 +346,7 @@ pub fn parallelMapWith<T, S>(v: Vec<T>, windows: i64, states: Vec<S>, f: (Shard<
     }
     jobs.close()
     var back: Vec<Shard<T>> = Vec.new()
-    for i in 0..windows {
+    for i in 0..made {
         back.push(out.recv()!)
     }
     var got = Promise.all(ps).await()!

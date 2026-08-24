@@ -1,0 +1,44 @@
+// Regression: `shatter` clamps the window count to one window per element, so
+// asking for more windows than the buffer has elements produces fewer windows
+// than were requested. parallelMapWith used to drive its collection loop off the
+// requested count, so it waited on windows nobody would ever send and hung with
+// no output. Over-partitioning a small input is what the function tells callers
+// to do for load balance, so this is the recommended usage, not a corner.
+// @expect: 2
+// @expect: 4
+
+from "std/shard" import {
+    Shard, parallelMapWith
+}
+
+pub struct Env {
+    seen: i64,
+}
+
+fn double(w: Shard<f64>, e: &mut Env): Shard<f64> {
+    for i in 0..w.len() {
+        w.set(i, w.get(i) * 2.0)
+    }
+    e.seen = e.seen + 1
+    return w
+}
+
+pub fn main(): i32 {
+    var v: Vec<f64> = Vec.filled(2, 1.0)
+    var envs: Vec<Env> = Vec.new()
+    for k in 0..2 {
+        envs.push(Env {
+            seen: 0
+        }
+        )
+    }
+    // 8 windows requested, only 2 elements exist.
+    let r = parallelMapWith(v, 8, envs, double)!
+    print(r.data.len.toString())
+    var total: f64 = 0.0
+    for x in r.data {
+        total = total + x
+    }
+    print(total.toString())
+    return 0
+}

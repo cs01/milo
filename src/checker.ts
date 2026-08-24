@@ -3864,7 +3864,11 @@ export class TypeChecker {
         if (!node || typeof node !== "object") return;
         if (Array.isArray(node)) { for (const n of node) walk(n); return; }
         const n = node as Record<string, unknown> & { kind?: string; func?: unknown; method?: unknown; span?: unknown };
-        if (n.kind === "Call" && typeof n.func === "string" && (n.func === "shatter" || n.func === "shatterStr")) {
+        // `shatterStr` deliberately has NO one-call form (std/shard: the read-only
+        // half is the supported way to divide a string), so recommending
+        // parallelMap to a string caller sends them at an API that will not take
+        // their argument. Only the Vec side has a form to prefer.
+        if (n.kind === "Call" && typeof n.func === "string" && n.func === "shatter") {
           shatterSpan ??= n.span as Span | undefined;
         }
         if (n.kind === "MethodCall" && n.method === "weld") welds = true;

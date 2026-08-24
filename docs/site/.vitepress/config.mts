@@ -134,6 +134,7 @@ export default defineConfig({
             { text: 'Error Handling', link: '/language/error-handling' },
             { text: 'Ownership', link: '/language/ownership' },
             { text: 'Memory Safety vs Rust', link: '/language/vs-rust' },
+            { text: 'Why There Are No Lifetimes', link: '/language/why-no-lifetimes' },
             { text: 'Patterns Without Lifetimes', link: '/language/patterns' },
             { text: 'Collections', link: '/language/collections' },
             { text: 'Strings', link: '/language/strings' },

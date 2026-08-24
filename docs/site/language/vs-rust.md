@@ -26,7 +26,9 @@ cost lands on one shape only — an acyclic borrow into stable storage, which is
 exactly what `'a` exists for. It does not land on cyclic data: a lifetime cannot
 describe a cycle either, so Rust reaches for the same generational handles
 there, which is why that row is even. See [Ownership](/language/ownership) and
-[Patterns Without Lifetimes](/language/patterns) for what to write instead.
+[Patterns Without Lifetimes](/language/patterns) for what to write instead, and
+[Why There Are No Lifetimes](/language/why-no-lifetimes) for how much code the bet
+actually touches.
 
 Second-class references — you cannot store one in a struct or a collection, and
 the only thing you can return is a view of a receiver's own data — mean nothing

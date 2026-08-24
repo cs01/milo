@@ -40,7 +40,7 @@ Each pattern below shows the working form and the ways it can go wrong, in colou
 | 🟩 **The way to write it** | the form to reach for |
 | 🟦 **The compiler stops you** | rejected before it runs, at no runtime cost. The guardrail working |
 | 🟨 **Caught, but only when it runs** | still safe, and it aborts with a named cause, but later |
-| 🟥 **Nothing catches this** | compiles, runs, gives a wrong answer. The one to actually avoid |
+| 🟥 **Don't do this: a silent bug** | compiles, runs, and hands back the wrong answer. Nothing warns you, so this is the one to actually avoid |
 
 For a Rust construct not listed here, the full shape-by-shape table is in
 [Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
@@ -114,7 +114,7 @@ error: cannot assign to 'line' because it is borrowed
 :::
 
 ::: info 🛡 THE COMPILER STOPS YOU
-Views cannot be stored — no `Vec` of them, no struct field:
+Views cannot be stored: no `Vec` of them, no struct field:
 
 ```milo error
 pub fn main(): i32 {
@@ -160,7 +160,7 @@ pub fn main(): i32 {
 host
 ```
 
-Only of `self` — never of a local or another `&` parameter. That is the one place a
+Only of `self`, never of a local or another `&` parameter. That is the one place a
 reference may be returned at all.
 
 ## Return a piece of a string to your caller
@@ -481,8 +481,8 @@ returned, pushed into a `Vec`, and freed exactly once when the `Vec` goes. Nothi
 counted at runtime and nothing can be shared by accident.
 
 This covers any tree that owns its children. When a node needs to point *back* at its
-parent, or two nodes need to point at each other, ownership is no longer a tree — that is
-the next section.
+parent, or two nodes need to point at each other, ownership is no longer a tree, which
+is the next section.
 
 :::
 
@@ -509,9 +509,9 @@ let h = arena.alloc(node)  // Handle: index + generation
 Put the values in one pool and refer to them by key. The obvious key is a `Vec` position,
 and that is the trap: positions get reused.
 
-::: danger ✗ NOTHING CATCHES THIS
-The index outlived the element it named — compiles, runs,
-returns the wrong record:
+::: danger ✗ DON'T DO THIS: A SILENT BUG
+`idx` was taken when the slot held `alice`. After the slot is reused it names `carol`
+instead, and the read succeeds. No error, no crash, just the wrong record:
 
 ```milo
 pub fn main(): i32 {

@@ -44,17 +44,28 @@ For a Rust construct not listed here, the full shape-by-shape table is in
 Slice it. That is the whole thing:
 
 ```milo
+fn shout(s: &string) {
+    print(s.toUpper())
+}
+
 pub fn main(): i32 {
     let line = "host=localhost"
     let key = line[0..4]  // a view into line, nothing copied
     print(key)
+    shout(key)            // goes anywhere a &string goes
+    print(key.len)
     return 0
 }
 ```
 
 ```
 host
+HOST
+4
 ```
+
+The view behaves like any other `&string`: pass it to a function, read its length, compare
+it. No allocation happened, and no annotation was needed to make that safe.
 
 ::: code-group
 
@@ -315,8 +326,9 @@ pub struct Lexer {
 A struct may not store a borrow, so the cursor **owns the buffer** and carries an integer
 position, slicing on demand.
 
-**✓ Do this.** No lifetime, no borrow stored, and `nextWord` can be called as often as
-you like:
+**✓ Do this.** Because the cursor owns its text, `lexerFor` can build the string *and* a
+cursor over it and return both as one value. That is the case Rust cannot write at all: a
+`Lexer<'a>` borrowing a local would be returning a reference to something about to die.
 
 ```milo
 pub struct Lexer {
@@ -341,8 +353,14 @@ impl Lexer {
     }
 }
 
+// Builds the text AND the cursor over it, then hands both back as one value.
+fn lexerFor(name: &string): Lexer {
+    let text = name.clone() + " = localhost"
+    return Lexer { src: text, pos: 0 }
+}
+
 pub fn main(): i32 {
-    var lx = Lexer { src: "host = localhost", pos: 0 }
+    var lx = lexerFor("host")
     while !lx.atEnd() {
         print(lx.nextWord())
     }
@@ -356,7 +374,10 @@ host
 localhost
 ```
 
-`nextWord` returns an owned `string` — one allocation per token. If that matters, keep
+The cursor is an ordinary owned value, so it can also live in a struct field, a `Vec`, or
+a `HashMap`. None of that is available to a type carrying a lifetime.
+
+`nextWord` returns an owned `string`, one allocation per token. If that matters, keep
 the cursor exactly as it is and hand back
 [spans instead](#store-many-string-slices-without-an-allocation-each): seal `src` once,
 and return `Span` values that cost two integers each.
@@ -405,19 +426,33 @@ fn eval(e: &Expr): i64 {
     }
 }
 
-pub fn main(): i32 {
-    let tree = Expr.Add(
+// The tree is built here and handed back. One owner, moved to the caller.
+fn build(): Expr {
+    return Expr.Add(
         Heap(Expr.Num(2)),
         Heap(Expr.Add(Heap(Expr.Num(3)), Heap(Expr.Num(4))))
     )
-    print(eval(tree))
+}
+
+pub fn main(): i32 {
+    var trees: Vec<Expr> = Vec.new()
+    trees.push(build())
+    trees.push(Expr.Num(10))
+    for t in trees {
+        print(eval(t))
+    }
     return 0
 }
 ```
 
 ```
 9
+10
 ```
+
+Because ownership is a tree, the whole thing moves as one value: built in a function,
+returned, pushed into a `Vec`, and freed exactly once when the `Vec` goes. Nothing is
+counted at runtime and nothing can be shared by accident.
 
 This covers any tree that owns its children. When a node needs to point *back* at its
 parent, or two nodes need to point at each other, ownership is no longer a tree — that is

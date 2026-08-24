@@ -5,10 +5,12 @@ Milo makes one big bet: **a reference can never be stored.**
 Whether that bet is worth taking comes down to a single question: how much real code can
 you still write? So we counted. Across five Rust codebases of deliberately different
 shape (a web framework, a CLI library, a C++ interop toolchain, a data indexer, and an
-agentic CLI app) there were 2,553 lifetime annotations. **87% of them sit on a function
-signature**, a borrow that lives for one call, and second-class references cover every
-one. The remaining 13% sit on a *type* that stores a borrow, `Parser<'a>` and friends,
-and those cannot be written here at all.
+agentic CLI app) there were 2,553 declarations carrying a lifetime. **87% are function
+signatures**, and second-class references cover the ones whose borrow lives for one call,
+which is most of them; a signature that *returns* a borrow tied to a parameter
+(`fn longest<'a>(a: &'a str, b: &'a str) -> &'a str`) is the part of that bucket Milo
+restructures instead. The remaining 13% are *types* that store a borrow, `Parser<'a>`
+and friends, and those cannot be written here at all.
 
 That 13% is what this page is about: the patterns we landed on to keep the language
 usable, concise, and pleasant without first-class references, and what each one costs
@@ -29,18 +31,21 @@ Seven patterns. Find the shape you were reaching for, and read across.
 The **Checked** column is the price. Four keep the compile-time guarantee, one needs no
 check at all because it copies, and two move the check to runtime.
 
-Each pattern below shows the working form and the ways it can go wrong, in coloured boxes:
+Each pattern below shows the working form and, where it has a failure mode, the ways it can go wrong, in labelled boxes:
 
 | Box | Means |
 |---|---|
-| 🟩 **The way to write it** | the form to reach for |
-| 🟦 **The compiler stops you** | rejected before it runs, at no runtime cost. The guardrail working |
-| 🟨 **Caught, but only when it runs** | still safe, and it aborts with a named cause, but later |
+| ✓ **The way to write it** (green) | the form to reach for |
+| 🛡 **The compiler stops you** | rejected before it runs, at no runtime cost. The guardrail working |
+| ⚠ **Caught, but only when it runs** (yellow) | still safe, and it fails with a named cause (an abort, or an `Option.None`), but later |
+| 🐛 **Buggy code, don't do this** (red) | compiles, runs, and hands back the wrong answer. Nothing warns you, so this is the one to actually avoid |
+
+Not every pattern has a failure box: the ones that copy or own outright have no failure
+mode to show.
 
 ¹ Nothing can dangle in either of the runtime rows: an arena and a sealed buffer both own
 their storage. What is checked at runtime is *identity*, that a handle or a span is being
 resolved against the thing it was made from. Memory safety is static in all seven.
-| 🟥 **Buggy code, don't do this** | compiles, runs, and hands back the wrong answer. Nothing warns you, so this is the one to actually avoid |
 
 For a Rust construct not listed here, the full shape-by-shape table is in
 [Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
@@ -309,8 +314,10 @@ against different bytes. The underscore and the doc comments are the only thing 
 that boundary. The methods maintain the invariant; the type cannot enforce it.
 
 That matching `_bufferId` on both sides is the tie, and the leading underscore is the
-convention for a field you are not meant to set: a hand-built `Span` gets 0, which no
-buffer ever has, so a forged one fails closed rather than reading something plausible. It
+convention for a field you are not meant to set: a zero-valued `Span` (hand-built, or a
+zeroed struct field) matches no buffer, so the accidental case fails closed. A
+deliberately forged id is the same pub-field hole as the caveat above, and can resolve
+against whichever live buffer owns that id. It
 is why a span can be an ordinary value, kept in a `Vec`, a struct field, or a map key,
 without the compiler tracking where its buffer went. The check happens when you resolve it.
 
@@ -383,7 +390,7 @@ pub fn main(): i32 {
 ```
 
 ```
-assertion failed at std/seal.milo:156:5: sealed: span was measured against a different buffer
+assertion failed at std/seal.milo:161:5: sealed: span was measured against a different buffer
 ```
 :::
 

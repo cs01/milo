@@ -140,8 +140,72 @@ reference may be returned at all.
 
 ## Return a piece of a string to your caller
 
-`substr` copies the bytes out. Always correct, nothing to check, one allocation per token
-— fine until you are doing it thousands of times.
+A view cannot leave the call. `substr` copies the bytes out, and the copy is an ordinary
+owned `string` with no restrictions at all.
+
+::: code-group
+
+```rust [Rust]
+fn key(line: &str) -> String {
+    line[0..4].to_string()      // .to_string() is the copy
+}
+```
+
+```ts [TypeScript]
+function key(line: string): string {
+    return line.slice(0, 4);    // already a copy
+}
+```
+
+```milo skip [Milo]
+fn key(line: &string): string {
+    return line.substr(0, 4)    // substr copies
+}
+```
+
+:::
+
+**✓ Do this.** Everything section one forbade is now allowed: a *free* function returns
+it, a struct stores it, and a `Vec` holds a pile of them:
+
+```milo
+pub struct Setting {
+    key: string,
+    value: string,
+}
+
+fn parseLine(line: &string): Setting {
+    let sep = 4
+    return Setting {
+        key: line.substr(0, sep),
+        value: line.substr(sep + 1, line.len),
+    }
+}
+
+pub fn main(): i32 {
+    var all: Vec<Setting> = Vec.new()
+    all.push(parseLine("host=localhost"))
+    all.push(parseLine("port=8080"))
+    print(all[0].key)
+    print(all[1].value)
+    print(all.len)
+    return 0
+}
+```
+
+```
+host
+8080
+2
+```
+
+Nothing is borrowed, so nothing is frozen and nothing can dangle. There is no rule to
+learn here, which is the point: when a value has to outlive the call, owning it is always
+correct.
+
+The cost is one allocation per piece. For a config file that is invisible. For a tokeniser
+over a large source file it is thousands of small allocations, and that is what the next
+pattern is for.
 
 ## Store many string slices without an allocation each
 

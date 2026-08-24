@@ -289,7 +289,7 @@ The two types come as a pair, and the shape of them is the whole idea:
 ```milo
 // std/seal, in full
 pub struct Sealed {
-    data: string,
+    _data: string,
     _bufferId: i32,
 }
 
@@ -307,7 +307,7 @@ means nothing. Paired with its `Sealed` it means a slice, and `src.text(sp)` is 
 it back into characters.
 
 One honest caveat, since the fields are right there: Milo has no per-field visibility, so
-a `pub struct` exposes everything it holds. Nothing stops a caller writing `s.data = ...`
+a `pub struct` exposes everything it holds. Nothing stops a caller writing `s._data = ...`
 directly, and a same-length replacement would leave every existing span resolving happily
 against different bytes. The underscore and the doc comments are the only thing marking
 that boundary. The methods maintain the invariant; the type cannot enforce it.

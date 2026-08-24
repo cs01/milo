@@ -77,12 +77,12 @@ pub struct Span {
 // only way back to a mutable buffer is `unseal`, which consumes this.
 //
 // Every method here reads. That is the design, with one honest limit: Milo has no
-// per-field visibility, so `pub struct` exposes `data` to any caller who names the type,
-// and `s.data = ...` on a `var` holder is not rejected. A same-length replacement then
+// per-field visibility, so `pub struct` exposes `_data` to any caller who names the type,
+// and `s._data = ...` on a `var` holder is not rejected. A same-length replacement then
 // leaves live spans resolving against different bytes, id matching and bounds passing.
 // The API maintains the invariant; the type cannot enforce it until fields can be private.
 pub struct Sealed {
-    data: string,
+    _data: string,
     _bufferId: i32,
 }
 
@@ -97,7 +97,7 @@ pub fn seal(s: string): Sealed {
         b = _atomicAddI64((nextSealBufferId.addrOf()) as *u8, 1)
     }
     var out: Sealed = Sealed {
-        data: s, _bufferId: b as i32
+        _data: s, _bufferId: b as i32
     }
     return out
 }
@@ -110,18 +110,18 @@ pub fn seal(s: string): Sealed {
 // situation this module exists to replace, so unseal is the point at which the
 // guarantee ends, deliberately and visibly.
 pub fn unseal(s: Sealed): string {
-    return s.data
+    return s._data
 }
 
 // Bytes held in the sealed buffer.
 pub fn sealedLen(s: &Sealed): i64 {
-    return s.data.len
+    return s._data.len
 }
 
 // A span covering the whole buffer.
 pub fn sealedSpan(s: &Sealed): Span {
     var sp: Span = Span {
-        start: 0, len: s.data.len as i32, _bufferId: s._bufferId
+        start: 0, len: s._data.len as i32, _bufferId: s._bufferId
     }
     return sp
 }
@@ -144,14 +144,14 @@ pub fn sealedHolds(s: &Sealed, sp: Span): bool {
     if sp.start < 0 || sp.len < 0 {
         return false
     }
-    return sp.start + (sp.len as i64) <= s.data.len
+    return sp.start + (sp.len as i64) <= s._data.len
 }
 
 // The byte at `i`, bounds-checked. For a whole range prefer `text` or, to avoid the
 // allocation, `eq` and `each`.
 pub fn sealedByteAt(s: &Sealed, i: i64): u8 {
-    assert(i >= 0 && i < s.data.len, "sealed: byte index out of range")
-    return s.data[i]
+    assert(i >= 0 && i < s._data.len, "sealed: byte index out of range")
+    return s._data[i]
 }
 
 // Materialise the span as an owned string. THIS is the allocation, and it is
@@ -160,7 +160,7 @@ pub fn sealedByteAt(s: &Sealed, i: i64): u8 {
 pub fn sealedText(s: &Sealed, sp: Span): string {
     assert(sp._bufferId == s._bufferId, "sealed: span was measured against a different buffer")
     assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
-    return s.data.substr(sp.start, sp.start + (sp.len as i64))
+    return s._data.substr(sp.start, sp.start + (sp.len as i64))
 }
 
 // Compare a span against a string WITHOUT materialising it. This is what keeps
@@ -182,7 +182,7 @@ pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool {
     }
     var i: i64 = 0
     while i < (sp.len as i64) {
-        if s.data[sp.start + i] != other[i] {
+        if s._data[sp.start + i] != other[i] {
             return false
         }
         i = i + 1
@@ -197,7 +197,7 @@ pub fn sealedEach(s: &Sealed, sp: Span, f: (u8) => void): void {
     assert(sealedHolds(s, sp), "sealed: span does not fit this buffer")
     var i: i64 = 0
     while i < (sp.len as i64) {
-        f(s.data[sp.start + i])
+        f(s._data[sp.start + i])
         i = i + 1
     }
 }

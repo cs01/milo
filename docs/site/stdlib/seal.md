@@ -34,7 +34,7 @@ The whole guarantee is these two facts holding at once:
 - `seal` **consumes** the buffer. The old binding is moved, so the compiler rejects any later use of it. `buf.push('x')` after the seal does not compile.
 - `Sealed` **has no mutating method**. There is no `push`, no `set`, no `resize`. Nothing in the API changes the bytes.
 
-So no *method* changes the bytes a span points at. One gap is worth naming rather than glossing: Milo has no per-field visibility, so `pub struct Sealed` exposes `data` and `_bufferId` to anyone who names the type. A caller holding one as `var` can assign `s.data = ...` directly, and a same-length replacement leaves every existing span resolving happily against different bytes, with the id matching and the bounds check passing. The API maintains the invariant and the underscore marks the boundary, but the type cannot enforce it. Closing that needs field-level visibility, which the language does not have.
+So no *method* changes the bytes a span points at. One gap is worth naming rather than glossing: Milo has no per-field visibility, so `pub struct Sealed` exposes `_data` and `_bufferId` to anyone who names the type. A caller holding one as `var` can assign `s._data = ...` directly, and a same-length replacement leaves every existing span resolving happily against different bytes, with the id matching and the bounds check passing. The API maintains the invariant and the underscore marks the boundary, but the type cannot enforce it. Closing that needs field-level visibility, which the language does not have.
 
 ## Spans are branded
 

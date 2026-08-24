@@ -92,78 +92,6 @@ fn Sealed.unseal(self: Sealed): string
 
 Give the buffer back, mutable. Consumes this Sealed.
 
-### `sealedByteAt`
-
-```milo
-pub fn sealedByteAt(s: &Sealed, i: i64): u8
-```
-
-The byte at `i`, bounds-checked. For a whole range prefer `text` or, to avoid the
-allocation, `eq` and `each`.
-
-### `sealedEach`
-
-```milo
-pub fn sealedEach(s: &Sealed, sp: Span, f: (u8) => void): void
-```
-
-Read the span's bytes one at a time without materialising it. The borrowing
-form: `f` sees each byte, nothing is allocated.
-
-### `sealedEq`
-
-```milo
-pub fn sealedEq(s: &Sealed, sp: Span, other: &string): bool
-```
-
-Compare a span against a string WITHOUT materialising it. This is what keeps
-a scanner's keyword checks off the allocator: the common operation on a
-retained piece is comparing it, not owning it.
-
-### `sealedHolds`
-
-```milo
-pub fn sealedHolds(s: &Sealed, sp: Span): bool
-```
-
-Whether `sp` fits inside this buffer. Cheap; use it when a span from an
-untrusted source might not belong here.
-
-### `sealedLen`
-
-```milo
-pub fn sealedLen(s: &Sealed): i64
-```
-
-Bytes held in the sealed buffer.
-
-### `sealedSpan`
-
-```milo
-pub fn sealedSpan(s: &Sealed): Span
-```
-
-A span covering the whole buffer.
-
-### `sealedSpanOf`
-
-```milo
-pub fn sealedSpanOf(s: &Sealed, start: i64, len: i64): Span
-```
-
-Measure a span against THIS buffer. The only way to get a span that resolves:
-a hand-built Span carries `_bufferId` 0, which no buffer ever has.
-
-### `sealedText`
-
-```milo
-pub fn sealedText(s: &Sealed, sp: Span): string
-```
-
-Materialise the span as an owned string. THIS is the allocation, and it is
-the only one: naming it `text` rather than hiding it behind indexing is the
-point, so a reader can see where the copies are.
-
 ### `share`
 
 ```milo
@@ -190,22 +118,6 @@ fn Shared.clone(self: &Shared): Shared
 Another holder of the same bytes. No copy; the buffer is released when the
 last holder drops.
 
-### `Shared.each`
-
-```milo
-fn Shared.each(self: &Shared, sp: Span, f: (u8) => void): void
-```
-
-Read the span's bytes one at a time without materialising it.
-
-### `Shared.eq`
-
-```milo
-fn Shared.eq(self: &Shared, sp: Span, other: &string): bool
-```
-
-Compare a span against a string without materialising it.
-
 ### `Shared.holders`
 
 ```milo
@@ -216,14 +128,6 @@ How many holders are alive right now. A progress hint: by the time you read
 it another thread may have cloned or dropped one. `thaw` is the operation
 that acts on the count without a window between reading and using it.
 
-### `Shared.holds`
-
-```milo
-fn Shared.holds(self: &Shared, sp: Span): bool
-```
-
-Whether `sp` fits here.
-
 ### `Shared.len`
 
 ```milo
@@ -232,29 +136,29 @@ fn Shared.len(self: &Shared): i64
 
 Bytes held.
 
-### `Shared.span`
+### `sharedWith`
 
 ```milo
-fn Shared.span(self: &Shared): Span
+pub fn sharedWith<R>(sh: &Shared, f: (&Sealed) => R): R
 ```
 
-A span over the whole buffer.
+Read the shared buffer through a borrow: `f` gets the `Sealed` itself, so the whole
+reader API is available on it and nothing is copied.
 
-### `Shared.spanOf`
+    let name = sharedWith(sh, (s: &Sealed): string => s.text(sp))
+    let ok   = sharedWith(sh, (s: &Sealed): bool => s.eq(sp, "name"))
 
-```milo
-fn Shared.spanOf(self: &Shared, start: i64, len: i64): Span
-```
+This is the accessor because Milo cannot return a `&Sealed`, so `Shared` cannot
+delegate through a deref the way `Arc<T>` does. The alternative was re-exposing every
+reader by hand on `Shared`, two lists that drift apart the moment one gains a method.
+One borrow point replaces the list.
 
-Measure a span against this buffer.
+Free function, not a method: `R` is a parameter of the operation rather than of
+`Shared`, and a method's own type parameter is never inferred at the call site. Same
+reason `std/arena` spells its read as `arenaWith`.
 
-### `Shared.text`
-
-```milo
-fn Shared.text(self: &Shared, sp: Span): string
-```
-
-Materialise the span as an owned string. The allocation, named.
+`len` and `byteAt` stay on `Shared` directly: a worker calls those per byte in a loop,
+where a closure per read is the wrong shape.
 
 ### `thaw`
 

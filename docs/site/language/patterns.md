@@ -32,95 +32,97 @@ Zero-copy, checked at compile time. A method may return a view of storage reacha
 through `self` — never of a local or another `&` parameter — and the call **freezes the
 receiver** while the binding lives.
 
-**Works.** The view costs no allocation:
+**Works.** `key()` hands back the `host` part of the line without copying it:
 
 ```milo
-pub struct Source {
-    data: Vec<u8>,
-    keyEnd: i64,
+pub struct Config {
+    line: string,
+    sep: i64,
 }
 
-impl Source {
-    fn key(self: &Self): &[u8] {
-        return self.data[0..self.keyEnd]
+impl Config {
+    fn key(self: &Self): &string {
+        return self.line[0..self.sep]
     }
 }
 
 pub fn main(): i32 {
-    var cfg = Source { data: [100 as u8, 98 as u8, 58 as u8], keyEnd: 2 }
-    let k = cfg.key()                  // borrowed from cfg, not copied
-    print(k.len.toString())
+    var cfg = Config { line: "host=localhost", sep: 4 }
+    let k = cfg.key()          // a view into cfg.line, nothing copied
+    print(k)
     return 0
 }
 ```
 
 ```
-2
+host
 ```
 
 **Does not compile.** A view cannot be stored, so there is no way to keep one past the
-expression that made it:
+expression that made it — no `Vec` of them, no struct field, no return to a caller
+that outlives `cfg`:
 
 ```milo error
-pub struct Source {
-    data: Vec<u8>,
-    keyEnd: i64,
+pub struct Config {
+    line: string,
+    sep: i64,
 }
 
-impl Source {
-    fn key(self: &Self): &[u8] {
-        return self.data[0..self.keyEnd]
+impl Config {
+    fn key(self: &Self): &string {
+        return self.line[0..self.sep]
     }
 }
 
 pub fn main(): i32 {
-    var cfg = Source { data: [100 as u8, 98 as u8, 58 as u8], keyEnd: 2 }
-    var saved: Vec<&[u8]> = Vec.new()
-    saved.push(cfg.key())
+    var cfg = Config { line: "host=localhost", sep: 4 }
+    var keys: Vec<&string> = Vec.new()
+    keys.push(cfg.key())
     return 0
 }
 ```
 
 ```
-error: 'saved': references cannot be stored in a collection
-  ──> patterns.milo:15:5
+error: 'keys': references cannot be stored in a collection
+  ──> patterns.milo:14:5
    │
-15 │     var saved: Vec<&[u8]> = Vec.new()
+14 │     var keys: Vec<&string> = Vec.new()
    │     ^
   hint: references are second-class — store owned values instead
 ```
 
-**Does not compile.** Growing the receiver could move the memory the view points into:
+**Does not compile.** While `k` is alive, `cfg` is frozen — replacing the line would
+leave `k` pointing at text that is no longer there:
 
 ```milo error
-pub struct Source {
-    data: Vec<u8>,
-    keyEnd: i64,
+pub struct Config {
+    line: string,
+    sep: i64,
 }
 
-impl Source {
-    fn key(self: &Self): &[u8] {
-        return self.data[0..self.keyEnd]
+impl Config {
+    fn key(self: &Self): &string {
+        return self.line[0..self.sep]
     }
 }
 
 pub fn main(): i32 {
-    var cfg = Source { data: [100 as u8, 98 as u8, 58 as u8], keyEnd: 2 }
-    let k = cfg.key()
-    cfg.data.push(65 as u8)            // cfg is frozen while k is alive
-    print(k.len.toString())
+    var cfg = Config { line: "host=localhost", sep: 4 }
+    let k = cfg.key()          // k views "host" inside cfg.line
+    cfg.line = "port=8080"     // …and this would pull it out from under k
+    print(k)
     return 0
 }
 ```
 
 ```
-error: cannot call 'push' on 'cfg' because it is borrowed
+error: cannot assign to 'cfg.line' because 'cfg' is borrowed
   ──> patterns.milo:16:5
    │
-16 │     cfg.data.push(65 as u8)
+16 │     cfg.line = "port=8080"
    │     ^
-  hint: a slice or loop iteration over this variable is still live — mutating it could
-        move memory the borrow points into
+  hint: a reference or slice into this variable is still live — the assignment would
+        invalidate it
 ```
 
 ### 2. Own the text
@@ -142,16 +144,16 @@ a `Vec`, or a map key.
 from "std/seal" import { seal }
 
 pub fn main(): i32 {
-    let src = seal("database_url: postgres".clone())
-    let key = src.spanOf(0, 12)
+    let src = seal("host=localhost".clone())
+    let key = src.spanOf(0, 4)         // the same "host" as above, but storable
     print(src.text(key))
-    print(src.eq(key, "database_url").toString())
+    print(src.eq(key, "host").toString())
     return 0
 }
 ```
 
 ```
-database_url
+host
 true
 ```
 
@@ -163,9 +165,9 @@ wrong-but-plausible bytes:
 from "std/seal" import { seal }
 
 pub fn main(): i32 {
-    let a = seal("database_url: postgres".clone())
-    let b = seal("something entirely else".clone())
-    let key = a.spanOf(0, 12)
+    let a = seal("host=localhost".clone())
+    let b = seal("port=8080".clone())
+    let key = a.spanOf(0, 4)
     print(b.text(key))                 // measured against `a`, resolved against `b`
     return 0
 }

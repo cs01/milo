@@ -33,6 +33,29 @@ the only thing you can return is a view of a receiver's own data — mean nothin
 in the heap is ever aliased, which keeps both the mental model and the compiler
 drastically simpler.
 
+## The Rust shape, and what to write instead
+
+A lookup table: find the Rust construct you were reaching for, read across. The three
+string cases and the self-referential ones are worked through with running code in
+[Patterns Without Lifetimes](/language/patterns).
+
+| Problem | Rust | Milo |
+|---|---|---|
+| Zero-copy view inside a scope | `&s[6..11]` | `s[6..11]`, a `&string` view, no allocation |
+| Zero-copy view returned to a caller | `fn items(&self) -> &[T]` | same: a method may return a view of its receiver's own storage, and the receiver is frozen while the view lives |
+| Recursive data (tree, AST) | `Box<Expr>` | `Heap<Expr>`, dereferenced with `*l` |
+| Doubly-linked list | `Rc<RefCell<Node>>` or `unsafe` | arena + `Option<Handle<Node>>`, [linkedList.milo](https://github.com/milo-language/milo/blob/main/examples/basics/linkedList.milo) |
+| Cyclic graph, cross-references | `petgraph`, arena + indices, or `Rc` | `Arena<Node>` + `Vec<Handle<Node>>` for edges, [depgraph.milo](https://github.com/milo-language/milo/blob/main/examples/basics/depgraph.milo) |
+| Tree with parent pointers (DOM) | `Rc<RefCell>` or an arena crate | `Arena<Node>`, parent and children as handles, [domArena.milo](https://github.com/milo-language/milo/blob/main/examples/basics/domArena.milo) |
+| Long-lived state across tasks | `Arc<Mutex<T>>` | one owner holds the `Arena<T>` and passes handles; a module-scope `var pool: Arena<Node> = Arena<Node>.new()` works |
+| Shared mutable state between workers | `Arc<Mutex<T>>` | one task owns it, the others `send` to it over a `Channel<T>` |
+| Shared **immutable** data between workers | `Arc<[u8]>` | [`std/seal`](/stdlib/seal): `seal` then `share`, cloned per reader, no copy |
+| Parallel map over one array | `rayon` `par_iter_mut` | [`std/shard`](/stdlib/shard): `parallelMap(v, n, f)`, or `parallelMapWith` for a worker pool and per-worker state |
+| Spawn and join | `thread::spawn` + `handle.join()` | `Task.spawn` + `Task.join`, or a `WaitGroup` for a fleet |
+| Wait on first of several sources | `tokio::select!` | `std/select` |
+| Cursor or iterator holding a borrow | `struct Cur<'a> { buf: &'a [u8] }` | own the buffer, carry an integer `pos`, slice on demand |
+| **Struct that stores a borrow** | `struct Parser<'a> { src: &'a str }` | **no equivalent.** [Three answers, worked through](/language/patterns) |
+
 ## What large Rust codebases actually do
 
 The rows above are a claim about a language. The more interesting question is what

@@ -1,39 +1,36 @@
 # Patterns Without Lifetimes
 
-What to write when the Rust shape you know reaches for `<'a>`, `Box`, or
-`Rc<RefCell>`. Every linked example compiles today.
+Say you are parsing a config file and you hit this line:
 
-Each pattern below is shown twice: the form to write, and the form that fails. The
-failures are labelled by *who catches them* — **✗ the compiler stops you** is the
+```
+host=localhost
+```
+
+You want to talk about the `host` part. Copying it out works, but if you are doing that
+for every key in a large file you are allocating for text you already have in memory.
+In Rust you would reach for `&str` and a lifetime. Milo has no lifetimes, so what do you
+write?
+
+Three answers, cheapest first. Use the first one that fits — each step down trades away
+a compile-time guarantee for more freedom about where the value can live.
+
+| You need to… | Use | Checked |
+|---|---|---|
+| read part of it, right here | a **view** — `line[0..4]` | compile time |
+| keep it after the function returns | **own it** — `substr` copies | nothing to check |
+| keep thousands of them, cheaply | **seal + spans** — `std/seal` | runtime |
+
+Failures below are labelled by *who catches them*: **✗ the compiler stops you** is the
 protection working and costs nothing at runtime; **⚠ caught when it runs** is safe but
 later; **✗ nothing catches it** is the one to actually avoid.
 
-| Problem | Rust | Milo |
-|---|---|---|
-| Zero-copy view inside a scope | `&s[6..11]` | `s[6..11]`, a `&string` view, no allocation |
-| Zero-copy view returned to a caller | `fn items(&self) -> &[T]` | same: a method may return a view of its receiver's own storage, and the receiver is frozen while the view lives |
-| Recursive data (tree, AST) | `Box<Expr>` | `Heap<Expr>`, dereferenced with `*l` |
-| Doubly-linked list | `Rc<RefCell<Node>>` or `unsafe` | arena + `Option<Handle<Node>>`, [linkedList.milo](https://github.com/milo-language/milo/blob/main/examples/basics/linkedList.milo) |
-| Cyclic graph, cross-references | `petgraph`, arena + indices, or `Rc` | `Arena<Node>` + `Vec<Handle<Node>>` for edges, [depgraph.milo](https://github.com/milo-language/milo/blob/main/examples/basics/depgraph.milo) |
-| Tree with parent pointers (DOM) | `Rc<RefCell>` or an arena crate | `Arena<Node>`, parent and children as handles, [domArena.milo](https://github.com/milo-language/milo/blob/main/examples/basics/domArena.milo) |
-| Long-lived state across tasks | `Arc<Mutex<T>>` | one owner holds the `Arena<T>` and passes handles; a module-scope `var pool: Arena<Node> = Arena<Node>.new()` works |
-| Shared mutable state between workers | `Arc<Mutex<T>>` | one task owns it, the others `send` to it over a `Channel<T>` |
-| Shared **immutable** data between workers | `Arc<[u8]>` | [`std/seal`](/stdlib/seal): `seal` then `share`, cloned per reader, no copy |
-| Parallel map over one array | `rayon` `par_iter_mut` | [`std/shard`](/stdlib/shard): `parallelMap(v, n, f)`, or `parallelMapWith` for a worker pool and per-worker state |
-| Spawn and join | `thread::spawn` + `handle.join()` | `Task.spawn` + `Task.join`, or a `WaitGroup` for a fleet |
-| Wait on first of several sources | `tokio::select!` | `std/select` |
-| Cursor or iterator holding a borrow | `struct Cur<'a> { buf: &'a [u8] }` | own the buffer, carry an integer `pos`, slice on demand |
-| **Struct that stores a borrow** | `struct Parser<'a> { src: &'a str }` | **no equivalent.** [Three answers below](#when-a-slice-has-to-outlive-the-call) |
+Looking for a specific Rust construct instead? The full shape-by-shape table lives in
+[Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
 
-## When a slice has to outlive the call
+## Read part of a value you already own
 
-The last row is the one real gap, and it shows up as "I want a token that points
-into the source". Rust's `'a` exists for exactly this. Three answers; use the
-first that fits, since each step down trades away compile-time guarantee.
-
-### 1. Hand back a view
-
-Zero-copy, checked at compile time. A method may return a view of storage reachable
+The cheapest answer, and the one to try first. No allocation, and the compiler proves it
+is safe. A method may return a view of storage reachable
 through `self` — never of a local or another `&` parameter — and the call **freezes the
 receiver** while the binding lives.
 
@@ -131,15 +128,18 @@ error: cannot assign to 'cfg.line' because 'cfg' is borrowed
         invalidate it
 ```
 
-### 2. Own the text
+## Keep it after the function returns
 
-`substr` copies the bytes out. Always correct, no checks, one allocation per
-token.
+A view cannot outlive the call, so if the value has to travel, own it. `substr` copies the
+bytes out. Always correct, nothing to check, one allocation per token — which is fine
+until you are doing it thousands of times.
 
-### 3. Seal the buffer and store spans
+## Keep thousands of them without thousands of copies
 
-When tokens must outlive the call, [`std/seal`](/stdlib/seal) is this pattern
-built and tested. `seal` consumes the buffer and returns a `Sealed`, which has no
+This is the parser case: you want a token per identifier in a large file, each one
+outliving the function that found it, and you do not want an allocation per token.
+
+[`std/seal`](/stdlib/seal) is the answer. `seal` consumes the buffer and returns a `Sealed`, which has no
 mutating method, so stored offsets cannot be invalidated. A `Span` is two integers
 plus the identity of the buffer it was measured from, so it can live in a struct,
 a `Vec`, or a map key.
@@ -185,10 +185,11 @@ assertion failed at std/seal.milo:156:5: sealed: span was measured against a dif
 
 See [Memory Safety vs Rust](/language/vs-rust).
 
-## Use a handle, not an array index
+## When your data points at itself
 
-When data points at itself, put the values in one pool and refer to them by key.
-The obvious key is a `Vec` position, and that is the trap: positions get reused.
+Trees, graphs, doubly-linked lists — anything where one node refers to another. Put the
+values in one pool and refer to them by key. The obvious key is a `Vec` position, and
+that is the trap: positions get reused.
 
 **✗ Avoid this — nothing catches it.** The index outlived the element it named. This
 compiles, runs, and hands back the wrong record:
@@ -240,7 +241,7 @@ None
 Use a `Handle` wherever slots are recycled; a plain index is fine only for
 append-only storage.
 
-### Give each pool its own key type
+## When two pools could be confused
 
 With several arenas, a key from one must not resolve in another. Both types are one
 integer wide, so the check costs nothing at runtime.

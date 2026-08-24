@@ -16,9 +16,13 @@ a compile-time guarantee for more freedom about where the value can live.
 
 | You need to… | Use | Checked |
 |---|---|---|
-| read part of it, right here | a **view** — `line[0..4]` | compile time |
-| keep it after the function returns | **own it** — `substr` copies | nothing to check |
-| keep thousands of them, cheaply | **seal + spans** — `std/seal` | runtime |
+| [read part of it, right here](#read-part-of-a-string-without-copying-it) | a **view** — `line[0..4]` | compile time |
+| [return it to your caller](#return-a-piece-of-a-string-to-your-caller) | **own it** — `substr` copies | nothing to check |
+| [keep thousands of them, cheaply](#store-many-string-slices-without-an-allocation-each) | **seal + spans** — `std/seal` | runtime |
+
+Two more patterns follow, for data that refers to itself:
+[trees and graphs](#build-a-tree-or-graph-whose-nodes-refer-to-each-other), and
+[keeping two kinds of index apart](#stop-two-kinds-of-index-from-being-mixed-up).
 
 Failures below are labelled by *who catches them*: **✗ the compiler stops you** is the
 protection working and costs nothing at runtime; **⚠ caught when it runs** is safe but
@@ -27,7 +31,7 @@ later; **✗ nothing catches it** is the one to actually avoid.
 Looking for a specific Rust construct instead? The full shape-by-shape table lives in
 [Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
 
-## Read part of a value you already own
+## Read part of a string without copying it
 
 The cheapest answer, and the one to try first. No allocation, and the compiler proves it
 is safe. A method may return a view of storage reachable
@@ -128,13 +132,13 @@ error: cannot assign to 'cfg.line' because 'cfg' is borrowed
         invalidate it
 ```
 
-## Keep it after the function returns
+## Return a piece of a string to your caller
 
 A view cannot outlive the call, so if the value has to travel, own it. `substr` copies the
 bytes out. Always correct, nothing to check, one allocation per token — which is fine
 until you are doing it thousands of times.
 
-## Keep thousands of them without thousands of copies
+## Store many string slices without an allocation each
 
 This is the parser case: you want a token per identifier in a large file, each one
 outliving the function that found it, and you do not want an allocation per token.
@@ -185,7 +189,7 @@ assertion failed at std/seal.milo:156:5: sealed: span was measured against a dif
 
 See [Memory Safety vs Rust](/language/vs-rust).
 
-## When your data points at itself
+## Build a tree or graph whose nodes refer to each other
 
 Trees, graphs, doubly-linked lists — anything where one node refers to another. Put the
 values in one pool and refer to them by key. The obvious key is a `Vec` position, and
@@ -241,7 +245,7 @@ None
 Use a `Handle` wherever slots are recycled; a plain index is fine only for
 append-only storage.
 
-## When two pools could be confused
+## Stop two kinds of index from being mixed up
 
 With several arenas, a key from one must not resolve in another. Both types are one
 integer wide, so the check costs nothing at runtime.

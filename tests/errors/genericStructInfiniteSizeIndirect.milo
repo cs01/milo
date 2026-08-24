@@ -1,0 +1,23 @@
+// @error: struct 'Ping<i64>' is recursive by value and has infinite size
+// The cycle does not have to be one hop. `Ping<T>` reaches itself through
+// `Pong<T>`, and both instantiations are infinite, so both are rejected. The
+// legitimate near-miss is a cycle through a METHOD signature rather than a
+// field, which is finite and must keep compiling: see
+// tests/fixtures/genericStructCycle.milo.
+pub struct Ping<T> {
+    v: T,
+    other: Pong<T>,
+}
+
+pub struct Pong<T> {
+    back: Ping<T>,
+}
+
+fn use(p: Ping<i64>): i64 {
+    return p.v
+}
+
+pub fn main(): i32 {
+    print("unreachable")
+    return 0
+}

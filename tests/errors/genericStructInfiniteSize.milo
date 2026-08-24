@@ -1,0 +1,20 @@
+// @error: struct 'Direct<i64>' is recursive by value and has infinite size
+// A generic declaration says nothing about layout: `Direct<T>` holding a
+// `Direct<T>` is only infinite once T is chosen, so the rejection has to happen
+// per instantiation, not per declaration. It used to fall through both: the
+// declaration walk skips generics, and the instantiation walk was a stack
+// overflow. Codegen then received `%Direct_i64 = type { i64, %Direct_i64 }`,
+// which the backend refuses.
+pub struct Direct<T> {
+    v: T,
+    me: Direct<T>,
+}
+
+fn use(d: Direct<i64>): i64 {
+    return d.v
+}
+
+pub fn main(): i32 {
+    print("unreachable")
+    return 0
+}

@@ -108,13 +108,13 @@ pub struct BpFile {
     lines: Vec<i64>,
     reqIds: Vec<i64>,
     reqLines: Vec<i64>,
-    classId: i64,
+    classId: ClassId,
     prepReqId: i64,
 }
 
 // Methods of a loaded class, cached (stackTrace hits this per frame).
 pub struct ClassCache {
-    classId: i64,
+    classId: ClassId,
     signature: string,
     methods: Vec<MethodInfo>,
 }
@@ -124,8 +124,8 @@ pub struct CachedFrame {
     dapId: i64,
     threadId: i64, // jdwp
     frameId: i64, // jdwp
-    classId: i64,
-    methodId: i64,
+    classId: ClassId,
+    methodId: MethodId,
     codeIndex: i64,
 }
 
@@ -854,7 +854,10 @@ impl Sess {
             self.bps.push(BpFile {
                 srcPath: path.clone(), className: className.clone(),
                 signature: sig.clone(), lines: [], reqIds: [], reqLines: [],
-                classId: 0, prepReqId: 0
+                classId: ClassId {
+                    v: 0
+                }
+                , prepReqId: 0
             }
             )
             idx = self.bps.len - 1
@@ -871,7 +874,7 @@ impl Sess {
         self.bps[idx].lines = newLines
 
         // class loaded already?
-        if self.bps[idx].classId == 0 {
+        if self.bps[idx].classId.v == 0 {
             if let Result.Ok(cls) = self.io.classesBySignature(sig) {
                 if cls.len > 0 {
                     self.bps[idx].classId = cls[0]
@@ -880,7 +883,7 @@ impl Sess {
         }
 
         var results: string = ""
-        if self.bps[idx].classId != 0 {
+        if self.bps[idx].classId.v != 0 {
             results = self.plantBreakpoints(idx)
         } else {
             // defer: arm CLASS_PREPARE for this class (once per file record)
@@ -1020,7 +1023,9 @@ impl Sess {
     // → detailMessage of the exception, walking supertypes until Throwable's
     // field is found. "" if none (no message, or the field couldn't be read).
     fn exceptionMessage(self: &mut Sess, excId: i64): string {
-        var classId: i64 = 0
+        var classId: ClassId = ClassId {
+            v: 0
+        }
         match self.io.objectType(excId) {
             Result.Ok(c) => {
                 classId = c
@@ -1030,7 +1035,7 @@ impl Sess {
             }
         }
         var depth: i64 = 0
-        while classId != 0 && depth < 32 {
+        while classId.v != 0 && depth < 32 {
             match self.io.typeFields(classId) {
                 Result.Ok(fields) => {
                     for fld in fields {
@@ -1059,7 +1064,9 @@ impl Sess {
                     classId = sc
                 }
                 Result.Err(_e) => {
-                    classId = 0
+                    classId = ClassId {
+                        v: 0
+                    }
                 }
             }
             depth = depth + 1
@@ -1098,7 +1105,7 @@ impl Sess {
 
     // ── stack / scopes / variables ──
 
-    fn classMethods(self: &mut Sess, classId: i64): Result<Vec<MethodInfo>> {
+    fn classMethods(self: &mut Sess, classId: ClassId): Result<Vec<MethodInfo>> {
         var i: i64 = 0
         while i < self.classes.len {
             if self.classes[i].classId == classId {
@@ -1131,7 +1138,7 @@ impl Sess {
         return Result.Ok(methods)
     }
 
-    fn classSignature(self: &mut Sess, classId: i64): string {
+    fn classSignature(self: &mut Sess, classId: ClassId): string {
         var i: i64 = 0
         while i < self.classes.len {
             if self.classes[i].classId == classId {
@@ -1157,7 +1164,7 @@ impl Sess {
         return ""
     }
 
-    fn methodNameOf(self: &mut Sess, classId: i64, methodId: i64): string {
+    fn methodNameOf(self: &mut Sess, classId: ClassId, methodId: MethodId): string {
         if let Result.Ok(methods) = self.classMethods(classId) {
             for m in methods {
                 if m.methodId == methodId {
@@ -1169,7 +1176,7 @@ impl Sess {
     }
 
     // best-effort line for a code index: greatest table line whose codeIndex <= idx.
-    fn lineForIndex(self: &mut Sess, classId: i64, methodId: i64, codeIndex: i64): i64 {
+    fn lineForIndex(self: &mut Sess, classId: ClassId, methodId: MethodId, codeIndex: i64): i64 {
         let Result.Ok(table) = self.io.lineTable(classId, methodId) else {
             return 0
         }
@@ -1186,7 +1193,7 @@ impl Sess {
 
     // source path for a class: breakpoint files first, then the launch
     // program, then sourceRoots + package path + SourceFile.
-    fn sourcePathFor(self: &mut Sess, classId: i64, sig: &string): string {
+    fn sourcePathFor(self: &mut Sess, classId: ClassId, sig: &string): string {
         var i: i64 = 0
         while i < self.bps.len {
             if self.bps[i].signature == sig {
@@ -1463,7 +1470,9 @@ impl Sess {
             }
         } else if vr.kind == 2 {
             // fields of an object (instance fields of its class; static skipped)
-            var classId: i64 = 0
+            var classId: ClassId = ClassId {
+                v: 0
+            }
             match self.io.objectType(vr.a) {
                 Result.Ok(cid) => {
                     classId = cid

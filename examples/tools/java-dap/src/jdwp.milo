@@ -148,6 +148,23 @@ impl PacketReader {
 // ---------------------------------------------------------------------------
 // Wire structs.
 
+// JDWP keeps several id spaces that are all 8-byte integers on the wire and mean
+// entirely different things: a classId names a reference type, a methodId names a method
+// *within* one. `lineTable(classId, methodId)` takes them adjacent and Milo has no named
+// arguments, so swapping them was silent and returned a wrong line table.
+//
+// Zero-cost: a single-field struct compiles to exactly its field, same register, same ABI.
+//
+// Deliberately NOT applied to IdSizes below — those fields are BYTE WIDTHS from the VM's
+// idSizes handshake (8, 8, 8...), not identifiers, despite the matching names.
+pub struct ClassId {
+    v: i64,
+}
+
+pub struct MethodId {
+    v: i64,
+}
+
 pub struct IdSizes {
     fieldId: i64,
     methodId: i64,
@@ -191,19 +208,25 @@ pub struct VmVersion {
 
 pub struct Location {
     typeTag: i64,
-    classId: i64,
-    methodId: i64,
+    classId: ClassId,
+    methodId: MethodId,
     index: i64,
 }
 
 pub fn zeroLocation(): Location {
     return Location {
-        typeTag: 0, classId: 0, methodId: 0, index: 0
+        typeTag: 0, classId: ClassId {
+            v: 0
+        }
+        , methodId: MethodId {
+            v: 0
+        }
+        , index: 0
     }
 }
 
 pub struct MethodInfo {
-    methodId: i64,
+    methodId: MethodId,
     name: string,
     signature: string,
     modBits: i64,
@@ -273,7 +296,7 @@ pub struct JdwpEvent {
     thread: i64,
     loc: Location,
     signature: string, // CLASS_PREPARE
-    typeId: i64, // CLASS_PREPARE
+    typeId: ClassId, // CLASS_PREPARE
     exception: i64, // EXCEPTION: thrown exception objectID
     caught: bool, // EXCEPTION: catchLocation present (false = uncaught)
 }
@@ -463,16 +486,22 @@ impl JdwpIo {
 
     fn writeLocation(self: &JdwpIo, w: &mut PacketWriter, loc: &Location): void {
         w.u8(loc.typeTag)
-        w.id(loc.classId, self.sizes.referenceTypeId)
-        w.id(loc.methodId, self.sizes.methodId)
+        w.id(loc.classId.v, self.sizes.referenceTypeId)
+        w.id(loc.methodId.v, self.sizes.methodId)
         w.u64(loc.index)
     }
 
     fn readLocation(self: &JdwpIo, r: &mut PacketReader): Location {
         return Location {
             typeTag: r.u8(),
-            classId: r.id(self.sizes.referenceTypeId),
-            methodId: r.id(self.sizes.methodId),
+            classId: ClassId {
+                v: r.id(self.sizes.referenceTypeId)
+            }
+            ,
+            methodId: MethodId {
+                v: r.id(self.sizes.methodId)
+            }
+            ,
             index: r.u64(),
         }
     }
@@ -500,16 +529,19 @@ impl JdwpIo {
     }
 
     // → loaded classes matching a JNI signature: their referenceTypeIDs.
-    fn classesBySignature(self: &mut JdwpIo, sig: &string): Result<Vec<i64>> {
+    fn classesBySignature(self: &mut JdwpIo, sig: &string): Result<Vec<ClassId>> {
         var w = newWriter()
         w.str(sig)
         var r = self.request(1, 2, w.buf)?
         let n = r.u32()
-        var out: Vec<i64> = []
+        var out: Vec<ClassId> = []
         var i: i64 = 0
         while i < n {
             let _tag = r.u8()
-            out.push(r.id(self.sizes.referenceTypeId))
+            out.push(ClassId {
+                v: r.id(self.sizes.referenceTypeId)
+            }
+            )
             let _status = r.u32()
             i = i + 1
         }
@@ -558,16 +590,16 @@ impl JdwpIo {
 
     // --- ReferenceType (2) --------------------------------------------------
 
-    fn typeSignature(self: &mut JdwpIo, classId: i64): Result<string> {
+    fn typeSignature(self: &mut JdwpIo, classId: ClassId): Result<string> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
+        w.id(classId.v, self.sizes.referenceTypeId)
         var r = self.request(2, 1, w.buf)?
         return Result.Ok(r.str())
     }
 
-    fn typeFields(self: &mut JdwpIo, classId: i64): Result<Vec<FieldInfo>> {
+    fn typeFields(self: &mut JdwpIo, classId: ClassId): Result<Vec<FieldInfo>> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
+        w.id(classId.v, self.sizes.referenceTypeId)
         var r = self.request(2, 4, w.buf)?
         let n = r.u32()
         var out: Vec<FieldInfo> = []
@@ -585,16 +617,19 @@ impl JdwpIo {
         return Result.Ok(out)
     }
 
-    fn typeMethods(self: &mut JdwpIo, classId: i64): Result<Vec<MethodInfo>> {
+    fn typeMethods(self: &mut JdwpIo, classId: ClassId): Result<Vec<MethodInfo>> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
+        w.id(classId.v, self.sizes.referenceTypeId)
         var r = self.request(2, 5, w.buf)?
         let n = r.u32()
         var out: Vec<MethodInfo> = []
         var i: i64 = 0
         while i < n {
             out.push(MethodInfo {
-                methodId: r.id(self.sizes.methodId),
+                methodId: MethodId {
+                    v: r.id(self.sizes.methodId)
+                }
+                ,
                 name: r.str(),
                 signature: r.str(),
                 modBits: r.u32(),
@@ -605,9 +640,9 @@ impl JdwpIo {
         return Result.Ok(out)
     }
 
-    fn sourceFile(self: &mut JdwpIo, classId: i64): Result<string> {
+    fn sourceFile(self: &mut JdwpIo, classId: ClassId): Result<string> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
+        w.id(classId.v, self.sizes.referenceTypeId)
         var r = self.request(2, 7, w.buf)?
         return Result.Ok(r.str())
     }
@@ -615,19 +650,22 @@ impl JdwpIo {
     // --- ClassType (3) ------------------------------------------------------
 
     // → superclass referenceTypeID (0 for java.lang.Object).
-    fn superclass(self: &mut JdwpIo, classId: i64): Result<i64> {
+    fn superclass(self: &mut JdwpIo, classId: ClassId): Result<ClassId> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
+        w.id(classId.v, self.sizes.referenceTypeId)
         var r = self.request(3, 1, w.buf)?
-        return Result.Ok(r.id(self.sizes.referenceTypeId))
+        return Result.Ok(ClassId {
+            v: r.id(self.sizes.referenceTypeId)
+        }
+        )
     }
 
     // --- Method (6) ---------------------------------------------------------
 
-    fn lineTable(self: &mut JdwpIo, classId: i64, methodId: i64): Result<Vec<LineEntry>> {
+    fn lineTable(self: &mut JdwpIo, classId: ClassId, methodId: MethodId): Result<Vec<LineEntry>> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
-        w.id(methodId, self.sizes.methodId)
+        w.id(classId.v, self.sizes.referenceTypeId)
+        w.id(methodId.v, self.sizes.methodId)
         var r = self.request(6, 1, w.buf)?
         let _start = r.u64()
         let _end = r.u64()
@@ -644,10 +682,10 @@ impl JdwpIo {
         return Result.Ok(out)
     }
 
-    fn variableTable(self: &mut JdwpIo, classId: i64, methodId: i64): Result<Vec<VarSlot>> {
+    fn variableTable(self: &mut JdwpIo, classId: ClassId, methodId: MethodId): Result<Vec<VarSlot>> {
         var w = newWriter()
-        w.id(classId, self.sizes.referenceTypeId)
-        w.id(methodId, self.sizes.methodId)
+        w.id(classId.v, self.sizes.referenceTypeId)
+        w.id(methodId.v, self.sizes.methodId)
         var r = self.request(6, 2, w.buf)?
         let _argCnt = r.u32()
         let n = r.u32()
@@ -670,12 +708,15 @@ impl JdwpIo {
     // --- ObjectReference (9) / StringReference (10) ---------------------------
 
     // → referenceTypeID of an object.
-    fn objectType(self: &mut JdwpIo, objectId: i64): Result<i64> {
+    fn objectType(self: &mut JdwpIo, objectId: i64): Result<ClassId> {
         var w = newWriter()
         w.id(objectId, self.sizes.objectId)
         var r = self.request(9, 1, w.buf)?
         let _tag = r.u8()
-        return Result.Ok(r.id(self.sizes.referenceTypeId))
+        return Result.Ok(ClassId {
+            v: r.id(self.sizes.referenceTypeId)
+        }
+        )
     }
 
     fn objectGetValues(self: &mut JdwpIo, objectId: i64, fieldIds: &Vec<i64>): Result<Vec<JValue>> {
@@ -907,7 +948,10 @@ impl JdwpIo {
             let requestId = r.i32v()
             var ev = JdwpEvent {
                 kind: kind, requestId: requestId, thread: 0,
-                loc: zeroLocation(), signature: "", typeId: 0,
+                loc: zeroLocation(), signature: "", typeId: ClassId {
+                    v: 0
+                }
+                ,
                 exception: 0, caught: false
             }
             if kind == 1 || kind == 2 {
@@ -922,12 +966,14 @@ impl JdwpIo {
                 let _tag = r.u8()
                 ev.exception = r.id(self.sizes.objectId)
                 let catchLoc = self.readLocation(r)
-                ev.caught = catchLoc.classId != 0
+                ev.caught = catchLoc.classId.v != 0
             } else if kind == 8 {
                 // CLASS_PREPARE: thread, refTypeTag, typeID, signature, status
                 ev.thread = r.id(self.sizes.objectId)
                 let _tt = r.u8()
-                ev.typeId = r.id(self.sizes.referenceTypeId)
+                ev.typeId = ClassId {
+                    v: r.id(self.sizes.referenceTypeId)
+                }
                 ev.signature = r.str()
                 let _status = r.u32()
             } else if kind == 6 || kind == 7 || kind == 90 {

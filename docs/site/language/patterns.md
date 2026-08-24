@@ -140,24 +140,26 @@ lives, so the two rules above still hold:
 ```milo
 pub struct Config {
     line: string,
-    sep: i64,
 }
 
 impl Config {
     fn key(self: &Self): &string {
-        return self.line[0..self.sep]
+        match self.line.indexOf("=") {
+            Option.Some(sep) => { return self.line[0..sep] }
+            Option.None => { return self.line[0..self.line.len] }
+        }
     }
 }
 
 pub fn main(): i32 {
-    var cfg = Config { line: "host=localhost", sep: 4 }
+    var cfg = Config { line: "timeout=30" }
     print(cfg.key())
     return 0
 }
 ```
 
 ```
-host
+timeout
 ```
 
 Only of `self`, never of a local or another `&` parameter. That is the one place a
@@ -201,27 +203,34 @@ pub struct Setting {
 }
 
 fn parseLine(line: &string): Setting {
-    let sep = 4
-    return Setting {
-        key: line.substr(0, sep),
-        value: line.substr(sep + 1, line.len),
+    match line.indexOf("=") {
+        Option.Some(sep) => {
+            return Setting {
+                key: line.substr(0, sep),
+                value: line.substr(sep + 1, line.len),
+            }
+        }
+        Option.None => {
+            return Setting { key: line.clone(), value: "" }
+        }
     }
 }
 
 pub fn main(): i32 {
     var all: Vec<Setting> = Vec.new()
     all.push(parseLine("host=localhost"))
-    all.push(parseLine("port=8080"))
-    print(all[0].key)
-    print(all[1].value)
+    all.push(parseLine("timeout=30"))
+    for s in all {
+        print(s.key + " -> " + s.value)
+    }
     print(all.len)
     return 0
 }
 ```
 
 ```
-host
-8080
+host -> localhost
+timeout -> 30
 2
 ```
 

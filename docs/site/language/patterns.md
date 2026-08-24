@@ -2,8 +2,9 @@
 
 Milo makes one big bet: **a reference can never be stored.** Not in a struct, not in a
 collection, and not returned from a function, save one narrow case shown below. `&T`
-exists only as a parameter, for the duration of one call. That is what buys the language its total absence of lifetime
-annotations. There is no `'a` anywhere, because nothing can outlive anything.
+exists only as a parameter, for the duration of one call. That is what buys the language
+its total absence of lifetime annotations. There is no `'a` anywhere, because nothing can
+outlive anything.
 
 Whether that bet is worth taking comes down to a single question: how much real code can
 you still write? So we counted. Across five Rust codebases of deliberately different
@@ -17,26 +18,25 @@ That 13% is what this page is about: the patterns we landed on to keep the langu
 usable, concise, and pleasant without first-class references, and what each one costs
 you. Re-run the count yourself with `scripts/lifetime-census.py`.
 
-Start with the string case, which is where most people hit the wall first.
+Seven patterns. Find the shape you were reaching for, and read across.
 
-| You need to… | Use | Checked |
+| The shape you know | Write this instead | Checked |
 |---|---|---|
-| [read part of it, right here](#read-part-of-a-string-without-copying-it) | a **view** — `line[0..4]` | compile time |
-| [return it to your caller](#return-a-piece-of-a-string-to-your-caller) | **own it** — `substr` copies | nothing to check |
-| [keep thousands of them, cheaply](#store-many-string-slices-without-an-allocation-each) | **seal + spans** — `std/seal` | runtime |
+| `&line[0..4]`, a slice you use right here | [a view](#read-part-of-a-string-without-copying-it) | compile time |
+| a `&str` returned to your caller | [own it, `substr` copies](#return-a-piece-of-a-string-to-your-caller) | nothing to check |
+| many `&str` kept at once | [seal the buffer, store spans](#store-many-string-slices-without-an-allocation-each) | runtime |
+| `struct Parser<'a> { src: &'a str }` | [own the buffer, carry a position](#write-a-parser-or-cursor-over-text-you-do-not-own) | compile time |
+| `Box<Expr>` for a self-containing type | [`Heap<Expr>`](#represent-a-tree-or-ast-that-contains-itself) | compile time |
+| `Rc<RefCell<Node>>` for a graph | [an arena and a `Handle`](#build-a-tree-or-graph-whose-nodes-refer-to-each-other) | runtime |
+| two integer index spaces, easily swapped | [a newtype for each](#stop-two-kinds-of-index-from-being-mixed-up) | compile time |
 
-Then four more, for the structures those tokens live in:
+The **Checked** column is the price. Four keep the compile-time guarantee, one needs no
+check at all because it copies, and two move the check to runtime. Failing cases
+below are labelled the same way: **✗ the compiler stops you** costs nothing at runtime,
+**⚠ caught when it runs** is safe but later, and **✗ nothing catches it** is the one to
+actually avoid.
 
-- [a parser or cursor over text](#write-a-parser-or-cursor-over-text-you-do-not-own) — the `Parser<'a>` shape
-- [a tree or AST that contains itself](#represent-a-tree-or-ast-that-contains-itself) — the `Box<Expr>` shape
-- [a graph whose nodes point at each other](#build-a-tree-or-graph-whose-nodes-refer-to-each-other) — the `Rc<RefCell>` shape
-- [keeping two kinds of index apart](#stop-two-kinds-of-index-from-being-mixed-up)
-
-Failures below are labelled by *who catches them*: **✗ the compiler stops you** is the
-protection working and costs nothing at runtime; **⚠ caught when it runs** is safe but
-later; **✗ nothing catches it** is the one to actually avoid.
-
-Looking for a specific Rust construct instead? The full shape-by-shape table lives in
+For a Rust construct not listed here, the full shape-by-shape table is in
 [Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
 
 ## Read part of a string without copying it

@@ -165,6 +165,13 @@ function wrapSnippet(code: string): string {
       }
       // keep a blank line between items for readability in error output
       items.push("");
+    } else if (line.trim().startsWith("//")) {
+      // A top-level comment is not a loose statement. Left in `body` it made the snippet
+      // look like it had statements to wrap, so a fence that already declared `fn main`
+      // got a second one synthesised around it and failed with "defined twice". Comments
+      // carry no semantics, so hoisting them beside the items is always safe.
+      items.push(line);
+      i++;
     } else {
       body.push(line);
       i++;

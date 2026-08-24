@@ -209,33 +209,63 @@ pattern is for.
 
 ## Store many string slices without an allocation each
 
-The parser case: a token per identifier in a large file, each outliving the function that
-found it, without an allocation each. [`std/seal`](/stdlib/seal) is the answer. `seal` consumes the buffer and returns a `Sealed`, which has no
-mutating method, so stored offsets cannot be invalidated. A `Span` is two integers
-plus the identity of the buffer it was measured from, so it can live in a struct,
-a `Vec`, or a map key.
+The tokeniser case: one token per word in a large file, each surviving the function that
+found it, and no allocation per token. A view cannot leave the call, and owning each token
+means thousands of small copies. [`std/seal`](/stdlib/seal) is the third answer.
 
-**✓ Do this.** The span outlives the call; comparing through it allocates nothing:
+`seal` consumes the buffer and hands back a `Sealed`, which has no mutating method, so
+stored offsets can never be invalidated. A `Span` is then just two integers plus the
+identity of the buffer it came from, which makes it an ordinary value: it goes in a `Vec`,
+a struct field, or a map key.
+
+**✓ Do this.** `words` returns a `Vec<Span>` that outlives it, and no token was copied:
 
 ```milo
-from "std/seal" import { seal }
+from "std/seal" import { seal, Sealed, Span }
+
+// One span per word. Spans are plain values, so they survive the return.
+fn words(src: &Sealed): Vec<Span> {
+    var out: Vec<Span> = Vec.new()
+    var i: i64 = 0
+    while i < src.len() {
+        while i < src.len() && src.byteAt(i) == ' ' {
+            i = i + 1
+        }
+        let start = i
+        while i < src.len() && src.byteAt(i) != ' ' {
+            i = i + 1
+        }
+        if i > start {
+            out.push(src.spanOf(start, i - start))
+        }
+    }
+    return out
+}
 
 pub fn main(): i32 {
-    let src = seal("host=localhost".clone())
-    let key = src.spanOf(0, 4)  // the same "host" as above, but storable
-    print(src.text(key))
-    print(src.eq(key, "host").toString())
+    let src = seal("host=localhost port=8080".clone())
+    let toks = words(src)
+    print(toks.len)
+    for t in toks {
+        print(src.text(t))
+    }
     return 0
 }
 ```
 
 ```
-host
-true
+2
+host=localhost
+port=8080
 ```
 
-**⚠ Caught, but only when it runs.** The trade: where Rust's `'a` gives a compile error,
-Milo gives a named abort — safe, but later:
+Compare that to the first pattern: `Vec<&string>` is a compile error, and a `Vec<Span>` is
+not, because a span borrows nothing. `src.text(t)` is what costs an allocation, and you pay
+it only for the tokens you actually read. `src.eq(t, "host")` compares without one at all.
+
+**⚠ Caught, but only when it runs.** A span carries which buffer it was measured against,
+so resolving it elsewhere is a named abort rather than plausible-looking bytes from the
+wrong string. This is the trade for storability: Rust's `'a` makes it a compile error:
 
 ```milo
 from "std/seal" import { seal }
@@ -244,7 +274,7 @@ pub fn main(): i32 {
     let a = seal("host=localhost".clone())
     let b = seal("port=8080".clone())
     let key = a.spanOf(0, 4)
-    print(b.text(key))  // measured against `a`, resolved against `b`
+    print(b.text(key))     // measured against `a`, resolved against `b`
     return 0
 }
 ```

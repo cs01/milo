@@ -65,14 +65,14 @@ Writes append and cannot fail, so they return `void`:
 
 ```milo
 var out = ""
-Bytes.writeU32Be(out, body.len as u32)
-Bytes.writeI16Le(out, -40 as i16)
+Bytes.writeU32Be(out, body.len as u32)   // body.len is i64 — the cast is required
+Bytes.writeI16Le(out, -40)               // a literal adopts the parameter's type
 Bytes.writeF64Le(out, 1.5)
 ```
 
-Pass the value at its declared width. That `as u32` is where a value too large for
-the field gets truncated, and spelling it at the call site is what keeps the
-truncation visible.
+A literal needs no cast: it takes the width from the parameter it is passed to. A
+*value* of another width does, and that `as u32` is where one too large for the field
+gets truncated — spelling it at the call site is what keeps the truncation visible.
 
 ## Float bits
 

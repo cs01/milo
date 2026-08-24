@@ -108,13 +108,19 @@ unsafe
 impl Send for Shard {
 }
 
-pub enum WeldError {
+// Why a weld was refused, with no text attached: the numbers that used to be
+// baked into a sentence (which window, how many were expected) live next to the
+// data in the rejection, so a caller can branch on the cause instead of matching
+// on a string.
+pub enum WeldReason {
     // A window from a different shatter, or a hand-built one.
-    Foreign(string),
+    Foreign,
     // The count is right but the coverage is not: a duplicate and a gap.
-    NotCovered(string),
+    NotCovered,
     // Wrong number of windows handed back.
-    CountMismatch(string),
+    CountMismatch,
+    // `parallelMapWith` was given no states, so there would be no worker to run on.
+    NoWorkers,
 }
 
 // Owns the buffer while it is divided. Hold this until weld.
@@ -123,6 +129,45 @@ pub struct Shards<T> {
     count: i64,
     shatterId: i64,
     handedOut: bool,
+}
+
+// Why a refused weld is a struct and not a message: `weld` consumes the owner AND
+// the windows, so a `Result<Vec<T>, string>` would destroy a 20M-element buffer
+// and every window over it the instant a caller miscounted. This module exists so
+// that buffer is never copied, which makes dropping it the one failure it cannot
+// afford. The rejection carries all of it home: fix the set and weld again. Same
+// shape, and the same reason, as `FreezeRejected` in std/arena and `ThawRejected`
+// in std/seal.
+pub struct WeldRejected<T> {
+    // The owner, still holding the buffer untouched.
+    shards: Shards<T>,
+    // The windows exactly as they were handed in, in the order given.
+    returned: Vec<Shard<T>>,
+    // What was wrong.
+    reason: WeldReason,
+    // The window the refusal is about, or -1 when no single window is at fault.
+    index: i64,
+}
+
+impl WeldRejected<T> {
+    // A sentence for a human. The machine-readable form is `reason` and `index`;
+    // this exists so a caller that only wants to log has something to log.
+    fn message(self: &Self): string {
+        match self.reason {
+            WeldReason.CountMismatch => {
+                return "weld: expected " + self.shards.count.toString() + " windows, got " + self.returned.len.toString()
+            }
+            WeldReason.Foreign => {
+                return "weld: window " + self.index.toString() + " did not come from this shatter"
+            }
+            WeldReason.NotCovered => {
+                return "weld: window " + self.index.toString() + " came back twice, or never came back"
+            }
+            WeldReason.NoWorkers => {
+                return "parallelMapWith: states is empty, so there is no worker to run on"
+            }
+        }
+    }
 }
 
 // Per-process shatter identity, so a window cannot be welded into the wrong owner.
@@ -213,34 +258,71 @@ impl Shards<T> {
     // exactly once. A missing window would mean some worker still holds a pointer
     // into this buffer, and returning the Vec then would be the use-after-free this
     // module exists to avoid.
-    fn weld(self: Self, returned: Vec<Shard<T>>): Result<Vec<T>, WeldError> {
-        if returned.len != self.count {
-            return Result.Err(WeldError.CountMismatch("weld: expected " + self.count.toString() + " windows, got " + returned.len.toString()))
+    //
+    // A refusal costs nothing: the `WeldRejected` hands the owner and every window
+    // back, so the caller fixes the set and welds again.
+    fn weld(self: Self, returned: Vec<Shard<T>>): Result<Vec<T>, WeldRejected<T>> {
+        var reason: WeldReason = WeldReason.CountMismatch
+        var bad: i64 = -1
+        var ok = returned.len == self.count
+        if ok {
+            var seen: Vec<bool> = Vec.new()
+            var i: i64 = 0
+            while i < self.count {
+                seen.push(false)
+                i = i + 1
+            }
+            // Every check records its verdict and leaves; the rejection is built
+            // once, at the bottom. Returning from inside the loop instead would
+            // mean moving `returned` while the loop still borrows it.
+            for w in returned {
+                if w.shatterId != self.shatterId || w.index < 0 || w.index >= self.count {
+                    reason = WeldReason.Foreign
+                    bad = w.index
+                    ok = false
+                    break
+                }
+                if seen[w.index] {
+                    reason = WeldReason.NotCovered
+                    bad = w.index
+                    ok = false
+                    break
+                }
+                seen[w.index] = true
+            }
+            if ok {
+                var j: i64 = 0
+                while j < self.count {
+                    if !seen[j] {
+                        reason = WeldReason.NotCovered
+                        bad = j
+                        ok = false
+                        j = self.count
+                    } else {
+                        j = j + 1
+                    }
+                }
+            }
         }
-        var seen: Vec<bool> = Vec.new()
-        var i: i64 = 0
-        while i < self.count {
-            seen.push(false)
-            i = i + 1
+        if !ok {
+            var r: WeldRejected<T> = WeldRejected {
+                shards: self, returned: returned, reason: reason, index: bad
+            }
+            return Result.Err(r)
         }
-        for w in returned {
-            if w.shatterId != self.shatterId {
-                return Result.Err(WeldError.Foreign("weld: window " + w.index.toString() + " came from a different shatter"))
-            }
-            if w.index < 0 || w.index >= self.count {
-                return Result.Err(WeldError.Foreign("weld: window index " + w.index.toString() + " is outside this shatter"))
-            }
-            if seen[w.index] {
-                return Result.Err(WeldError.NotCovered("weld: window " + w.index.toString() + " was handed back twice"))
-            }
-            seen[w.index] = true
-        }
-        var j: i64 = 0
-        while j < self.count {
-            if !seen[j] {
-                return Result.Err(WeldError.NotCovered("weld: window " + j.toString() + " never came back"))
-            }
-            j = j + 1
+        return Result.Ok(self.buf)
+    }
+
+    // Take the buffer back from an owner that never handed a window out.
+    //
+    // This is the way home for a refusal that happens BEFORE any division, where
+    // `weld` is not an option because there are no windows to weld. Once
+    // `windows` has run, some worker may hold a pointer into the buffer, so the
+    // only sound route back is `weld` and its coverage check; `handedOut` records
+    // exactly that moment, which is why it is the condition here.
+    fn reclaim(self: Self): Result<Vec<T>, Shards<T>> {
+        if self.handedOut {
+            return Result.Err(self)
         }
         return Result.Ok(self.buf)
     }
@@ -260,7 +342,7 @@ impl Shards<T> {
 // copy: a capturing closure would be moved into the first task and gone for the rest.
 // Everything the work depends on therefore travels in the window itself, which is
 // also what keeps the workers from sharing anything.
-pub fn parallelMap<T>(v: Vec<T>, workers: i64, f: (Shard<T>) => Shard<T>): Result<Vec<T>, WeldError> {
+pub fn parallelMap<T>(v: Vec<T>, workers: i64, f: (Shard<T>) => Shard<T>): Result<Vec<T>, WeldRejected<T>> {
     var owner = shatter(v, workers)
     var windows = owner.windows()
     var ps: Vec<Promise<Shard<T>>> = Vec.new()
@@ -301,12 +383,23 @@ pub struct Mapped<T, S> {
 // Which worker processes which window is scheduling, so state a caller reads back
 // must not encode the assignment: per-worker tallies merge into totals that are
 // deterministic even though each worker's share is not.
-pub fn parallelMapWith<T, S>(v: Vec<T>, windows: i64, states: Vec<S>, f: (Shard<T>, &mut S) => Shard<T>): Result<Mapped<T, S>, WeldError> {
+pub fn parallelMapWith<T, S>(v: Vec<T>, windows: i64, states: Vec<S>, f: (Shard<T>, &mut S) => Shard<T>): Result<Mapped<T, S>, WeldRejected<T>> {
+    // `v` was moved in at the call, so refusing here with a message alone would
+    // take the caller's buffer down with the refusal. Shatter it into an owner
+    // that never hands a window out and refuse with THAT: `rej.shards.reclaim()`
+    // gives the buffer back whole. `states` is empty by definition of this
+    // refusal, so there is nothing of the caller's in it to return.
+    //
+    // A non-positive `windows` is not checked at all: `shatter` already clamps the
+    // count to at least one, so the old guard rejected an input the divider was
+    // about to accept.
     if states.len <= 0 {
-        return Result.Err(WeldError.CountMismatch("parallelMapWith: states is empty, so there are no workers"))
-    }
-    if windows <= 0 {
-        return Result.Err(WeldError.CountMismatch("parallelMapWith: window count must be positive, got " + windows.toString()))
+        var idle = shatter(v, 1)
+        var none: Vec<Shard<T>> = Vec.new()
+        var r: WeldRejected<T> = WeldRejected {
+            shards: idle, returned: none, reason: WeldReason.NoWorkers, index: -1
+        }
+        return Result.Err(r)
     }
     var owner = shatter(v, windows)
     var ws = owner.windows()
@@ -454,6 +547,28 @@ pub struct StrShards {
     handedOut: bool,
 }
 
+// The reading side's refusal, carrying the string back for the same reason the
+// writing side carries the buffer back: `weld` consumes the owner, and a 51 MiB
+// file that a scanner misrouted is not something to throw away over a diagnostic.
+pub struct StrWeldRejected {
+    // The owner, still holding the string.
+    shards: StrShards,
+    // The windows exactly as they were handed in.
+    returned: Vec<StrShard>,
+    // Always `Foreign` today: reads have no coverage obligation, so identity is
+    // the only thing this side can refuse over.
+    reason: WeldReason,
+    // The window that came from another shatter.
+    index: i64,
+}
+
+impl StrWeldRejected {
+    // A sentence for a human; `reason` and `index` are the machine-readable form.
+    fn message(self: &Self): string {
+        return "weld: window " + self.index.toString() + " did not come from this shatter"
+    }
+}
+
 // Consume a string and return an owner that hands out `n` read-only windows.
 //
 // Unlike the Vec side there is no one-call form to prefer: `parallelMap` is map-shaped
@@ -532,11 +647,19 @@ impl StrShards {
     // Give the string back. Windows are reads, so unlike the writing side there is no
     // coverage obligation; the identity check stays because a foreign window means the
     // caller has lost track of which shatter it is holding.
-    fn weld(self: Self, returned: Vec<StrShard>): Result<string, WeldError> {
+    fn weld(self: Self, returned: Vec<StrShard>): Result<string, StrWeldRejected> {
+        var bad: i64 = -1
         for w in returned {
             if w.shatterId != self.shatterId {
-                return Result.Err(WeldError.Foreign("weld: window " + w.index.toString() + " came from a different shatter"))
+                bad = w.index
+                break
             }
+        }
+        if bad >= 0 {
+            var r: StrWeldRejected = StrWeldRejected {
+                shards: self, returned: returned, reason: WeldReason.Foreign, index: bad
+            }
+            return Result.Err(r)
         }
         return Result.Ok(self.buf)
     }

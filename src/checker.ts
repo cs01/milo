@@ -1276,6 +1276,34 @@ export class TypeChecker {
     return sep > 0 && this._boundFailedStructs.has(fn.name.slice(0, sep));
   }
 
+  // Whether `name` reaches itself through by-value fields (directly or through other
+  // by-value structs / fixed arrays), which means it has no finite size. Vec/Heap/
+  // pointer/ref indirection breaks the chain, since those are pointer-sized whatever
+  // they point at, so only value-struct and fixed-array-of-struct fields keep walking.
+  private embedsSelf(name: string, stack: Set<string>): boolean {
+    if (stack.has(name)) return true;
+    const info = this.structs.get(name);
+    if (!info) return false;
+    stack.add(name);
+    for (const f of info.fields) {
+      let t = f.type;
+      while (t.tag === "array") t = t.element;
+      if (t.tag === "struct" && this.embedsSelf(t.name, stack)) { stack.delete(name); return true; }
+    }
+    stack.delete(name);
+    return false;
+  }
+
+  // `Pair_i64_string` back to `Pair<i64, string>`, for a diagnostic about a
+  // monomorphized struct: the mangled name is an implementation detail and nobody
+  // wrote it, so nobody should have to read it.
+  private displayStructName(mangled: string): string {
+    const info = this.structs.get(mangled);
+    if (!info || info.baseName === undefined) return mangled;
+    const args = (info.typeArgs ?? []).map(a => typeName(a)).join(", ");
+    return args.length === 0 ? info.baseName : `${info.baseName}<${args}>`;
+  }
+
   private monomorphizeStruct(baseName: string, typeArgs: TypeKind[]): string {
     const mangled = `${baseName}_${typeArgs.map(a => this.mangleTypeName(a)).join("_")}`;
     if (this.structs.has(mangled)) return mangled;
@@ -1291,18 +1319,27 @@ export class TypeChecker {
       }
     }
 
-    const fields = generic.decl.fields.map(f => ({
-      name: f.name,
-      type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
-      ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
-    }));
-    this.structs.set(mangled, {
-      fields, baseName, typeArgs,
+    // The memo entry goes in BEFORE the field types are resolved, because
+    // resolving one can lead straight back to this same instantiation: a struct
+    // whose field is `Owner<T>` whose own method returns `Rejected<T>` reaches
+    // `Rejected_f64` again while `Rejected_f64` is still being built. With the
+    // memo installed only afterwards, that re-entry re-ran the whole body and
+    // registered every impl method a second time, and LLVM rejected the program
+    // with `invalid redefinition of function`. Fields are filled in below; the
+    // re-entrant reader only needs the name to exist, not the layout.
+    const entry: StructInfo = {
+      fields: [], baseName, typeArgs,
       // Copy-ness is a property of the declaration, so every instantiation of a
       // `@noCopy` generic inherits it — `Handle<Texture>` is no more copyable than
       // the `Handle<T>` it came from.
       ...(generic.decl.attributes?.some(a => a.name === "noCopy") ? { noCopy: true } : {}),
-    });
+    };
+    this.structs.set(mangled, entry);
+    entry.fields = generic.decl.fields.map(f => ({
+      name: f.name,
+      type: this.resolve(this.substituteMiloType(f.type, generic.typeParams, typeArgs)),
+      ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
+    }));
 
     const decl: StructDecl = {
       kind: "StructDecl",
@@ -1968,25 +2005,13 @@ export class TypeChecker {
 
     // Reject a struct that embeds itself by value (directly or through other by-value
     // structs / fixed arrays) — it has infinite size and can't be laid out, yet used
-    // to compile and produce a broken type. Vec/Heap/pointer/ref indirection breaks
-    // the chain (those are pointer-sized regardless of pointee), so only value-struct
-    // and fixed-array-of-struct fields continue the walk.
-    const embedsSelf = (name: string, stack: Set<string>): boolean => {
-      if (stack.has(name)) return true;
-      const info = this.structs.get(name);
-      if (!info) return false;
-      stack.add(name);
-      for (const f of info.fields) {
-        let t = f.type;
-        while (t.tag === "array") t = t.element;
-        if (t.tag === "struct" && embedsSelf(t.name, stack)) { stack.delete(name); return true; }
-      }
-      stack.delete(name);
-      return false;
-    };
+    // to compile and produce a broken type. What counts as "by value" is `embedsSelf`.
+    // Generic declarations are skipped here and rejected per instantiation at the end
+    // of this function, because `A<T> { me: A<T> }` has no layout to walk until T is
+    // chosen.
     for (const s of program.structs) {
       if (s.typeParams.length > 0) continue;
-      if (embedsSelf(s.name, new Set())) {
+      if (this.embedsSelf(s.name, new Set())) {
         this.error(`struct '${s.name}' is recursive by value and has infinite size`, s.span,
           `a struct cannot contain itself by value — put the recursive field behind an indirection (e.g. 'Heap<${s.name}>' or 'Vec<${s.name}>')`);
       }
@@ -2370,6 +2395,24 @@ export class TypeChecker {
       if (this.inferVecElems.has(p.elem as object)) {
         this.error(`cannot infer Vec element type — no 'push' found to infer from; add a type annotation: 'let v: Vec<T> = Vec.new()'`, p.span);
       }
+    }
+
+    // The infinite-size rejection above only covers structs that were WRITTEN with
+    // concrete fields. A generic declaration cannot be walked: `A<T> { me: A<T> }`
+    // says nothing about layout until T is chosen, so the cycle is only visible in
+    // the instantiation. Instantiations are created on demand, some of them from a
+    // function body, so this runs at the end when the set has stopped growing.
+    //
+    // Without it `A<i64>` type-checked clean and reached codegen as
+    // `%A_i64 = type { i64, %A_i64 }`, which clang rejects as a recursive type: an
+    // accepted program the backend cannot build.
+    for (const mangled of [...this.structs.keys()]) {
+      const info = must(this.structs, mangled, "structs");
+      if (info.baseName === undefined) continue;
+      if (!this.embedsSelf(mangled, new Set())) continue;
+      const shown = this.displayStructName(mangled);
+      this.error(`struct '${shown}' is recursive by value and has infinite size`, undefined,
+        `a struct cannot contain itself by value: put the recursive field behind an indirection (e.g. 'Heap<${shown}>' or 'Vec<${shown}>')`);
     }
 
     // `@pure` needs the finished call-resolution maps and the full set of

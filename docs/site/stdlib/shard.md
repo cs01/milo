@@ -99,25 +99,67 @@ Keep the owner alive until `weld`. A window is a pointer into the owner's buffer
 
 `weld` checks what it can: every window must carry this shatter's identity and the set must cover the buffer exactly. A missing window means some worker may still be holding a pointer, so `weld` refuses rather than handing the `Vec` back.
 
+A refusal does not cost you the buffer. `weld` consumes both the owner and the windows, so an error that was only a message would destroy the very thing this module exists to avoid copying. Instead it returns a `WeldRejected<T>` holding the owner (`shards`), the windows exactly as you handed them in (`returned`), a `reason` you can branch on and the `index` of the offending window. Fix the set and weld again.
+
 ```milo
 var data: Vec<i64> = Vec.withCapacity(4)
 data.push(1)
 data.push(2)
 var owner = shatter(data, 2)
 var windows = owner.windows()
+let held = windows.pop()!
 
 match owner.weld(windows) {
     Result.Ok(v) => {
         print("welded " + v.len.toString())
     }
-    Result.Err(_e) => {
+    Result.Err(rej) => {
         // Deterministic: a window is missing, or came from another shatter.
-        print("weld refused")
+        print(rej.message())
+        // Nothing was lost. Put the missing window back and weld again.
+        var again = rej.shards
+        var back = rej.returned
+        back.push(held)
+        print("welded " + again.weld(back)!.len.toString())
     }
 }
 ```
 
 That is a runtime check, not a proof, and it is the honest residue of the manual path.
+
+`reason` is a `WeldReason`: `Foreign`, `NotCovered`, `CountMismatch`, or `NoWorkers`.
+An owner that never handed a window out has no windows to weld, so it gets the buffer
+back with `reclaim()` instead. That is how `parallelMapWith` refuses an empty `states`
+without eating the `Vec` it was already given:
+
+```milo
+from "std/shard" import { Shard, parallelMapWith }
+
+pub struct Tally { n: i64 }
+
+fn shade(w: Shard<f64>, t: &mut Tally): Shard<f64> {
+    t.n = t.n + 1
+    return w
+}
+
+pub fn main(): i32 {
+    var pixels: Vec<f64> = Vec.filled(64, 0.5)
+    var noStates: Vec<Tally> = Vec.new()
+    match parallelMapWith(pixels, 16, noStates, shade) {
+        Result.Ok(m) => {
+            print(m.data.len.toString())
+        }
+        Result.Err(rej) => {
+            var idle = rej.shards
+            let recovered = idle.reclaim()!
+            print("no workers, and the buffer came home: " + recovered.len.toString())
+        }
+    }
+    return 0
+}
+```
+
+The reading side refuses the same way, with a `StrWeldRejected` that carries the string home.
 
 **`parallelMap` does not have that residue.** It creates every window, hands out every
 window, awaits all of them and welds them itself, so no caller code can drop one or let

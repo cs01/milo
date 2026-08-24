@@ -183,6 +183,7 @@
   "shardMapWithClamp.milo": "noEmit",
   "shardParallelMap.milo": "noEmit",
   "shardWeld.milo": "noEmit",
+  "shardWeldRecover.milo": "noEmit",
   "signalSigchld.milo": "noEmit",
   "signalTwoPipes.milo": "noEmit",
   "sigpipeIgnored.milo": "noEmit",

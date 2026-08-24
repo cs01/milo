@@ -31,17 +31,43 @@ Seven patterns. Find the shape you were reaching for, and read across.
 | two integer index spaces, easily swapped | [a newtype for each](#stop-two-kinds-of-index-from-being-mixed-up) | compile time |
 
 The **Checked** column is the price. Four keep the compile-time guarantee, one needs no
-check at all because it copies, and two move the check to runtime. Failing cases
-below are labelled the same way: **✗ the compiler stops you** costs nothing at runtime,
-**⚠ caught when it runs** is safe but later, and **✗ nothing catches it** is the one to
-actually avoid.
+check at all because it copies, and two move the check to runtime.
+
+Each pattern below shows the working form and the ways it can go wrong, in coloured boxes:
+
+| Box | Means |
+|---|---|
+| 🟩 **The way to write it** | the form to reach for |
+| 🟦 **The compiler stops you** | rejected before it runs, at no runtime cost. The guardrail working |
+| 🟨 **Caught, but only when it runs** | still safe, and it aborts with a named cause, but later |
+| 🟥 **Nothing catches this** | compiles, runs, gives a wrong answer. The one to actually avoid |
 
 For a Rust construct not listed here, the full shape-by-shape table is in
 [Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
 
 ## Read part of a string without copying it
 
-Slice it. That is the whole thing:
+::: code-group
+
+```rust [Rust]
+let key = &line[0..4];  // &str, needs a lifetime once it leaves this scope
+```
+
+```cpp [C++]
+std::string_view key{line.data(), 4};  // dangles if line changes
+```
+
+```ts [TypeScript]
+const key = line.slice(0, 4);  // copies
+```
+
+:::
+
+Slice it. That is the whole thing.
+
+::: tip ✓ THE WAY TO WRITE IT
+A view is an ordinary `&string`: pass it to a function, read its length, compare it. No
+allocation, and no annotation needed to make it safe.
 
 ```milo
 fn shout(s: &string) {
@@ -63,27 +89,10 @@ host
 HOST
 4
 ```
-
-The view behaves like any other `&string`: pass it to a function, read its length, compare
-it. No allocation happened, and no annotation was needed to make that safe.
-
-::: code-group
-
-```rust [Rust]
-let key = &line[0..4];  // &str, needs a lifetime once it leaves this scope
-```
-
-```cpp [C++]
-std::string_view key{line.data(), 4};  // dangles if line changes
-```
-
-```ts [TypeScript]
-const key = line.slice(0, 4);  // copies
-```
-
 :::
 
-**✗ The compiler stops you.** While `key` is alive, `line` is frozen. This is the C++
+::: info 🛡 THE COMPILER STOPS YOU
+While `key` is alive, `line` is frozen. This is the C++
 case above, caught:
 
 ```milo error
@@ -102,7 +111,10 @@ error: cannot assign to 'line' because it is borrowed
         invalidate it
 ```
 
-**✗ The compiler stops you.** Views cannot be stored — no `Vec` of them, no struct field:
+:::
+
+::: info 🛡 THE COMPILER STOPS YOU
+Views cannot be stored — no `Vec` of them, no struct field:
 
 ```milo error
 pub fn main(): i32 {
@@ -117,6 +129,8 @@ pub fn main(): i32 {
 error: 'keys': references cannot be stored in a collection
   hint: references are second-class — store owned values instead
 ```
+
+:::
 
 ### Returning one from a method
 
@@ -176,7 +190,8 @@ fn key(line: &string): string {
 
 :::
 
-**✓ Do this.** Everything section one forbade is now allowed: a *free* function returns
+::: tip ✓ THE WAY TO WRITE IT
+Everything section one forbade is now allowed: a *free* function returns
 it, a struct stores it, and a `Vec` holds a pile of them:
 
 ```milo
@@ -218,6 +233,8 @@ The cost is one allocation per piece. For a config file that is invisible. For a
 over a large source file it is thousands of small allocations, and that is what the next
 pattern is for.
 
+:::
+
 ## Store many string slices without an allocation each
 
 The tokeniser case: one token per word in a large file, each surviving the function that
@@ -229,7 +246,8 @@ stored offsets can never be invalidated. A `Span` is then just two integers plus
 identity of the buffer it came from, which makes it an ordinary value: it goes in a `Vec`,
 a struct field, or a map key.
 
-**✓ Do this.** `words` returns a `Vec<Span>` that outlives it, and no token was copied:
+::: tip ✓ THE WAY TO WRITE IT
+`words` returns a `Vec<Span>` that outlives it, and no token was copied:
 
 ```milo
 from "std/seal" import { seal, Sealed, Span }
@@ -274,7 +292,10 @@ Compare that to the first pattern: `Vec<&string>` is a compile error, and a `Vec
 not, because a span borrows nothing. `src.text(t)` is what costs an allocation, and you pay
 it only for the tokens you actually read. `src.eq(t, "host")` compares without one at all.
 
-**⚠ Caught, but only when it runs.** A span carries which buffer it was measured against,
+:::
+
+::: warning ⚠ CAUGHT, BUT ONLY WHEN IT RUNS
+A span carries which buffer it was measured against,
 so resolving it elsewhere is a named abort rather than plausible-looking bytes from the
 wrong string. This is the trade for storability: Rust's `'a` makes it a compile error:
 
@@ -295,6 +316,8 @@ assertion failed at std/seal.milo:156:5: sealed: span was measured against a dif
 ```
 
 See [Memory Safety vs Rust](/language/vs-rust).
+
+:::
 
 ## Write a parser or cursor over text you do not own
 
@@ -326,7 +349,8 @@ pub struct Lexer {
 A struct may not store a borrow, so the cursor **owns the buffer** and carries an integer
 position, slicing on demand.
 
-**✓ Do this.** Because the cursor owns its text, `lexerFor` can build the string *and* a
+::: tip ✓ THE WAY TO WRITE IT
+Because the cursor owns its text, `lexerFor` can build the string *and* a
 cursor over it and return both as one value. That is the case Rust cannot write at all: a
 `Lexer<'a>` borrowing a local would be returning a reference to something about to die.
 
@@ -382,6 +406,8 @@ the cursor exactly as it is and hand back
 [spans instead](#store-many-string-slices-without-an-allocation-each): seal `src` once,
 and return `Span` values that cost two integers each.
 
+:::
+
 ## Represent a tree or AST that contains itself
 
 ::: code-group
@@ -411,7 +437,7 @@ enum Expr {
 `Heap<T>` is the single-owner heap pointer, dereferenced with `*`. No lifetime, because
 there is exactly one owner.
 
-**✓ Do this:**
+::: tip ✓ THE WAY TO WRITE IT
 
 ```milo
 enum Expr {
@@ -458,6 +484,8 @@ This covers any tree that owns its children. When a node needs to point *back* a
 parent, or two nodes need to point at each other, ownership is no longer a tree — that is
 the next section.
 
+:::
+
 ## Build a tree or graph whose nodes refer to each other
 
 ::: code-group
@@ -481,7 +509,8 @@ let h = arena.alloc(node)  // Handle: index + generation
 Put the values in one pool and refer to them by key. The obvious key is a `Vec` position,
 and that is the trap: positions get reused.
 
-**✗ Nothing catches this.** The index outlived the element it named — compiles, runs,
+::: danger ✗ NOTHING CATCHES THIS
+The index outlived the element it named — compiles, runs,
 returns the wrong record:
 
 ```milo
@@ -500,7 +529,10 @@ pub fn main(): i32 {
 carol
 ```
 
-**✓ Do this instead.** A `Handle` carries the position *plus* which arena issued it and
+:::
+
+::: tip ✓ THE WAY TO WRITE IT
+A `Handle` carries the position *plus* which arena issued it and
 which occupant of the slot it was for. A stale one reads back as `None`:
 
 ```milo
@@ -530,12 +562,14 @@ None
 Use a `Handle` wherever slots are recycled; a plain index is fine only for
 append-only storage.
 
+:::
+
 ## Stop two kinds of index from being mixed up
 
 With several arenas, a key from one must not resolve in another. Both types are one
 integer wide, so the check costs nothing at runtime.
 
-**✗ The compiler stops you:**
+::: info 🛡 THE COMPILER STOPS YOU
 
 ```milo error
 pub struct ExprId { index: i64 }
@@ -560,7 +594,9 @@ error: argument 1 of 'exprAt': expected ExprId, got StmtId
    │                  ^
 ```
 
-**✓ Do this:**
+:::
+
+::: tip ✓ THE WAY TO WRITE IT
 
 ```milo
 pub struct ExprId { index: i64 }
@@ -583,3 +619,5 @@ pub fn main(): i32 {
 One sharp edge: a static method on a generic struct needs its type arguments
 spelled out. `Arena<Node>.new()` works, bare `Arena.new()` is parsed as an enum
 variant and fails.
+
+:::

@@ -24,7 +24,7 @@ Seven patterns. Find the shape you were reaching for, and read across.
 |---|---|---|
 | `&line[0..4]`, a slice you use right here | [a view](#read-part-of-a-string-without-copying-it) | compile time |
 | a `&str` returned to your caller | [own it, `substr` copies](#return-a-piece-of-a-string-to-your-caller) | nothing to check |
-| many `&str` kept at once | [seal the buffer, store spans](#store-many-string-slices-without-an-allocation-each) | runtime |
+| many `&str` kept at once | [seal the buffer, store spans](#store-many-string-slices-without-an-allocation-each) | runtime¹ |
 | `struct Parser<'a> { src: &'a str }` | [own the buffer, carry a position](#write-a-parser-or-cursor-over-text-you-do-not-own) | compile time |
 | `Box<Expr>` for a self-containing type | [`Heap<Expr>`](#represent-a-tree-or-ast-that-contains-itself) | compile time |
 | `Rc<RefCell<Node>>` for a graph | [an arena and a `Handle`](#build-a-tree-or-graph-whose-nodes-refer-to-each-other) | runtime |
@@ -40,6 +40,10 @@ Each pattern below shows the working form and the ways it can go wrong, in colou
 | 🟩 **The way to write it** | the form to reach for |
 | 🟦 **The compiler stops you** | rejected before it runs, at no runtime cost. The guardrail working |
 | 🟨 **Caught, but only when it runs** | still safe, and it aborts with a named cause, but later |
+
+¹ Nothing can dangle in either of the runtime rows: an arena and a sealed buffer both own
+their storage. What is checked at runtime is *identity*, that a handle or a span is being
+resolved against the thing it was made from. Memory safety is static in all seven.
 | 🟥 **Buggy code, don't do this** | compiles, runs, and hands back the wrong answer. Nothing warns you, so this is the one to actually avoid |
 
 For a Rust construct not listed here, the full shape-by-shape table is in
@@ -326,9 +330,9 @@ it only for the tokens you actually read. `src.eq(t, "host")` compares without o
 :::
 
 ::: warning ⚠ CAUGHT, BUT ONLY WHEN IT RUNS
-A span carries which buffer it was measured against,
-so resolving it elsewhere is a named abort rather than plausible-looking bytes from the
-wrong string. This is the trade for storability: Rust's `'a` makes it a compile error:
+Nothing here can dangle: a `Sealed` owns its bytes and has no mutating method, so there is
+no use-after-free to prevent. What the `brand` catches is a *logic* error, resolving a span
+against the wrong buffer and reading bytes that are in bounds and simply wrong:
 
 ```milo
 from "std/seal" import { seal }
@@ -374,11 +378,19 @@ host
 ```
 
 Once a span is in a `Vec`, crosses a function boundary, or is picked by a branch, the
-compiler can no longer name its buffer. Making it able to is precisely what a lifetime
-parameter does: `Span<'a>` tied to `Sealed<'a>`, which is the annotation this language
+compiler can no longer name its buffer. Tying the two at compile time is what a lifetime
+parameter does, `Span<'a>` bound to `Sealed<'a>`, and that is the annotation this language
 does not have. **You cannot have both.** Either spans are ordinary values you can store
-and pass, or the compiler tracks their buffer, and this page exists because Milo chose
-the first.
+and pass, or the compiler tracks their buffer.
+
+It is worth being precise about what Rust does here, because the comparison is easy to
+get backwards. `&'a str` is checked at compile time and **cannot be stored**, which is
+the reason you are reading this section at all. When Rust code needs storable tokens it
+reaches for the same design as this one, offsets into a side table: `rustc`'s `Span`
+indexes a `SourceMap`, and lexer crates hand back byte ranges. Those carry no lifetime
+either, and resolving one against the wrong source is unchecked. Measured against the
+alternative that has the same capability, the `brand` catches a bug the usual approach
+does not.
 
 A partial compile-time check that caught only the two-locals case would be worse than
 none: it would pass on every toy and stay silent on the code that actually ships.

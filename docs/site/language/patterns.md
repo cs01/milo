@@ -20,9 +20,12 @@ a compile-time guarantee for more freedom about where the value can live.
 | [return it to your caller](#return-a-piece-of-a-string-to-your-caller) | **own it** — `substr` copies | nothing to check |
 | [keep thousands of them, cheaply](#store-many-string-slices-without-an-allocation-each) | **seal + spans** — `std/seal` | runtime |
 
-Two more patterns follow, for data that refers to itself:
-[trees and graphs](#build-a-tree-or-graph-whose-nodes-refer-to-each-other), and
-[keeping two kinds of index apart](#stop-two-kinds-of-index-from-being-mixed-up).
+Then four more, for the structures those tokens live in:
+
+- [a parser or cursor over text](#write-a-parser-or-cursor-over-text-you-do-not-own) — the `Parser<'a>` shape
+- [a tree or AST that contains itself](#represent-a-tree-or-ast-that-contains-itself) — the `Box<Expr>` shape
+- [a graph whose nodes point at each other](#build-a-tree-or-graph-whose-nodes-refer-to-each-other) — the `Rc<RefCell>` shape
+- [keeping two kinds of index apart](#stop-two-kinds-of-index-from-being-mixed-up)
 
 Failures below are labelled by *who catches them*: **✗ the compiler stops you** is the
 protection working and costs nothing at runtime; **⚠ caught when it runs** is safe but
@@ -188,6 +191,98 @@ assertion failed at std/seal.milo:156:5: sealed: span was measured against a dif
 ```
 
 See [Memory Safety vs Rust](/language/vs-rust).
+
+## Write a parser or cursor over text you do not own
+
+This is the shape Rust writes as `struct Parser<'a> { src: &'a str }`, and it is the one
+case Milo genuinely cannot express: a struct may not store a borrow. The answer is to
+**own the buffer and carry an integer position**, slicing on demand. The cursor owns its
+text, so nothing can outlive anything.
+
+**✓ Do this.** No lifetime, no borrow stored, and `nextWord` can be called as often as
+you like:
+
+```milo
+pub struct Lexer {
+    src: string,
+    pos: i64,
+}
+
+impl Lexer {
+    fn atEnd(self: &Self): bool {
+        return self.pos >= self.src.len
+    }
+
+    fn nextWord(self: &mut Self): string {
+        while self.pos < self.src.len && self.src[self.pos] == ' ' {
+            self.pos = self.pos + 1
+        }
+        let start = self.pos
+        while self.pos < self.src.len && self.src[self.pos] != ' ' {
+            self.pos = self.pos + 1
+        }
+        return self.src.substr(start, self.pos)
+    }
+}
+
+pub fn main(): i32 {
+    var lx = Lexer { src: "host = localhost", pos: 0 }
+    while !lx.atEnd() {
+        print(lx.nextWord())
+    }
+    return 0
+}
+```
+
+```
+host
+=
+localhost
+```
+
+`nextWord` returns an owned `string` — one allocation per token. If that matters, keep
+the cursor exactly as it is and hand back
+[spans instead](#store-many-string-slices-without-an-allocation-each): seal `src` once,
+and return `Span` values that cost two integers each.
+
+## Represent a tree or AST that contains itself
+
+A struct or enum cannot contain itself directly — the size would be infinite. Rust reaches
+for `Box<Expr>`; Milo uses `Heap<Expr>`, a single-owner heap pointer, dereferenced with
+`*`. No lifetime is involved because there is exactly one owner.
+
+**✓ Do this:**
+
+```milo
+enum Expr {
+    Num(i64),
+    Add(Heap<Expr>, Heap<Expr>),
+}
+
+fn eval(e: &Expr): i64 {
+    match e {
+        Expr.Num(n) => { return n }
+        Expr.Add(l, r) => { return eval(*l) + eval(*r) }
+    }
+}
+
+pub fn main(): i32 {
+    let tree = Expr.Add(
+        Heap(Expr.Num(2)),
+        Heap(Expr.Add(Heap(Expr.Num(3)), Heap(Expr.Num(4))))
+    )
+    print(eval(tree))
+    return 0
+}
+```
+
+```
+9
+```
+
+This covers any tree that owns its children. When a node needs to point *back* at its
+parent, or two nodes need to point at each other, ownership is no longer a tree — that is
+the next section.
 
 ## Build a tree or graph whose nodes refer to each other
 

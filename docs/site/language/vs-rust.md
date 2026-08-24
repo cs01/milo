@@ -43,7 +43,7 @@ string cases and the self-referential ones are worked through with running code 
 |---|---|---|
 | Zero-copy view inside a scope | `&s[6..11]` | `s[6..11]`, a `&string` view, no allocation |
 | Zero-copy view returned to a caller | `fn items(&self) -> &[T]` | same: a method may return a view of its receiver's own storage, and the receiver is frozen while the view lives |
-| Recursive data (tree, AST) | `Box<Expr>` | `Heap<Expr>`, dereferenced with `*l` |
+| Recursive data (tree, AST) | `Box<Expr>` | [`Heap<Expr>`, dereferenced with `*l`](/language/patterns#represent-a-tree-or-ast-that-contains-itself) |
 | Doubly-linked list | `Rc<RefCell<Node>>` or `unsafe` | arena + `Option<Handle<Node>>`, [linkedList.milo](https://github.com/milo-language/milo/blob/main/examples/basics/linkedList.milo) |
 | Cyclic graph, cross-references | `petgraph`, arena + indices, or `Rc` | `Arena<Node>` + `Vec<Handle<Node>>` for edges, [depgraph.milo](https://github.com/milo-language/milo/blob/main/examples/basics/depgraph.milo) |
 | Tree with parent pointers (DOM) | `Rc<RefCell>` or an arena crate | `Arena<Node>`, parent and children as handles, [domArena.milo](https://github.com/milo-language/milo/blob/main/examples/basics/domArena.milo) |
@@ -53,7 +53,7 @@ string cases and the self-referential ones are worked through with running code 
 | Parallel map over one array | `rayon` `par_iter_mut` | [`std/shard`](/stdlib/shard): `parallelMap(v, n, f)`, or `parallelMapWith` for a worker pool and per-worker state |
 | Spawn and join | `thread::spawn` + `handle.join()` | `Task.spawn` + `Task.join`, or a `WaitGroup` for a fleet |
 | Wait on first of several sources | `tokio::select!` | `std/select` |
-| Cursor or iterator holding a borrow | `struct Cur<'a> { buf: &'a [u8] }` | own the buffer, carry an integer `pos`, slice on demand |
+| Cursor or iterator holding a borrow | `struct Cur<'a> { buf: &'a [u8] }` | [own the buffer, carry an integer `pos`, slice on demand](/language/patterns#write-a-parser-or-cursor-over-text-you-do-not-own) |
 | **Struct that stores a borrow** | `struct Parser<'a> { src: &'a str }` | **no equivalent.** [Three answers, worked through](/language/patterns) |
 
 ## What large Rust codebases actually do

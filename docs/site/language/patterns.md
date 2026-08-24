@@ -40,7 +40,7 @@ Each pattern below shows the working form and the ways it can go wrong, in colou
 | 🟩 **The way to write it** | the form to reach for |
 | 🟦 **The compiler stops you** | rejected before it runs, at no runtime cost. The guardrail working |
 | 🟨 **Caught, but only when it runs** | still safe, and it aborts with a named cause, but later |
-| 🟥 **Don't do this: a silent bug** | compiles, runs, and hands back the wrong answer. Nothing warns you, so this is the one to actually avoid |
+| 🟥 **Buggy code, don't do this** | compiles, runs, and hands back the wrong answer. Nothing warns you, so this is the one to actually avoid |
 
 For a Rust construct not listed here, the full shape-by-shape table is in
 [Memory Safety vs Rust](/language/vs-rust#the-rust-shape-and-what-to-write-instead).
@@ -509,7 +509,7 @@ let h = arena.alloc(node)  // Handle: index + generation
 Put the values in one pool and refer to them by key. The obvious key is a `Vec` position,
 and that is the trap: positions get reused.
 
-::: danger ✗ DON'T DO THIS: A SILENT BUG
+::: danger 🐛 BUGGY CODE, DON'T DO THIS
 `idx` was taken when the slot held `alice`. After the slot is reused it names `carol`
 instead, and the read succeeds. No error, no crash, just the wrong record:
 

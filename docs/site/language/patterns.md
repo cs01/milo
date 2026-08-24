@@ -470,7 +470,7 @@ Because a `Sealed` cannot change, handing it to another worker needs no copy and
 `share()` turns it into a `Shared` that each reader clones for itself:
 
 ```milo
-from "std/seal" import { seal }
+from "std/seal" import { Sealed, seal, sharedWith }
 from "std/runtime" import { Promise }
 
 pub fn main(): i32 {
@@ -482,7 +482,8 @@ pub fn main(): i32 {
         return mine.len()          // reads the shared buffer on a real thread
     })
 
-    print(sh.text(sh.spanOf(0, 4)))
+    // sharedWith lends the Sealed itself, so the whole reader API applies to it.
+    print(sharedWith(sh, (s: &Sealed): string => s.text(s.spanOf(0, 4))))
     print(job.await()!)
     return 0
 }

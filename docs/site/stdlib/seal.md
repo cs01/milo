@@ -163,10 +163,32 @@ above. `Send` and `Sync` are
 audited rather than derived, and the only mutable state is the holder count, which moves
 under an atomic.
 
-**`Shared` is `Sealed` with holders.** `len`, `span`, `spanOf`, `holds`, `byteAt`, `text`,
-`eq` and `each` are the same methods with the same meanings on both types, so there is one
-reader API to learn. The two differ only in the ownership verbs: `Sealed` has `unseal` and
-`share`, `Shared` has `clone` and `holders`. A test enforces that.
+### Reading a `Shared`
+
+There is one reader API to learn, and it lives on `Sealed`. `sharedWith` hands the callback
+the `Sealed` itself, so everything above is available on it and nothing is copied:
+
+```milo
+from "std/seal" import { Sealed, seal, sharedWith }
+
+pub fn main(): i32 {
+    let a = seal("{\"name\":\"milo\"}".clone()).share()
+    let name = sharedWith(a, (s: &Sealed): string => s.text(s.spanOf(9, 4)))
+    print(name)                                  // "milo"
+    return 0
+}
+```
+
+`Shared` used to re-expose all eight readers as its own methods, which was two hand-kept
+lists that drifted the moment one gained a method. `sharedWith` is the one borrow point
+that replaced them. It is a free function rather than a method because `R` is a type
+parameter of the operation rather than of `Shared`, and a method's own type parameter is
+never inferred at the call site — the same reason `std/arena` spells its read as
+`arenaWith`.
+
+`len` and `byteAt` do stay on `Shared` directly, as the worker loop above uses them: a
+closure per byte is the wrong shape for a hot path. Beyond those, the two types differ in
+the ownership verbs: `Sealed` has `unseal` and `share`, `Shared` has `clone` and `holders`.
 
 ### Getting it back
 

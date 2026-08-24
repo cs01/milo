@@ -8,7 +8,7 @@
 // @expect: thawed: the quick brown fox jumps over the lazy dog
 
 from "std/seal" import {
-    Shared, seal, thaw, unseal
+    Sealed, Shared, seal, sharedWith, thaw, unseal
 }
 from "std/runtime" import {
     Promise
@@ -24,8 +24,8 @@ fn showRefusal(a: &Shared): void {
         }
         Result.Err(rej) => {
             print("refused holders=" + rej.holders.toString())
-            let sp = rej.shared.spanOf(4, 5)
-            print(rej.shared.text(sp))
+            // The whole reader API through one borrow, rather than a copy of it on Shared.
+            print(sharedWith(rej.shared, (s: &Sealed): string => s.text(s.spanOf(4, 5))))
         }
     }
 }

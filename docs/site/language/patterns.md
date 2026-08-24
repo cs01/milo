@@ -28,8 +28,11 @@ first that fits, since each step down trades away compile-time guarantee.
 
 ### 1. Hand back a view
 
-Zero-copy and checked at compile time. The caller must read the view where it
-stands, because a view cannot be stored.
+Zero-copy, checked at compile time. A method may return a view of storage reachable
+through `self` — never of a local or another `&` parameter — and the call **freezes the
+receiver** while the binding lives.
+
+**Works.** The view costs no allocation:
 
 ```milo
 pub struct Source {
@@ -47,17 +50,78 @@ pub fn main(): i32 {
     var cfg = Source { data: [100 as u8, 98 as u8, 58 as u8], keyEnd: 2 }
     let k = cfg.key()                  // borrowed from cfg, not copied
     print(k.len.toString())
-
-    // var saved: Vec<&[u8]> = Vec.new()   // references cannot be stored in a collection
-    // cfg.data.push(65 as u8)             // cfg is borrowed while k is alive
     return 0
 }
 ```
 
-Two rules make this sound and the compiler enforces both. A method may return a
-view only of storage reachable through `self`, never of a local or another `&`
-parameter. And a call returning a view **freezes the receiver** while the binding
-lives: `cfg` cannot be grown, reassigned, moved, or dropped.
+```
+2
+```
+
+**Does not compile.** A view cannot be stored, so there is no way to keep one past the
+expression that made it:
+
+```milo error
+pub struct Source {
+    data: Vec<u8>,
+    keyEnd: i64,
+}
+
+impl Source {
+    fn key(self: &Self): &[u8] {
+        return self.data[0..self.keyEnd]
+    }
+}
+
+pub fn main(): i32 {
+    var cfg = Source { data: [100 as u8, 98 as u8, 58 as u8], keyEnd: 2 }
+    var saved: Vec<&[u8]> = Vec.new()
+    saved.push(cfg.key())
+    return 0
+}
+```
+
+```
+error: 'saved': references cannot be stored in a collection
+  ──> patterns.milo:15:5
+   │
+15 │     var saved: Vec<&[u8]> = Vec.new()
+   │     ^
+  hint: references are second-class — store owned values instead
+```
+
+**Does not compile.** Growing the receiver could move the memory the view points into:
+
+```milo error
+pub struct Source {
+    data: Vec<u8>,
+    keyEnd: i64,
+}
+
+impl Source {
+    fn key(self: &Self): &[u8] {
+        return self.data[0..self.keyEnd]
+    }
+}
+
+pub fn main(): i32 {
+    var cfg = Source { data: [100 as u8, 98 as u8, 58 as u8], keyEnd: 2 }
+    let k = cfg.key()
+    cfg.data.push(65 as u8)            // cfg is frozen while k is alive
+    print(k.len.toString())
+    return 0
+}
+```
+
+```
+error: cannot call 'push' on 'cfg' because it is borrowed
+  ──> patterns.milo:16:5
+   │
+16 │     cfg.data.push(65 as u8)
+   │     ^
+  hint: a slice or loop iteration over this variable is still live — mutating it could
+        move memory the borrow points into
+```
 
 ### 2. Own the text
 
@@ -70,30 +134,74 @@ When tokens must outlive the call, [`std/seal`](/stdlib/seal) is this pattern
 built and tested. `seal` consumes the buffer and returns a `Sealed`, which has no
 mutating method, so stored offsets cannot be invalidated. A `Span` is two integers
 plus the identity of the buffer it was measured from, so it can live in a struct,
-a `Vec`, or a map key, and resolving it against the wrong buffer is a named
-failure rather than wrong-but-plausible bytes.
+a `Vec`, or a map key.
+
+**Works.** The span outlives the call, and comparing through it allocates nothing:
 
 ```milo
-from "std/seal" import { seal, unseal }
+from "std/seal" import { seal }
 
 pub fn main(): i32 {
     let src = seal("database_url: postgres".clone())
     let key = src.spanOf(0, 12)
-    print(src.text(key))               // database_url
-    print(src.eq(key, "database_url").toString())   // true, no allocation
+    print(src.text(key))
+    print(src.eq(key, "database_url").toString())
     return 0
 }
 ```
 
-This is a runtime check where Rust's `'a` gives a compile error, and that is the
-trade. See [Memory Safety vs Rust](/language/vs-rust).
+```
+database_url
+true
+```
+
+**Aborts at runtime.** This is the trade: where Rust's `'a` gives a compile error,
+resolving a span against the wrong buffer is a named failure rather than
+wrong-but-plausible bytes:
+
+```milo
+from "std/seal" import { seal }
+
+pub fn main(): i32 {
+    let a = seal("database_url: postgres".clone())
+    let b = seal("something entirely else".clone())
+    let key = a.spanOf(0, 12)
+    print(b.text(key))                 // measured against `a`, resolved against `b`
+    return 0
+}
+```
+
+```
+assertion failed at std/seal.milo:156:5: sealed: span was measured against a different buffer
+```
+
+See [Memory Safety vs Rust](/language/vs-rust).
 
 ## Use a handle, not an array index
 
 When data points at itself, put the values in one pool and refer to them by key.
 The obvious key is a `Vec` position, and that is the trap: positions get reused.
-`std/arena` gives a `Handle`, which is the position plus which arena issued it and
-which occupant of the slot it was for.
+
+**Wrong answer, no complaint.** The index outlived the element it named:
+
+```milo
+pub fn main(): i32 {
+    var slots: Vec<string> = Vec.new()
+    slots.push("alice")
+    let idx = slots.len - 1
+    slots.remove(idx)
+    slots.push("carol")
+    print(slots[idx])                  // idx meant alice
+    return 0
+}
+```
+
+```
+carol
+```
+
+**Works.** `std/arena` gives a `Handle` — the position, plus which arena issued it and
+which occupant of the slot it was for. A stale one reads back as `None`:
 
 ```milo
 from "std/arena" import { Arena }
@@ -103,33 +211,56 @@ pub struct Session {
 }
 
 pub fn main(): i32 {
-    // a raw index into a Vec
-    var slots: Vec<string> = Vec.new()
-    slots.push("alice")
-    let idx = slots.len - 1
-    slots.remove(idx)
-    slots.push("carol")
-    print("raw index: " + slots[idx])              // raw index: carol
-
-    // the same thing with a generational handle
     var arena: Arena<Session> = Arena<Session>.new()
     let h = arena.alloc(Session { user: "alice" })
     arena.free(h)
-    let _carol = arena.alloc(Session { user: "carol" })
+    let _carol = arena.alloc(Session { user: "carol" })   // reuses the slot
     match arena.get(h) {
-        Option.Some(s) => { print("handle: " + s.user) }
-        Option.None => { print("handle: None") }   // handle: None
+        Option.Some(s) => { print(s.user) }
+        Option.None => { print("None") }
     }
     return 0
 }
 ```
 
-The raw index reads `carol` with no complaint, a wrong answer rather than a crash.
+```
+None
+```
+
 Use a `Handle` wherever slots are recycled; a plain index is fine only for
 append-only storage.
 
-With several arenas, give each key its own type so mixing them up is a compile
-error. Both types are one integer wide, so the check is free.
+### Give each pool its own key type
+
+With several arenas, a key from one must not resolve in another. Both types are one
+integer wide, so the check costs nothing at runtime.
+
+**Does not compile:**
+
+```milo error
+pub struct ExprId { index: i64 }
+pub struct StmtId { index: i64 }
+
+fn exprAt(id: ExprId): i64 {
+    return id.index
+}
+
+pub fn main(): i32 {
+    let s = StmtId { index: 3 }
+    print(exprAt(s).toString())
+    return 0
+}
+```
+
+```
+error: argument 1 of 'exprAt': expected ExprId, got StmtId
+  ──> patterns.milo:10:18
+   │
+10 │     print(exprAt(s).toString())
+   │                  ^
+```
+
+**Works:**
 
 ```milo
 pub struct ExprId { index: i64 }
@@ -140,11 +271,13 @@ fn exprAt(id: ExprId): i64 {
 }
 
 pub fn main(): i32 {
-    let s = StmtId { index: 3 }
-    // exprAt(s)   // error: argument 1 of 'exprAt': expected ExprId, got StmtId
     print(exprAt(ExprId { index: 3 }).toString())
     return 0
 }
+```
+
+```
+3
 ```
 
 One sharp edge: a static method on a generic struct needs its type arguments

@@ -94,7 +94,10 @@ function extractSnippets(relPath: string): Snippet[] {
   let cur: Snippet | null = null;
   let buf: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^```milo(?:\s+(\w+))?\s*$/);
+    // A trailing `[Label]` is VitePress code-group tab text, not a doc-test mode. Without
+    // this the label made the fence stop matching, and a labelled snippet silently left the
+    // gate — the page would look checked and not be.
+    const m = lines[i].match(/^```milo(?:\s+(\w+))?(?:\s+\[[^\]]+\])?\s*$/);
     if (!cur && m) {
       const mode = (m[1] ?? "check") as Snippet["mode"];
       if (mode !== "check" && mode !== "error" && mode !== "skip") {

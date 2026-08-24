@@ -36,12 +36,76 @@ Looking for a specific Rust construct instead? The full shape-by-shape table liv
 
 ## Read part of a string without copying it
 
-The cheapest answer, and the one to try first. No allocation, and the compiler proves it
-is safe. A method may return a view of storage reachable
-through `self` — never of a local or another `&` parameter — and the call **freezes the
-receiver** while the binding lives.
+Slice it. That is the whole thing:
 
-**✓ Do this.** `key()` hands back the `host` part of the line without copying it:
+```milo
+pub fn main(): i32 {
+    let line = "host=localhost"
+    let key = line[0..4]       // a view into line, nothing copied
+    print(key)
+    return 0
+}
+```
+
+```
+host
+```
+
+::: code-group
+
+```rust [Rust]
+let key = &line[0..4];      // &str — needs a lifetime once it leaves this scope
+```
+
+```cpp [C++]
+std::string_view key{line.data(), 4};   // dangles if line changes
+```
+
+```ts [TypeScript]
+const key = line.slice(0, 4);           // copies
+```
+
+:::
+
+**✗ The compiler stops you.** While `key` is alive, `line` is frozen. This is the C++
+case above, caught:
+
+```milo error
+pub fn main(): i32 {
+    var line = "host=localhost"
+    let key = line[0..4]
+    line = "port=8080"
+    print(key)
+    return 0
+}
+```
+
+```
+error: cannot assign to 'line' because it is borrowed
+  hint: a reference or slice into this variable is still live — the assignment would
+        invalidate it
+```
+
+**✗ The compiler stops you.** Views cannot be stored — no `Vec` of them, no struct field:
+
+```milo error
+pub fn main(): i32 {
+    let line = "host=localhost"
+    var keys: Vec<&string> = Vec.new()
+    keys.push(line[0..4])
+    return 0
+}
+```
+
+```
+error: 'keys': references cannot be stored in a collection
+  hint: references are second-class — store owned values instead
+```
+
+### Returning one from a method
+
+A method may hand back a view of its *own* storage. The receiver is frozen while the view
+lives, so the two rules above still hold:
 
 ```milo
 pub struct Config {
@@ -57,8 +121,7 @@ impl Config {
 
 pub fn main(): i32 {
     var cfg = Config { line: "host=localhost", sep: 4 }
-    let k = cfg.key()          // a view into cfg.line, nothing copied
-    print(k)
+    print(cfg.key())
     return 0
 }
 ```
@@ -67,91 +130,23 @@ pub fn main(): i32 {
 host
 ```
 
-**✗ The compiler stops you — this is the protection working.** A view cannot be stored,
-so there is no way to keep one past the expression that made it. In C++ this compiles and
-dangles; here it is rejected before it runs:
-
-```milo error
-pub struct Config {
-    line: string,
-    sep: i64,
-}
-
-impl Config {
-    fn key(self: &Self): &string {
-        return self.line[0..self.sep]
-    }
-}
-
-pub fn main(): i32 {
-    var cfg = Config { line: "host=localhost", sep: 4 }
-    var keys: Vec<&string> = Vec.new()
-    keys.push(cfg.key())
-    return 0
-}
-```
-
-```
-error: 'keys': references cannot be stored in a collection
-  ──> patterns.milo:14:5
-   │
-14 │     var keys: Vec<&string> = Vec.new()
-   │     ^
-  hint: references are second-class — store owned values instead
-```
-
-**✗ The compiler stops you — this is the protection working.** While `k` is alive, `cfg`
-is frozen. Replacing the line would leave `k` pointing at text that is no longer there,
-which is precisely the use-after-free Rust spends a lifetime annotation to prevent:
-
-```milo error
-pub struct Config {
-    line: string,
-    sep: i64,
-}
-
-impl Config {
-    fn key(self: &Self): &string {
-        return self.line[0..self.sep]
-    }
-}
-
-pub fn main(): i32 {
-    var cfg = Config { line: "host=localhost", sep: 4 }
-    let k = cfg.key()          // k views "host" inside cfg.line
-    cfg.line = "port=8080"     // …and this would pull it out from under k
-    print(k)
-    return 0
-}
-```
-
-```
-error: cannot assign to 'cfg.line' because 'cfg' is borrowed
-  ──> patterns.milo:16:5
-   │
-16 │     cfg.line = "port=8080"
-   │     ^
-  hint: a reference or slice into this variable is still live — the assignment would
-        invalidate it
-```
+Only of `self` — never of a local or another `&` parameter. That is the one place a
+reference may be returned at all.
 
 ## Return a piece of a string to your caller
 
-A view cannot outlive the call, so if the value has to travel, own it. `substr` copies the
-bytes out. Always correct, nothing to check, one allocation per token — which is fine
-until you are doing it thousands of times.
+`substr` copies the bytes out. Always correct, nothing to check, one allocation per token
+— fine until you are doing it thousands of times.
 
 ## Store many string slices without an allocation each
 
-This is the parser case: you want a token per identifier in a large file, each one
-outliving the function that found it, and you do not want an allocation per token.
-
-[`std/seal`](/stdlib/seal) is the answer. `seal` consumes the buffer and returns a `Sealed`, which has no
+The parser case: a token per identifier in a large file, each outliving the function that
+found it, without an allocation each. [`std/seal`](/stdlib/seal) is the answer. `seal` consumes the buffer and returns a `Sealed`, which has no
 mutating method, so stored offsets cannot be invalidated. A `Span` is two integers
 plus the identity of the buffer it was measured from, so it can live in a struct,
 a `Vec`, or a map key.
 
-**✓ Do this.** The span outlives the call, and comparing through it allocates nothing:
+**✓ Do this.** The span outlives the call; comparing through it allocates nothing:
 
 ```milo
 from "std/seal" import { seal }
@@ -170,9 +165,8 @@ host
 true
 ```
 
-**⚠ Caught, but only when it runs.** This is the trade for step 3: where Rust's `'a`
-gives a compile error, Milo gives a named runtime abort. Still safe — you get a message
-naming the cause, not wrong-but-plausible bytes — but later than the two cases above:
+**⚠ Caught, but only when it runs.** The trade: where Rust's `'a` gives a compile error,
+Milo gives a named abort — safe, but later:
 
 ```milo
 from "std/seal" import { seal }
@@ -194,10 +188,33 @@ See [Memory Safety vs Rust](/language/vs-rust).
 
 ## Write a parser or cursor over text you do not own
 
-This is the shape Rust writes as `struct Parser<'a> { src: &'a str }`, and it is the one
-case Milo genuinely cannot express: a struct may not store a borrow. The answer is to
-**own the buffer and carry an integer position**, slicing on demand. The cursor owns its
-text, so nothing can outlive anything.
+::: code-group
+
+```rust [Rust]
+struct Lexer<'a> {
+    src: &'a str,               // the lifetime is here
+    pos: usize,
+}
+```
+
+```cpp [C++]
+struct Lexer {
+    std::string_view src;       // dangles if the owner dies
+    size_t pos;
+};
+```
+
+```milo skip [Milo]
+pub struct Lexer {
+    src: string,                // owns its text — nothing to outlive
+    pos: i64,
+}
+```
+
+:::
+
+A struct may not store a borrow, so the cursor **owns the buffer** and carries an integer
+position, slicing on demand.
 
 **✓ Do this.** No lifetime, no borrow stored, and `nextWord` can be called as often as
 you like:
@@ -247,9 +264,32 @@ and return `Span` values that cost two integers each.
 
 ## Represent a tree or AST that contains itself
 
-A struct or enum cannot contain itself directly — the size would be infinite. Rust reaches
-for `Box<Expr>`; Milo uses `Heap<Expr>`, a single-owner heap pointer, dereferenced with
-`*`. No lifetime is involved because there is exactly one owner.
+::: code-group
+
+```rust [Rust]
+enum Expr {
+    Num(i64),
+    Add(Box<Expr>, Box<Expr>),
+}
+```
+
+```cpp [C++]
+struct Expr {
+    std::unique_ptr<Expr> l, r;
+};
+```
+
+```milo skip [Milo]
+enum Expr {
+    Num(i64),
+    Add(Heap<Expr>, Heap<Expr>),
+}
+```
+
+:::
+
+`Heap<T>` is the single-owner heap pointer, dereferenced with `*`. No lifetime, because
+there is exactly one owner.
 
 **✓ Do this:**
 
@@ -286,12 +326,29 @@ the next section.
 
 ## Build a tree or graph whose nodes refer to each other
 
-Trees, graphs, doubly-linked lists — anything where one node refers to another. Put the
-values in one pool and refer to them by key. The obvious key is a `Vec` position, and
-that is the trap: positions get reused.
+::: code-group
 
-**✗ Avoid this — nothing catches it.** The index outlived the element it named. This
-compiles, runs, and hands back the wrong record:
+```rust [Rust]
+type Link = Rc<RefCell<Node>>;   // runtime borrow check, can leak cycles
+// or: slotmap / arena + generational index
+```
+
+```cpp [C++]
+struct Node { Node* parent; };   // raw pointers, no checking at all
+```
+
+```milo skip [Milo]
+var arena: Arena<Node> = Arena<Node>.new()
+let h = arena.alloc(node)        // Handle: index + generation
+```
+
+:::
+
+Put the values in one pool and refer to them by key. The obvious key is a `Vec` position,
+and that is the trap: positions get reused.
+
+**✗ Nothing catches this.** The index outlived the element it named — compiles, runs,
+returns the wrong record:
 
 ```milo
 pub fn main(): i32 {
@@ -309,9 +366,8 @@ pub fn main(): i32 {
 carol
 ```
 
-**✓ Do this instead.** `std/arena` gives a `Handle` — the position, plus which arena
-issued it and which occupant of the slot it was for. A stale one reads back as `None`,
-so the mistake becomes a value you must handle rather than a wrong answer:
+**✓ Do this instead.** A `Handle` carries the position *plus* which arena issued it and
+which occupant of the slot it was for. A stale one reads back as `None`:
 
 ```milo
 from "std/arena" import { Arena }

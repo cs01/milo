@@ -250,10 +250,32 @@ The tokeniser case: one token per word in a large file, each surviving the funct
 found it, and no allocation per token. A view cannot leave the call, and owning each token
 means thousands of small copies. [`std/seal`](/stdlib/seal) is the third answer.
 
-`seal` consumes the buffer and hands back a `Sealed`, which has no mutating method, so
-stored offsets can never be invalidated. A `Span` is then just two integers plus the
-identity of the buffer it came from, which makes it an ordinary value: it goes in a `Vec`,
-a struct field, or a map key.
+The two types come as a pair, and the shape of them is the whole idea:
+
+```milo
+// std/seal, in full
+pub struct Sealed {
+    data: string,
+    brand: i32,
+}
+
+pub struct Span {
+    start: i64,
+    len: i32,
+    brand: i32,
+}
+```
+
+`seal` consumes the buffer and hands back the `Sealed`, which has no mutating method, so
+offsets into it can never be invalidated. A `Span` is 16 bytes and **holds no text at
+all**: a start, a length, and the `brand` of the buffer it was measured against. On its
+own it means nothing. Paired with its `Sealed` it means a slice, and `src.text(sp)` is
+what turns it back into characters.
+
+That `brand` on both sides is the tie. It is why a span can be an ordinary value, kept in
+a `Vec`, a struct field, or a map key, without the compiler tracking where its buffer went:
+the check happens when you resolve it. A hand-built `Span` carries brand 0, which no
+buffer ever has, so a forged one fails closed rather than reading something plausible.
 
 ::: tip ✓ THE WAY TO WRITE IT
 `words` returns a `Vec<Span>` that outlives it, and no token was copied:

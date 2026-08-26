@@ -36,6 +36,7 @@
   "channelBasic.milo": "noEmit",
   "channelCloseGreen.milo": "noEmit",
   "channelCrossThreadPark.milo": "noEmit",
+  "channelDropPayload.milo": "noEmit",
   "channelGreenPark.milo": "noEmit",
   "channelIterator.milo": "noEmit",
   "channelMainDrivesScheduler.milo": "noEmit",

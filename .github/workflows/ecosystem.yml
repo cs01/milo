@@ -34,5 +34,9 @@ jobs:
       # The compiler runs from source here (bun run src/main.ts), and `milo add`
       # shells out to git — both are already present on the runner.
       - run: bun install --frozen-lockfile
+      # milo-sdl and milo-gl link real system libraries; their smokes are
+      # compile-and-link only, so no display is needed.
+      - name: install SDL2 and GL headers
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libgl1-mesa-dev
       - name: Compile every published package
         run: bun scripts/ecosystem-check.ts

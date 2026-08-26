@@ -44,6 +44,13 @@ const PACKAGES: { repo: string; pkg: string; smoke: string }[] = [
     smoke: `from "aws" import { Credentials }\nfn main(): i32 {\n    print("aws linked")\n    return 0\n}\n` },
   { repo: "milo-json-rpc", pkg: "json-rpc",
     smoke: `from "json-rpc" import { RpcMessage }\nfn main(): i32 {\n    print("json-rpc linked")\n    return 0\n}\n` },
+  // The two binding packages link real system libraries, so the runner needs
+  // libsdl2-dev and libgl1-mesa-dev. Neither smoke calls SDL_Init: this is a
+  // compile-and-link check, and opening a window would need a display.
+  { repo: "milo-sdl", pkg: "sdl",
+    smoke: `from "sdl" import { SDL_Init, SDL_INIT_VIDEO }\nfn main(): i32 {\n    print("sdl linked")\n    return 0\n}\n` },
+  { repo: "milo-gl", pkg: "gl",
+    smoke: `from "gl" import { GlContext }\nfn main(): i32 {\n    print("gl linked")\n    return 0\n}\n` },
 ];
 
 const filter = (() => {

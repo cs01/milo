@@ -73,6 +73,15 @@ impl ChannelHandle {
 
 impl Drop for ChannelHandle {
     fn drop(self: &mut Self): void {
+        // A zeroed handle must drop to nothing. send/trySend hand the payload to the
+        // buffer with memcpy and then memset the local to zero rather than forgetting
+        // it, so the moved-from value still drops; recv/tryRecv build a `zeroed<T>()`
+        // that drops untouched on every early return. That is inert for string and Vec
+        // (free(0) is a no-op) and used to fault here for anything holding a channel,
+        // which is why std/mem, std/pool and std/seal all guard the same way.
+        if self._ptr as i64 == 0 {
+            return
+        }
         unsafe {
             let inner = self._ptr as *ChannelInner
             let old = _atomicSubI64(((*inner).refcount).addrOf() as *u8, 1)
@@ -628,6 +637,10 @@ impl AtomicI64 {
 impl Drop for AtomicI64 {
     // atomicrmw sub returns the OLD value, so old == 1 means this was the last owner.
     fn drop(self: &mut Self): void {
+        // zeroed == already moved out; see ChannelHandle.drop.
+        if self._ptr as i64 == 0 {
+            return
+        }
         unsafe {
             let old = _atomicSubI64((self._ptr as i64 + 8) as *u8, 1)
             if old == 1 {
@@ -697,6 +710,10 @@ impl AtomicBool {
 
 impl Drop for AtomicBool {
     fn drop(self: &mut Self): void {
+        // zeroed == already moved out; see ChannelHandle.drop.
+        if self._ptr as i64 == 0 {
+            return
+        }
         unsafe {
             let old = _atomicSubI64((self._ptr as i64 + 8) as *u8, 1)
             if old == 1 {
@@ -777,6 +794,10 @@ impl AtomicI32 {
 
 impl Drop for AtomicI32 {
     fn drop(self: &mut Self): void {
+        // zeroed == already moved out; see ChannelHandle.drop.
+        if self._ptr as i64 == 0 {
+            return
+        }
         unsafe {
             let old = _atomicSubI64((self._ptr as i64 + 8) as *u8, 1)
             if old == 1 {
@@ -861,6 +882,10 @@ impl AtomicU64 {
 
 impl Drop for AtomicU64 {
     fn drop(self: &mut Self): void {
+        // zeroed == already moved out; see ChannelHandle.drop.
+        if self._ptr as i64 == 0 {
+            return
+        }
         unsafe {
             let old = _atomicSubI64((self._ptr as i64 + 8) as *u8, 1)
             if old == 1 {
@@ -998,6 +1023,10 @@ impl WaitGroup {
 
 impl Drop for WaitGroup {
     fn drop(self: &mut Self): void {
+        // zeroed == already moved out; see ChannelHandle.drop.
+        if self._p as i64 == 0 {
+            return
+        }
         unsafe {
             let old = _atomicSubI64((self._p as i64 + 32) as *u8, 1)
             if old == 1 {
@@ -1209,6 +1238,10 @@ impl Once {
 
 impl Drop for Once {
     fn drop(self: &mut Self): void {
+        // zeroed == already moved out; see ChannelHandle.drop.
+        if self._p as i64 == 0 {
+            return
+        }
         unsafe {
             let old = _atomicSubI64((self._p as i64 + 48) as *u8, 1)
             if old == 1 {

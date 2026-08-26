@@ -1,0 +1,63 @@
+// A channel payload that itself owns a Drop type. send/trySend memcpy the value into
+// the buffer and memset the local instead of forgetting it, and recv/tryRecv build a
+// `zeroed<T>()` that drops untouched on every early return, so every std handle has
+// to drop to nothing when its pointer is zero. Before that guard, a struct holding a
+// Channel segfaulted on the send, and tryRecv on an empty channel segfaulted too.
+
+from "std/sync" import {
+    Channel, WaitGroup, AtomicI64
+}
+
+// @expect: empty: none
+// @expect: sent: true
+// @expect: id: 7
+// @expect: via peer: hello
+// @expect: handles: ok
+
+struct Peer {
+    id: i64,
+    sink: Channel<string>,
+}
+
+fn main(): i32 {
+    // tryRecv on an empty channel: the zeroed<T>() never gets a value and drops as-is.
+    let empty = Channel<Peer>.new(2)!
+    match empty.tryRecv() {
+        Option.Some(_p) => {
+            print("unexpected")
+        }
+        Option.None => {
+            print("empty: none")
+        }
+    }
+
+    let sink = Channel<string>.new(4)!
+    let reg = Channel<Peer>.new(4)!
+    let sent = reg.trySend(Peer {
+        id: 7, sink: sink.clone()
+    }
+    )
+    print("sent: " + sent.toString())
+
+    // The payload survives the move: its channel is the same queue as `sink`.
+    match reg.tryRecv() {
+        Option.Some(peer) => {
+            print("id: " + peer.id.toString())
+            peer.sink.send("hello")!
+            print("via peer: " + sink.recv()!)
+        }
+        Option.None => {
+            print("unexpected empty")
+        }
+    }
+
+    // Same shape for the other refcounted handles in std/sync.
+    let wg = WaitGroup.new()
+    let counter = AtomicI64.new(0)
+    let wgs = Channel<WaitGroup>.new(2)!
+    let ats = Channel<AtomicI64>.new(2)!
+    let _a = wgs.trySend(wg.clone())
+    let _b = ats.trySend(counter.clone())
+    print("handles: ok")
+    return 0
+}

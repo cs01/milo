@@ -795,6 +795,11 @@ export class TypeChecker {
         return;
       }
     }
+    // The cost warning below is advisory, and a warning inside std/ or a dependency is
+    // not actionable by the person reading it (dapweb builds warned on std/argparse's
+    // own argv loop). Same scoping as unused-unsafe; the Drop/@noCopy error above
+    // stays everywhere because that one is a double release, not a cost.
+    if (!this.currentFnIsUser) return;
     if (this.warningConfig.allowed.has("index-clone")) return;
     // Fork tails count: `if c { v[0] } else { v[1] }` clones whichever arm runs, and the
     // reader has no more reason to expect an allocation there than in the direct form.

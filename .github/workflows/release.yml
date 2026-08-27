@@ -145,6 +145,22 @@ jobs:
           ls -lh milo-*.tar.gz
           sha256sum milo-*.tar.gz *.deb *.rpm 2>/dev/null | tee SHA256SUMS
 
+      # GitHub freezes a release's published_at at its FIRST publish and never moves
+      # an existing tag, so re-uploading assets to `latest` left the page headed
+      # "released Jul 22" and linking a July commit while handing out that morning's
+      # binaries. Delete the release and retarget the tag so the page and the bytes
+      # agree; the download URLs are unchanged (only the download counts reset).
+      - name: Retarget the rolling release
+        if: needs.meta.outputs.version == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --repo "$GITHUB_REPOSITORY" --yes || true
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/latest" \
+              -f sha="$GITHUB_SHA" -F force=true \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                 -f ref=refs/tags/latest -f sha="$GITHUB_SHA"
+
       - name: Rolling release
         if: needs.meta.outputs.version == ''
         uses: softprops/action-gh-release@v2

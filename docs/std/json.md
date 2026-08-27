@@ -331,6 +331,16 @@ fn Json.path(self: &Json, p: &string): Option<Json>
 
 _Undocumented._
 
+### `Json.pretty`
+
+```milo
+fn Json.pretty(self: &Json, indent: i64): string
+```
+
+The document re-rendered with `indent` spaces per level (0 or less
+minifies). Reformats rawStr(), so what comes out is the same bytes the
+parse went in with, only re-spaced (see jsonPretty).
+
 ### `Json.rawStr`
 
 ```milo
@@ -378,6 +388,14 @@ fn JsonArr.build(self: &JsonArr): string
 ```
 
 _Undocumented._
+
+### `JsonArr.buildPretty`
+
+```milo
+fn JsonArr.buildPretty(self: &JsonArr, indent: i64): string
+```
+
+build() with `indent` spaces per nesting level (0 or less minifies).
 
 ### `JsonArr.float`
 
@@ -524,6 +542,14 @@ fn JsonObj.build(self: &JsonObj): string
 
 _Undocumented._
 
+### `JsonObj.buildPretty`
+
+```milo
+fn JsonObj.buildPretty(self: &JsonObj, indent: i64): string
+```
+
+build() with `indent` spaces per nesting level (0 or less minifies).
+
 ### `JsonObj.float`
 
 ```milo
@@ -605,6 +631,20 @@ fn JsonObj.val(self: JsonObj, key: string, val: JsonVal): JsonObj
 ```
 
 _Undocumented._
+
+### `jsonPretty`
+
+```milo
+pub fn jsonPretty(src: &string, indent: i64): string
+```
+
+Re-render a JSON document. `indent` > 0 indents nested values by that many
+spaces per level, exactly as `JSON.stringify(v, null, indent)` does; `indent`
+<= 0 minifies, dropping every byte of whitespace outside a string.
+
+Text that does not start with '{' or '[' comes back unchanged: a bare scalar
+has nothing to indent, and text that is not JSON at all (a plain-text error
+line, an empty body) is not this function's to mangle.
 
 ### `jsonPull`
 

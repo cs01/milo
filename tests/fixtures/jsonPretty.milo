@@ -1,0 +1,73 @@
+// std/json reformatting: jsonPretty / Json.pretty / buildPretty, the
+// JSON.stringify(v, null, n) knob, and its n <= 0 minify half.
+from "std/json" import {
+    Json, jsonPretty
+}
+
+// Every line printed through a '|' prefix. The fixture harness trims both the
+// expectation and the output line by line, so indentation (the whole point of
+// this API) is invisible to it unless a non-space byte leads the line.
+fn printMarked(text: &string) {
+    for line in text.lines() {
+        print("|" + line)
+    }
+}
+
+pub fn main(): i32 {
+    let doc = Json.obj()
+        .str("type", "stopped")
+        .int("line", 8)
+        .arr("frames", Json.arr().obj(Json.obj().str("name", "main")))
+        .arr("locals", Json.arr())
+        .obj("meta", Json.obj())
+    let two = doc.buildPretty(2)
+    printMarked(two)
+    // @expect: |{
+    // @expect: |  "type": "stopped",
+    // @expect: |  "line": 8,
+    // @expect: |  "frames": [
+    // @expect: |    {
+    // @expect: |      "name": "main"
+    // @expect: |    }
+    // @expect: |  ],
+    // @expect: |  "locals": [],
+    // @expect: |  "meta": {}
+    // @expect: |}
+
+    // The indent width is the caller's, not a constant.
+    printMarked(Json.obj().obj("a", Json.obj().int("b", 1)).buildPretty(4))
+    // @expect: |{
+    // @expect: |    "a": {
+    // @expect: |        "b": 1
+    // @expect: |    }
+    // @expect: |}
+
+    // A pretty document minifies back to the compact one, byte for byte.
+    print(jsonPretty(two, 0))
+    // @expect: {"type":"stopped","line":8,"frames":[{"name":"main"}],"locals":[],"meta":{}}
+
+    // Structural bytes inside a string are text, not structure: neither the
+    // braces nor the escaped quote may be reformatted or split.
+    let tricky = Json.obj().str("s", "a{\"b\": [1,2] }c").build()
+    printMarked(jsonPretty(tricky, 2))
+    // @expect: |{
+    // @expect: |  "s": "a{\"b\": [1,2] }c"
+    // @expect: |}
+
+    // Parsed documents reformat too, and big integers survive: 9007199254740993
+    // is 2^53+1, which a re-serialize through f64 would hand back as ...92.
+    match Json.parse("{\"id\":9007199254740993,\"f\":-0.0,\"e\":1e3}") {
+        Result.Ok(parsed) => {
+            print(parsed.pretty(0))
+            // @expect: {"id":9007199254740993,"f":-0.0,"e":1e3}
+        }
+        Result.Err(_e) => {
+            print("parse failed")
+        }
+    }
+
+    // Not a JSON document: returned untouched rather than reflowed.
+    print(jsonPretty("no server on port 8791", 2))
+    // @expect: no server on port 8791
+    return 0
+}

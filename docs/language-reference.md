@@ -2869,6 +2869,34 @@ let doc = Json.obj()
 
 Builder methods: `.str/.int/.float/.bool/.nil/.obj/.arr/.val` (chainable, consume and return the builder; string values are escaped). `Json.arr()` has the same set minus keys.
 
+### Indenting for humans
+
+Every JSON producer above emits one compact line. `jsonPretty(text, indent)` is the
+`JSON.stringify(v, null, indent)` knob: `indent > 0` indents by that many spaces per
+level, `indent <= 0` minifies. It reformats *text*, so it applies to any of them:
+a builder, `jsonStringify`, `@derive(Json)`, or a payload that arrived off a socket
+and was never parsed. Key order, escapes and number spelling are preserved byte for
+byte (an id past 2^53 does not go through an f64 on the way out).
+
+```milo
+from "std/json" import { Json, jsonPretty }
+
+print(Json.obj().str("a", "x").arr("b", Json.arr().int(1)).buildPretty(2))
+// {
+//   "a": "x",
+//   "b": [
+//     1
+//   ]
+// }
+
+print(jsonPretty(jsonStringify(user), 2))   // any JSON text, not just builders
+print(Json.parse(body)!.pretty(2))          // a parsed document
+print(jsonPretty(indented, 0))              // back to one line
+```
+
+`.buildPretty(n)` on a builder and `.pretty(n)` on a parsed `Json` are the same
+function reached the short way.
+
 ### Reading a nested value
 
 `get(key)` returns `Option<Json>`, so walking three levels down nests three Options.

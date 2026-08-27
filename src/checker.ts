@@ -10468,10 +10468,15 @@ export class TypeChecker {
   private checkMatchLike(subject: Expr, arms: MatchArm[], sp: Span | undefined, fnRetType: TypeKind, isStmt = false): TypeKind[] {
     const armTypes: TypeKind[] = [];
     const rawSubjType = this.checkExpr(subject);
-    if (rawSubjType.tag !== "ref" && subject.kind !== "FieldAccess" && subject.kind !== "IndexAccess") {
-      this.lintManualOptionDefault(subject, arms, rawSubjType, sp);
+    // Both match lints are advisory rewrites, so a hit inside std/ or a dependency is not
+    // actionable by the person reading the build (dapweb warned on std/env's own getEnvOr).
+    // Same scoping as unused-unsafe and index-clone.
+    if (this.currentFnIsUser) {
+      if (rawSubjType.tag !== "ref" && subject.kind !== "FieldAccess" && subject.kind !== "IndexAccess") {
+        this.lintManualOptionDefault(subject, arms, rawSubjType, sp);
+      }
+      if (isStmt) this.lintSingleVariantMatch(subject, arms, rawSubjType, sp);
     }
-    if (isStmt) this.lintSingleVariantMatch(subject, arms, rawSubjType, sp);
     {
       const t = rawSubjType.tag === "ref" ? rawSubjType.inner : rawSubjType;
       for (const arm of arms) this.bindElidedPattern(arm.pattern, t);

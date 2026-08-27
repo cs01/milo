@@ -2889,9 +2889,12 @@ print(Json.obj().str("a", "x").arr("b", Json.arr().int(1)).buildPretty(2))
 //   ]
 // }
 
-print(jsonPretty(jsonStringify(user), 2))   // any JSON text, not just builders
-print(Json.parse(body)!.pretty(2))          // a parsed document
-print(jsonPretty(indented, 0))              // back to one line
+let body = Json.obj().str("a", "x").build()
+let indented = jsonPretty(body, 2)
+
+print(jsonPretty(body, 2))          // any JSON text, not just builders
+print(Json.parse(body)!.pretty(2))  // a parsed document
+print(jsonPretty(indented, 0))      // back to one line
 ```
 
 `.buildPretty(n)` on a builder and `.pretty(n)` on a parsed `Json` are the same

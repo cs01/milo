@@ -176,6 +176,17 @@ pub struct Scene {
     sunX: f64,
     sunY: f64,
     sunZ: f64,
+    // The other light. Night used to be black rather than dark: outside the lit
+    // part of the frame everything took an ambient of about a thousandth and the
+    // tone curve took that to zero. There IS a second light up there, and where
+    // it is and how much of it there is are both computable -- see solar.moonAt.
+    moonX: f64,
+    moonY: f64,
+    moonZ: f64,
+    // Illuminated fraction of the disc, times how far up it is. Zero by day,
+    // zero when it is down, and zero at new moon, which is when a night really
+    // is starlit-only.
+    moonLight: f64,
     // Where distance haze begins and ends, in metres. What the haze is COLOURED
     // is no longer here: it is `sky.skyColor` evaluated along the view ray, so a
     // ridge against the horizon and the same ridge against the zenith fade into
@@ -223,6 +234,10 @@ pub fn sceneNew(w: i64, h: i64): Scene {
         sunX: 0.44,
         sunY: 0.78,
         sunZ: 0.44,
+        moonX: 0.0,
+        moonY: 0.0 - 1.0,
+        moonZ: 0.0,
+        moonLight: 0.0,
         fogStart: 420.0,
         fogEnd: 1500.0,
         turbidity: 0.35,

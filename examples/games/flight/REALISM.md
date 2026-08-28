@@ -95,6 +95,56 @@ Everything in the plan is done. What is left is not on it: the drape could go to
 only the constant changes), and cloud top height remains the one estimated
 quantity in the chain.
 
+## Night
+
+Night used to be black rather than dark. Outside the lit part of the frame the
+ground took an ambient of about a thousandth and the tone curve took it to zero,
+so a night flight was an instrument panel floating over nothing.
+
+The answer is not exposure -- exposure lifts the noise with it and the sky goes
+grey. It is that there IS a second light, and both where it is and how much of
+it there is are computable. `solar.milo` grew a lunar ephemeris (Meeus ch. 47,
+truncated), and `sky.milo` grew three terms that stand in for scotopic
+adaptation:
+
+| term | what it stands for |
+|---|---|
+| `NIGHT_SKY` | airglow and starlight, and a dark-adapted eye |
+| `MOON_SKY` | what a full moon adds to the dome |
+| `MOON_BEAM` | the directional term, in the same units `sunLight()` returns |
+
+Set by what reads as night on a screen, not by photometry, and scaled so a
+coastline is visible under NO moon at all. Moonlight is a real directional
+light: terrain, buildings and the aircraft all take `moonLight() * N.L` in the
+same units as the sun, and the water gets the moonglade, which is usually the
+brightest thing in a night frame and the only thing that says which way the moon
+is. The normal comes from the screen-space derivatives of the world position,
+because `vLight` is baked per vertex against the sun and its two halves cannot be
+pulled apart again.
+
+Two bugs this exposed, both of which had been there all along:
+
+- **`sunLight()` never reached zero.** Its brightness factor bottomed out at 0.35
+  however far down the sun was, so 03:00 was lit by a third of a sunset and a
+  night sky came out with warm clouds in it.
+- **The facade texture's bright half is the WALL, not the glass.** By day what
+  reads as a facade is the dark/light rhythm rather than the glass, so the panes
+  are painted DARKER than the spandrel between them. Lighting windows by picking
+  the bright pixels lit the wall between the windows and turned every tower into
+  a uniform amber slab.
+
+The ephemeris is gated by `tests/fixtures/flybyEphemeris.milo`, and the
+interesting half of that is differential. `sunAt` is NOAA's horizon-coordinate
+recipe and never forms an ecliptic longitude; `sunAtEcliptic` goes longitude to
+equatorial to hour angle, sharing every line of its machinery with the moon. They
+must put the sun in the same place, and that is what says the moon's coordinate
+chain is right, because the moon has no second recipe of its own. The moon's
+elongation is likewise computed once from ecliptic longitudes and once from right
+ascension and declination. The rest pins the constants a self-consistent
+implementation would still get wrong: the synodic and draconic months, the 5.1
+degree latitude amplitude, the swing in the daily motion (the equation of
+centre), and that the noon sun is in the NORTH from Sydney.
+
 ## Frame rate
 
 Every heavy pass here is per-pixel — the sea is a raymarch, the clouds are a

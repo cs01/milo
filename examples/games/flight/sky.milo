@@ -22,6 +22,10 @@
 // its elevation: positive by day, negative once it is down.
 pub let SKY_GLSL: string = "
 uniform vec3 uSun;
+// Where the moon is, and how much light it is giving: the illuminated fraction
+// of the disc times how far above the horizon it is. See solar.moonAt.
+uniform vec3 uMoon;
+uniform float uMoonLight;
 uniform float uTime;
 uniform float uTurbidity;   // 0 clear, 1 thick — weather drives this
 uniform float uCloud;       // 0 none, 1 overcast
@@ -79,6 +83,42 @@ vec2 cloudDeck(vec3 rd) {
     return vec2(cover, smoothstep(lo + 0.26, lo + 0.02, c));
 }
 
+// ── night ─────────────────────────────────────────────────────────────────────
+//
+// This is a model of the dark-adapted EYE, not of radiometry.
+//
+// Full moonlight is about a millionth of sunlight. Rendered to scale it is
+// black, which is what this used to do: the night sky was 0.006 at the zenith,
+// the ground took an ambient in the same range, and the tone curve took both to
+// zero. A night flight was an instrument panel floating over nothing, and the
+// answer is not more exposure -- exposure lifts the noise with it and the sky
+// goes grey.
+//
+// So there are three terms, set by what reads as night on a screen rather than
+// by photometry, and scaled so that a coastline is visible under NO moon at all:
+//
+//   NIGHT_SKY   what the sky is worth with no moon: airglow, starlight, and the
+//               fact that a dark-adapted eye is about a thousand times more
+//               sensitive than a daylight-adapted one.
+//   MOON_SKY    what a full moon adds to the dome. The sky brightens under a
+//               full moon, which is why you see fewer stars.
+//   MOON_BEAM   the directional term, in the same units sunLight() returns, so
+//               a surface facing the moon is genuinely brighter than one facing
+//               away and the shading reads as shading rather than as fog.
+//
+// Moonlight is not blue. It is very slightly WARMER than sunlight, because it is
+// sunlight off a grey rock. It looks blue in photographs and in the eye because
+// scotopic vision peaks bluer than photopic, and since this is a model of the
+// eye, blue is the right answer here.
+const vec3 NIGHT_SKY = vec3(0.0035, 0.0050, 0.0105);
+const vec3 MOON_SKY  = vec3(0.0110, 0.0155, 0.0290);
+const vec3 MOON_BEAM = vec3(0.0480, 0.0575, 0.0820);
+
+// How far into night we are: 1 with the sun well down, 0 once it is properly up.
+float nightK() {
+    return clamp(-uSun.y * 6.0 - 0.05, 0.0, 1.0);
+}
+
 // The light arriving from direction `rd`. `withSun` adds the disc and its
 // aureole — wanted looking at the sky, not wanted for the haze the terrain fades
 // into, where a sun disc bleeding through a hillside is a bug.
@@ -98,6 +138,13 @@ vec3 skyColor(vec3 rd, bool withSun) {
 
     vec3 zenith = mix(zenithNight, zenithDay, day);
     vec3 horizon = mix(horizonNight, horizonDay, day);
+    // Lift the night floor to what a dark-adapted eye makes of it, and brighten
+    // it again under a moon. Applied to the NIGHT ends only, before the daylight
+    // mix has had its say, so nothing here touches a daytime sky.
+    float nk = nightK();
+    vec3 nightLift = (NIGHT_SKY + MOON_SKY * uMoonLight) * nk;
+    zenith += nightLift;
+    horizon += nightLift * 1.35;
     // Haze washes the blue out of the whole dome and lifts the horizon toward
     // white. This is the dial the weather presets turn, and it replaces the flat
     // fog colour the terrain used to fade into.
@@ -128,6 +175,18 @@ vec3 skyColor(vec3 rd, bool withSun) {
     float d = clamp(dot(rd, uSun), 0.0, 1.0);
     vec3 sunTint = mix(vec3(1.7, 0.52, 0.20), vec3(2.4, 2.25, 2.00), clamp(uSun.y * 3.0, 0.0, 1.0));
     col += sunTint * pow(d, 6.0) * 0.10 * day * (0.4 + uTurbidity);
+
+    // The moon itself: a disc, and the glow around it. Drawn under the same
+    // `withSun` flag, because the reason that flag exists -- a light source
+    // bleeding through a hillside when this is called for haze -- applies to
+    // both lights equally.
+    if (withSun && uMoonLight > 0.0005) {
+        float md = clamp(dot(rd, uMoon), 0.0, 1.0);
+        // About a quarter of a degree of radius, which is what the moon is.
+        float disc = smoothstep(0.99990, 0.99996, md);
+        col += vec3(0.85, 0.86, 0.80) * disc * (0.35 + 0.65 * uMoonLight) * nk * 3.0;
+        col += vec3(0.30, 0.34, 0.42) * pow(md, 220.0) * uMoonLight * nk * 0.55;
+    }
 
     vec2 deck = cloudDeck(rd);
     if (deck.x > 0.001) {
@@ -245,6 +304,22 @@ vec3 aerial(vec3 col, vec3 rd, float d, float hEye, float hFrag) {
 // Approximate: it tints ambient as well as direct, because a per-vertex scalar
 // cannot separate them. That errs toward the whole scene taking the hour\'s
 // colour, which is the direction a photograph errs in too.
+// Moonlight as a directional source, in the same units as sunLight(), so a
+// surface takes `uMoonLight * N.L * moonLight()` and the two lights add without
+// either needing to know about the other. A lift on the ambient instead of a
+// real direction is what makes a moonlit scene read as fog.
+vec3 moonLight() {
+    return MOON_BEAM * uMoonLight * nightK();
+}
+
+// What an unlit surface is worth at night: the sky is a hemisphere of dim light
+// and everything outdoors sees some of it. Without this a slope facing away
+// from the moon is pure black, and black is the thing this whole section exists
+// to get rid of.
+vec3 nightAmbient() {
+    return (NIGHT_SKY * 2.2 + MOON_SKY * uMoonLight * 1.6) * nightK();
+}
+
 vec3 sunLight() {
     float e = clamp(uSun.y, 0.0, 1.0);
     // Warm and dim near the horizon, white and full overhead.
@@ -252,6 +327,15 @@ vec3 sunLight() {
     vec3 noon = vec3(1.02, 1.00, 0.98);
     vec3 c = mix(warm, noon, smoothstep(0.05, 0.55, e));
     // Haze scatters the direct beam, which takes the edge off the tint.
-    return mix(c, vec3(dot(c, vec3(0.33))), uTurbidity * 0.30) * (0.35 + 0.65 * smoothstep(0.0, 0.35, e));
+    //
+    // The second factor is what puts the sun OUT. `e` is clamped at zero, so the
+    // first factor bottoms out at 0.35 and stays there however far down the sun
+    // is: before this, 03:00 was lit by a third of a sunset, which is why a
+    // night sky came out with warm clouds in it. It fades through twilight and
+    // is gone once the sun is about five degrees under, which is where the
+    // moonlight terms take over.
+    float below = clamp(uSun.y * 7.0 + 0.35, 0.0, 1.0);
+    return mix(c, vec3(dot(c, vec3(0.33))), uTurbidity * 0.30)
+        * (0.35 + 0.65 * smoothstep(0.0, 0.35, e)) * below;
 }
 "

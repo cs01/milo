@@ -1,0 +1,353 @@
+// The gate on where the sun and the moon are.
+//
+// FLYBY's whole claim is that the light comes from where the light is coming
+// from, and until now nothing checked it: the sun was verified by hand against
+// six cases once, and the moon did not exist. Neither has a visual tell. A sun
+// half an hour out looks exactly like a sun, and a moon in the wrong quarter of
+// the sky lights the wrong side of every building in a way that reads as a
+// stylistic choice.
+//
+// examples/games/flight/solar.milo imports std/math and std/datetime, so this
+// runs everywhere.
+//
+// The interesting half is DIFFERENTIAL. Two independent implementations of the
+// same sky have to agree:
+//
+//   `sunAt` is NOAA's horizon-coordinate recipe and never forms an ecliptic
+//     longitude at all. `sunAtEcliptic` goes longitude -> equatorial -> hour
+//     angle, sharing every line of its machinery with the moon. They must land
+//     the sun in the same place, and that is what says the moon's coordinate
+//     chain is right, since the moon has no second recipe of its own.
+//   The moon's ELONGATION is computed once from ecliptic longitudes and once
+//     from right ascension and declination. The second is a rotation of the
+//     first, so a sign slip in the obliquity term cannot hide in both.
+//
+// The rest pins the constants a self-consistent implementation would still get
+// wrong: the synodic and draconic months, the latitude amplitude, and the fact
+// that the noon sun is in the NORTH from Sydney.
+
+from "../../examples/games/flight/solar" import {
+    MoonDir, SunDir,
+    elongationFromEclipticDeg, elongationFromEquatorialDeg, julianDay,
+    moonAt, moonEclipticLatDeg, moonEclipticLonDeg, sunAt, sunAtEcliptic,
+    sunEclipticLonDeg
+}
+from "std/datetime" import {
+    DateTime
+}
+from "std/math" import {
+    Math
+}
+
+fn at(y: i32, mo: i32, d: i32, h: i32, mi: i32): DateTime {
+    return DateTime {
+        year: y, month: mo, day: d, hour: h, minute: mi, second: 0, weekday: 0
+    }
+}
+
+fn claim(name: string, ok: bool, detail: string): bool {
+    if ok {
+        return true
+    }
+    print(name + " FAILED: " + detail)
+    return false
+}
+
+fn between(name: string, v: f64, lo: f64, hi: f64): bool {
+    if v >= lo && hi >= v {
+        return true
+    }
+    print(name + " OUT OF RANGE: " + v.toString() + " want " + lo.toString() + ".." + hi.toString())
+    return false
+}
+
+// Angle difference folded into -180..180.
+fn dAngle(a: f64, b: f64): f64 {
+    var d = a - b
+    while d > 180.0 {
+        d = d - 360.0
+    }
+    while d < 0.0 - 180.0 {
+        d = d + 360.0
+    }
+    return d
+}
+
+// Six places, twelve months, every three hours: NOAA's recipe and the ecliptic
+// one must put the sun in the same place. Azimuth is only compared while the sun
+// is well up, because near the zenith the azimuth of a point is nearly
+// undefined and both implementations know it.
+fn sunDifferential(): bool {
+    var lats: Vec<f64> = Vec.new()
+    var lons: Vec<f64> = Vec.new()
+    lats.push(21.3)
+    lons.push(0.0 - 157.9)
+    lats.push(37.8)
+    lons.push(0.0 - 122.4)
+    lats.push(51.5)
+    lons.push(0.0 - 0.1)
+    lats.push(0.0 - 33.9)
+    lons.push(151.2)
+    lats.push(0.0)
+    lons.push(0.0)
+    lats.push(60.0)
+    lons.push(25.0)
+
+    var worstElev = 0.0
+    var worstAz = 0.0
+    for p in 0..lats.len {
+        for m in 0..12 {
+            for hh in 0..8 {
+                let t = at(2026, (m + 1) as i32, 15, (hh * 3) as i32, 0)
+                let a = sunAt(lats[p], lons[p], t)
+                let b = sunAtEcliptic(lats[p], lons[p], t)
+                let de = Math.abs(a.elevationDeg - b.elevationDeg)
+                if de > worstElev {
+                    worstElev = de
+                }
+                if a.elevationDeg > 10.0 {
+                    let dz = Math.abs(dAngle(a.azimuthDeg, b.azimuthDeg))
+                    if dz > worstAz {
+                        worstAz = dz
+                    }
+                }
+            }
+        }
+    }
+    var ok = between("noaa vs ecliptic elevation", worstElev, 0.0, 0.8)
+    ok = between("noaa vs ecliptic azimuth", worstAz, 0.0, 5.0) && ok
+    return ok
+}
+
+// The moon's elongation, twice, by routes that share no coordinate arithmetic.
+fn moonDifferential(): bool {
+    let j0 = julianDay(at(2026, 1, 1, 0, 0))
+    var worst = 0.0
+    for i in 0..4000 {
+        let jd = j0 + (i as f64) * 0.37
+        let d = Math.abs(elongationFromEclipticDeg(jd) - elongationFromEquatorialDeg(jd))
+        if d > worst {
+            worst = d
+        }
+    }
+    // Exactly zero in exact arithmetic: the two differ by a rotation, and a
+    // rotation does not change an angle between two directions. The tolerance is
+    // for the arithmetic, not for the astronomy, which is why it is this tight.
+    return between("elongation by two routes", worst, 0.0, 0.001)
+}
+
+// The two months. Neither is 27.32 days, which is the one a self-consistent
+// implementation with the wrong argument in a sine would most likely produce.
+fn theMonths(): bool {
+    let j0 = julianDay(at(2026, 1, 1, 0, 0))
+    var ok = true
+
+    // Synodic: sun to sun, 29.53 days. Found as the wrap of the moon's
+    // elongation IN LONGITUDE through 360, which is a new moon.
+    var news: Vec<f64> = Vec.new()
+    var prev = 0.0
+    var first = true
+    var jd = j0
+    while jd < j0 + 400.0 {
+        var cur = (moonEclipticLonDeg(jd) - sunEclipticLonDeg(jd)) % 360.0
+        if cur < 0.0 {
+            cur = cur + 360.0
+        }
+        if !first && cur < prev {
+            news.push(jd)
+        }
+        prev = cur
+        first = false
+        jd = jd + 0.02
+    }
+    var sum = 0.0
+    for i in 0..news.len - 1 {
+        sum = sum + (news[i + 1] - news[i])
+    }
+    let synodic = sum / ((news.len - 1) as f64)
+    ok = between("synodic month", synodic, 29.2, 29.8) && ok
+    ok = claim("a year holds about twelve new moons", news.len >= 12 && news.len <= 14, news.len.toString()) && ok
+
+    // Draconic: node to node, 27.21 days. A different month from the synodic by
+    // two days, and confusing the two is the classic error.
+    var asc: Vec<f64> = Vec.new()
+    var pl = moonEclipticLatDeg(j0)
+    jd = j0
+    while jd < j0 + 400.0 {
+        let cur = moonEclipticLatDeg(jd)
+        if pl < 0.0 && cur >= 0.0 {
+            asc.push(jd)
+        }
+        pl = cur
+        jd = jd + 0.02
+    }
+    var dsum = 0.0
+    for i in 0..asc.len - 1 {
+        dsum = dsum + (asc[i + 1] - asc[i])
+    }
+    let draconic = dsum / ((asc.len - 1) as f64)
+    ok = between("draconic month", draconic, 27.0, 27.45) && ok
+    ok = claim("the two months differ", Math.abs(synodic - draconic) > 2.0, synodic.toString() + " vs " + draconic.toString()) && ok
+    return ok
+}
+
+// The moon's orbit is inclined about 5.1 degrees to the ecliptic, which is why
+// there is not an eclipse every month.
+fn latitudeAmplitude(): bool {
+    let j0 = julianDay(at(2026, 1, 1, 0, 0))
+    var worst = 0.0
+    for i in 0..8000 {
+        let m = Math.abs(moonEclipticLatDeg(j0 + (i as f64) * 0.05))
+        if m > worst {
+            worst = m
+        }
+    }
+    return between("ecliptic latitude amplitude", worst, 4.8, 5.6)
+}
+
+// Phase. Not a separate model: the illuminated fraction has to be the
+// elongation, so what is checked is that it reaches both ends and that new moon
+// really does put the moon where the sun is.
+fn phase(): bool {
+    var ok = true
+    var dark = 1.0
+    var bright = 0.0
+    var closestNew = 999.0
+    var newAzGap = 999.0
+    // Two months, sampled every two hours. A lunation is 29.5 days, so anything
+    // shorter can miss both ends of the phase entirely and still look like a
+    // sweep.
+    for mo in 0..2 {
+        for d in 0..28 {
+            for hh in 0..12 {
+                let t = at(2026, (mo + 1) as i32, (d + 1) as i32, (hh * 2) as i32, 0)
+                let m = moonAt(37.8, 0.0 - 122.4, t)
+                if m.illuminated < dark {
+                    dark = m.illuminated
+                }
+                if m.illuminated > bright {
+                    bright = m.illuminated
+                }
+                if m.elongationDeg < closestNew {
+                    closestNew = m.elongationDeg
+                    let s = sunAt(37.8, 0.0 - 122.4, t)
+                    newAzGap = Math.abs(dAngle(m.azimuthDeg, s.azimuthDeg))
+                }
+            }
+        }
+    }
+    ok = claim("the moon goes new", dark < 0.05, dark.toString()) && ok
+    ok = claim("the moon goes full", bright > 0.95, bright.toString()) && ok
+    // At new moon the two are in the same direction, which is a cross-check
+    // between the moon's horizon coordinates and the sun's with no shared code
+    // beyond `horizonOf` itself.
+    ok = claim("a new moon rises with the sun", newAzGap < 12.0, newAzGap.toString() + " deg apart at elongation " + closestNew.toString()) && ok
+    return ok
+}
+
+// The cases a hand check would use, and the one that catches a hemisphere sign.
+fn knownSun(): bool {
+    var ok = true
+    // Honolulu, June solstice, half past local noon. The sun is 87 degrees up
+    // and NORTH of overhead: Honolulu is inside the tropics and the solstice sun
+    // is north of it. An implementation that assumes the noon sun is always
+    // south passes every temperate test and fails this one.
+    let hon = sunAt(21.3069, 0.0 - 157.8583, at(2026, 6, 21, 22, 30))
+    ok = between("honolulu solstice elevation", hon.elevationDeg, 84.0, 90.0) && ok
+    ok = claim("honolulu solstice sun is NORTH", hon.azimuthDeg < 60.0 || hon.azimuthDeg > 300.0, hon.azimuthDeg.toString()) && ok
+
+    // Sydney at local noon in June: midwinter, low, and due north.
+    let syd = sunAt(0.0 - 33.87, 151.21, at(2026, 6, 21, 2, 0))
+    ok = between("sydney midwinter noon elevation", syd.elevationDeg, 30.0, 35.0) && ok
+    ok = claim("sydney noon sun is NORTH", syd.azimuthDeg < 20.0 || syd.azimuthDeg > 340.0, syd.azimuthDeg.toString()) && ok
+
+    // London at noon on the December solstice: 15 degrees, due south.
+    let lon = sunAt(51.5, 0.0 - 0.13, at(2026, 12, 21, 12, 0))
+    ok = between("london midwinter noon elevation", lon.elevationDeg, 13.5, 16.5) && ok
+    ok = between("london noon sun is SOUTH", lon.azimuthDeg, 170.0, 190.0) && ok
+
+    // Local midnight, anywhere temperate, is night.
+    let mid = sunAt(37.77, 0.0 - 122.42, at(2026, 3, 15, 9, 0))
+    ok = claim("midnight is night", mid.elevationDeg < 0.0 - 20.0, mid.elevationDeg.toString()) && ok
+    return ok
+}
+
+// The vectors have to be unit and have to match the angles they were built from.
+// `uSun.y` is read as the sine of the elevation by every shader in the game.
+fn vectorsAgree(): bool {
+    var ok = true
+    var worstLen = 0.0
+    var worstY = 0.0
+    for i in 0..500 {
+        let t = at(2026, ((i % 12) + 1) as i32, ((i % 27) + 1) as i32, (i % 24) as i32, 0)
+        let s = sunAt(12.0 + (i as f64) * 0.1, (i as f64) * 0.7 - 175.0, t)
+        let m = moonAt(12.0 + (i as f64) * 0.1, (i as f64) * 0.7 - 175.0, t)
+        let ls = Math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z)
+        let lm = Math.sqrt(m.x * m.x + m.y * m.y + m.z * m.z)
+        if Math.abs(ls - 1.0) > worstLen {
+            worstLen = Math.abs(ls - 1.0)
+        }
+        if Math.abs(lm - 1.0) > worstLen {
+            worstLen = Math.abs(lm - 1.0)
+        }
+        let ey = Math.abs(m.y - Math.sin(m.elevationDeg * 3.141592653589793 / 180.0))
+        if ey > worstY {
+            worstY = ey
+        }
+    }
+    ok = between("direction vectors are unit", worstLen, 0.0, 1.0e-9) && ok
+    ok = between("y is the sine of the elevation", worstY, 0.0, 1.0e-9) && ok
+    return ok
+}
+
+// The moon does not move at a constant rate, and the SWING is the whole content
+// of the equation of centre -- the 6.3 degree sine term that dominates its
+// longitude. Nothing else in this file reaches it: the elongation differential
+// is a rotation and agrees whatever the longitude is, the synodic month is set
+// by the mean rate, and the phase sweep only needs the moon to go round. Delete
+// that one term and the moon still orbits, at a steady 13.2 degrees a day, and
+// only this notices.
+fn equationOfCentre(): bool {
+    let j0 = julianDay(at(2026, 1, 1, 0, 0))
+    var lo = 999.0
+    var hi = 0.0
+    var sum = 0.0
+    for i in 0..4000 {
+        let jd = j0 + (i as f64) * 0.1
+        var r = (moonEclipticLonDeg(jd + 0.5) - moonEclipticLonDeg(jd - 0.5)) % 360.0
+        if r < 0.0 {
+            r = r + 360.0
+        }
+        if r < lo {
+            lo = r
+        }
+        if r > hi {
+            hi = r
+        }
+        sum = sum + r
+    }
+    var ok = between("mean daily motion", sum / 4000.0, 13.0, 13.35)
+    ok = between("slowest daily motion", lo, 11.0, 11.6) && ok
+    ok = between("fastest daily motion", hi, 14.4, 15.0) && ok
+    // The swing itself, stated as one number so a halved term is caught even if
+    // both ends drift inward together.
+    ok = between("swing in daily motion", hi - lo, 3.1, 3.8) && ok
+    return ok
+}
+
+fn main() {
+    var ok = true
+    ok = sunDifferential() && ok
+    ok = moonDifferential() && ok
+    ok = theMonths() && ok
+    ok = latitudeAmplitude() && ok
+    ok = equationOfCentre() && ok
+    ok = phase() && ok
+    ok = knownSun() && ok
+    ok = vectorsAgree() && ok
+    if ok {
+        print("ephemeris ok")
+    }
+}
+
+// @expect: ephemeris ok

@@ -534,6 +534,15 @@ vec4 seaShade(vec3 rd, vec3 base, float sceneZ) {
     col += vec3(2.2, 2.0, 1.7) * pow(gl, 900.0) * 5.0 * sun;
     col += vec3(1.6, 1.5, 1.25) * pow(gl, 14.0) * 0.55 * sun;
 
+    // The moonglade: the same two lobes off the other light. This is usually the
+    // brightest thing in a night frame and it is the one that says which way the
+    // moon is, since there is nothing else lit enough to cast a shadow you can
+    // read from a thousand feet.
+    float mg = max(dot(refl, uMoon), 0.0);
+    col += vec3(0.55, 0.60, 0.72) * pow(mg, 700.0) * 3.0 * uMoonLight * nightK();
+    col += vec3(0.34, 0.38, 0.50) * pow(mg, 10.0) * 0.42 * uMoonLight * nightK();
+    col += nightAmbient() * 0.35;
+
     // Foam: the tallest crests AND only where a slow noise field says the wind is
     // tearing them. Height alone put a white line on every crest of the primary
     // swell, which is what turned the sea into corduroy.

@@ -587,6 +587,13 @@ pub fn drawWorld(c: &mut Canvas, s: &mut Scene, w: &World, ground: &Texture, ski
         s.sunX = w.env.sunX
         s.sunY = w.env.sunY
         s.sunZ = w.env.sunZ
+        // And a real moon, which is what makes real night survivable. See the
+        // night section of sky.milo: the old answer to 03:00 local was a black
+        // frame, and a black frame is not a picture of anywhere.
+        s.moonX = w.env.moonX
+        s.moonY = w.env.moonY
+        s.moonZ = w.env.moonZ
+        s.moonLight = w.env.moonLight
     } else {
         applyWeather(s, w.prevTheme, w.theme, w.themeMix)
     }

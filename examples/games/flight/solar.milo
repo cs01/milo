@@ -174,3 +174,214 @@ pub fn sunNow(lat: f64, lon: f64): SunDir {
     let t = DateTime.now()
     return sunAt(lat, lon, t)
 }
+
+// ── the moon ──────────────────────────────────────────────────────────────────
+//
+// Night used to be black. Not dark: black. Outside the lit part of the frame the
+// ground took an ambient of about a thousandth and the tone curve took that to
+// zero, so a night flight was an instrument panel floating over nothing. The fix
+// is not more exposure, it is a second light — because there IS a second light,
+// and where it is and how much of it there is are both computable.
+//
+// Meeus, Astronomical Algorithms, chapter 47, truncated to the terms that matter
+// at this scale. The moon is half a degree wide and this is good to a few
+// arcminutes, which is nothing you can see; what has to be RIGHT is the phase
+// and where in the sky it is, because a full moon in the wrong quarter of the
+// sky lights the wrong side of every building.
+
+pub struct MoonDir {
+    x: f64,
+    y: f64,
+    z: f64,
+    elevationDeg: f64,
+    azimuthDeg: f64,
+    // Fraction of the disc lit, 0 at new and 1 at full. This is the dial the
+    // brightness rides: a crescent is not a dimmer full moon, it is about a
+    // twentieth of one.
+    illuminated: f64,
+    // Angle between sun and moon as seen from here. 0 at new, 180 at full.
+    elongationDeg: f64,
+}
+
+fn wrap360(x: f64): f64 {
+    var v = x % 360.0
+    if v < 0.0 {
+        v = v + 360.0
+    }
+    return v
+}
+
+// Julian Day for a UTC calendar moment. Meeus chapter 7, Gregorian only — the
+// places this flies over have all been on the Gregorian calendar for longer than
+// there have been aeroplanes.
+pub fn julianDay(t: &DateTime): f64 {
+    var y = t.year as i64
+    var m = t.month as i64
+    if m <= 2 {
+        y = y - 1
+        m = m + 12
+    }
+    let a = y / 100
+    let b = 2 - a + a / 4
+    let day = (t.day as f64)
+    + ((t.hour as f64) + (t.minute as f64) / 60.0 + (t.second as f64) / 3600.0) / 24.0
+    return (365.25 * ((y + 4716) as f64)) as i64 as f64
+    + ((30.6001 * ((m + 1) as f64)) as i64 as f64)
+    + day + (b as f64) - 1524.5
+}
+
+// Greenwich mean sidereal time in degrees. This is what turns a position on the
+// sky into a position over a place, and it is the one term where being an hour
+// out puts the moon fifteen degrees from where it is.
+fn gmstDeg(jd: f64): f64 {
+    let d = jd - 2451545.0
+    return wrap360(280.46061837 + 360.98564736629 * d)
+}
+
+// Where a point on the celestial sphere is, seen from `lat`/`lon` at `jd`.
+// Returns elevation and azimuth in degrees, azimuth clockwise from north.
+fn horizonOf(raDeg: f64, decDeg: f64, lat: f64, lon: f64, jd: f64): SunDir {
+    let ha = (wrap360(gmstDeg(jd) + lon - raDeg)) * DEG
+    let dec = decDeg * DEG
+    let latR = lat * DEG
+    let sinAlt = Math.sin(latR) * Math.sin(dec) + Math.cos(latR) * Math.cos(dec) * Math.cos(ha)
+    let alt = Math.asin(Math.clampF64(sinAlt, 0.0 - 1.0, 1.0))
+    // atan2 form rather than acos: it needs no separate east/west correction, and
+    // the +180 puts zero at north instead of at south.
+    var az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(latR) - Math.tan(dec) * Math.cos(latR))
+    az = wrap360(az / DEG + 180.0)
+    let cosAlt = Math.cos(alt)
+    return SunDir {
+        x: cosAlt * Math.sin(az * DEG),
+        y: Math.sin(alt),
+        z: cosAlt * Math.cos(az * DEG),
+        elevationDeg: alt / DEG,
+        azimuthDeg: az,
+    }
+}
+
+// Ecliptic longitude and latitude to right ascension and declination. Returns
+// (ra, dec) in degrees, packed into the two fields of a Vec2-shaped pair — milo
+// has no tuple, and two out-params on a struct read worse than this does.
+pub struct RaDec {
+    raDeg: f64,
+    decDeg: f64,
+}
+
+fn eclipticToEquatorial(lonDeg: f64, latDeg: f64, oblDeg: f64): RaDec {
+    let l = lonDeg * DEG
+    let b = latDeg * DEG
+    let e = oblDeg * DEG
+    let ra = Math.atan2(Math.sin(l) * Math.cos(e) - Math.tan(b) * Math.sin(e), Math.cos(l))
+    let dec = Math.asin(Math.clampF64(Math.sin(b) * Math.cos(e) + Math.cos(b) * Math.sin(e) * Math.sin(l), 0.0 - 1.0, 1.0))
+    return RaDec {
+        raDeg: wrap360(ra / DEG),
+        decDeg: dec / DEG,
+    }
+}
+
+// The sun's ecliptic longitude. Separate from `sunAt` on purpose: that one is
+// NOAA's horizon-coordinate recipe and never forms a longitude at all, so the
+// two are independent paths to the same sky and the fixture makes them agree.
+pub fn sunEclipticLonDeg(jd: f64): f64 {
+    let t = (jd - 2451545.0) / 36525.0
+    let l0 = 280.46646 + 36000.76983 * t + 0.0003032 * t * t
+    let m = (357.52911 + 35999.05029 * t - 0.0001537 * t * t) * DEG
+    let c = 1.914602 * Math.sin(m) + 0.019993 * Math.sin(2.0 * m) + 0.000289 * Math.sin(3.0 * m)
+    return wrap360(l0 + c)
+}
+
+pub fn obliquityDeg(jd: f64): f64 {
+    let t = (jd - 2451545.0) / 36525.0
+    return 23.439291 - 0.0130042 * t
+}
+
+// The moon's ecliptic longitude and latitude, degrees.
+pub fn moonEclipticLonDeg(jd: f64): f64 {
+    let t = (jd - 2451545.0) / 36525.0
+    let lp = 218.3164477 + 481267.88123421 * t
+    let d = (297.8501921 + 445267.1114034 * t) * DEG
+    let m = (357.5291092 + 35999.0502909 * t) * DEG
+    let mp = (134.9633964 + 477198.8675055 * t) * DEG
+    return wrap360(lp + 6.289 * Math.sin(mp) - 1.274 * Math.sin(2.0 * d - mp) + 0.658 * Math.sin(2.0 * d) - 0.186 * Math.sin(m) - 0.059 * Math.sin(2.0 * mp - 2.0 * d) - 0.057 * Math.sin(mp - 2.0 * d + m) + 0.053 * Math.sin(mp + 2.0 * d) + 0.046 * Math.sin(2.0 * d - m) + 0.041 * Math.sin(mp - m) - 0.035 * Math.sin(d) - 0.031 * Math.sin(mp + m))
+}
+
+pub fn moonEclipticLatDeg(jd: f64): f64 {
+    let t = (jd - 2451545.0) / 36525.0
+    let d = (297.8501921 + 445267.1114034 * t) * DEG
+    let mp = (134.9633964 + 477198.8675055 * t) * DEG
+    let f = (93.2720950 + 483202.0175233 * t) * DEG
+    return 5.128 * Math.sin(f)
+    + 0.281 * Math.sin(mp + f)
+    - 0.278 * Math.sin(f - mp)
+    - 0.173 * Math.sin(f - 2.0 * d)
+    + 0.055 * Math.sin(2.0 * d + f - mp)
+    - 0.046 * Math.sin(2.0 * d + mp - f)
+    + 0.033 * Math.sin(2.0 * d + f)
+    + 0.017 * Math.sin(2.0 * mp + f)
+}
+
+// Elongation from ECLIPTIC longitudes: the angle between the two bodies as
+// projected onto the ecliptic, corrected for the moon's latitude. This is one of
+// the two independent routes to the same number.
+pub fn elongationFromEclipticDeg(jd: f64): f64 {
+    let dl = (moonEclipticLonDeg(jd) - sunEclipticLonDeg(jd)) * DEG
+    let b = moonEclipticLatDeg(jd) * DEG
+    return Math.acos(Math.clampF64(Math.cos(b) * Math.cos(dl), 0.0 - 1.0, 1.0)) / DEG
+}
+
+// Elongation from EQUATORIAL coordinates: the angular separation of two points
+// on the sphere, from their right ascensions and declinations. The other route.
+// The fixture requires these two to agree; they share no line of arithmetic
+// beyond the ephemeris series themselves, so a sign slip in the coordinate
+// conversion cannot hide in both.
+pub fn elongationFromEquatorialDeg(jd: f64): f64 {
+    let obl = obliquityDeg(jd)
+    let sunEq = eclipticToEquatorial(sunEclipticLonDeg(jd), 0.0, obl)
+    let moonEq = eclipticToEquatorial(moonEclipticLonDeg(jd), moonEclipticLatDeg(jd), obl)
+    let d1 = sunEq.decDeg * DEG
+    let d2 = moonEq.decDeg * DEG
+    let dra = (sunEq.raDeg - moonEq.raDeg) * DEG
+    let c = Math.sin(d1) * Math.sin(d2) + Math.cos(d1) * Math.cos(d2) * Math.cos(dra)
+    return Math.acos(Math.clampF64(c, 0.0 - 1.0, 1.0)) / DEG
+}
+
+// The sun again, by a completely different road: ecliptic longitude, then a
+// rotation into equatorial coordinates, then the hour angle.
+//
+// `sunAt` above is NOAA's horizon-coordinate recipe and never forms a longitude
+// at all. This one shares the moon's machinery instead. They are two
+// independent implementations of the same sky and the fixture makes them agree,
+// which is the only check either of them has that does not require an
+// almanac -- and it is what says the moon's coordinate chain is right, since the
+// moon has no NOAA recipe to be checked against.
+pub fn sunAtEcliptic(lat: f64, lon: f64, t: &DateTime): SunDir {
+    let jd = julianDay(t)
+    let eq = eclipticToEquatorial(sunEclipticLonDeg(jd), 0.0, obliquityDeg(jd))
+    return horizonOf(eq.raDeg, eq.decDeg, lat, lon, jd)
+}
+
+// The moon over `lat`/`lon` at the UTC moment `t`.
+pub fn moonAt(lat: f64, lon: f64, t: &DateTime): MoonDir {
+    let jd = julianDay(t)
+    let obl = obliquityDeg(jd)
+    let eq = eclipticToEquatorial(moonEclipticLonDeg(jd), moonEclipticLatDeg(jd), obl)
+    let h = horizonOf(eq.raDeg, eq.decDeg, lat, lon, jd)
+    let elong = elongationFromEclipticDeg(jd)
+    // Illuminated fraction. The phase angle is the supplement of the elongation
+    // to within a fraction of a degree at this distance, and that error is far
+    // below what a brightness ramp resolves.
+    let k = (1.0 - Math.cos(elong * DEG)) * 0.5
+    return MoonDir {
+        x: h.x, y: h.y, z: h.z,
+        elevationDeg: h.elevationDeg,
+        azimuthDeg: h.azimuthDeg,
+        illuminated: Math.clampF64(k, 0.0, 1.0),
+        elongationDeg: elong,
+    }
+}
+
+pub fn moonNow(lat: f64, lon: f64): MoonDir {
+    let t = DateTime.now()
+    return moonAt(lat, lon, t)
+}

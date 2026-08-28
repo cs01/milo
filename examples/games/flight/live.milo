@@ -33,7 +33,7 @@ from "std/strconv" import {
     parseInt, parseFloat
 }
 from "./solar" import {
-    SunDir, sunAt
+    SunDir, moonAt, sunAt
 }
 from "./cloud" import {
     CLOUD_N, CloudField, cloudEmpty, cloudSynthetic, cloudAddTestCell
@@ -79,6 +79,15 @@ pub struct LiveEnv {
 
     // Sun direction in world axes (+x east, +z north, +y up).
     sunX: f64,
+    // The moon, on the same clock as the sun. `moonLight` is the illuminated
+    // fraction of the disc times how far up it is, which is the single number
+    // every shader scales the second light by.
+    moonX: f64,
+    moonY: f64,
+    moonZ: f64,
+    moonLight: f64,
+    moonIllum: f64,
+    moonElevDeg: f64,
     sunY: f64,
     sunZ: f64,
     sunElevDeg: f64,
@@ -173,6 +182,12 @@ pub fn envNew(lat: f64, lon: f64, reach: f64, groundM: f64): LiveEnv {
         lat: lat,
         lon: lon,
         sunX: 0.44,
+        moonX: 0.0,
+        moonY: 0.0 - 1.0,
+        moonZ: 0.0,
+        moonLight: 0.0,
+        moonIllum: 0.0,
+        moonElevDeg: 0.0 - 90.0,
         sunY: 0.78,
         sunZ: 0.44,
         sunElevDeg: 51.0,
@@ -620,6 +635,18 @@ pub fn envRetime(e: &mut LiveEnv, elapsed: f64) {
     e.sunElevDeg = s.elevationDeg
     e.sunAzDeg = s.azimuthDeg
     e.sunSource = EnvSource.Computed
+
+    let m = moonAt(e.lat, e.lon, t)
+    e.moonX = m.x
+    e.moonY = m.y
+    e.moonZ = m.z
+    e.moonIllum = m.illuminated
+    e.moonElevDeg = m.elevationDeg
+    // Below the horizon it contributes nothing, and it fades in over the first
+    // few degrees rather than switching on: a light source that appears at full
+    // strength the frame it clears a ridge is a pop nobody can explain.
+    let up = Math.clampF64(m.y * 8.0, 0.0, 1.0)
+    e.moonLight = m.illuminated * up
 }
 
 // UTC label for the HUD, e.g. "2026-08-17 06:12Z".

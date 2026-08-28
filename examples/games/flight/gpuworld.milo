@@ -140,6 +140,47 @@ void main() {
     // distance actually looks like and what one fog colour could never give.
     vec3 rd = normalize(vWorld - uEye);
 
+    // The second light.
+    //
+    // `vLight` is baked per vertex against the SUN and the two halves of it
+    // cannot be separated again, so the moon cannot ride it. The normal comes
+    // from the screen-space derivatives of the world position instead -- which
+    // the glass path below already does, and which costs nothing: two
+    // neighbouring fragments on a face differ by exactly that face's tangents.
+    // Flat per triangle, which is what this geometry is anyway.
+    //
+    // It is a real N.L, not a lift on the ambient. A moonlit hillside has a lit
+    // side and a dark side, and a scene that only gets brighter reads as fog.
+    vec3 nrm = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+    if (dot(nrm, -rd) < 0.0) { nrm = -nrm; }
+    col += albedo * moonLight() * max(dot(nrm, uMoon), 0.0) * vis;
+    col += albedo * nightAmbient();
+
+    // Windows. A city at night IS its windows, and the facade texture already
+    // carries the grid -- the same eight storeys by eight bays the daylight
+    // shading reads as texture. Lit from inside rather than from outside, so a
+    // wall keeps its windows on the moon's dark side, and warm because a window
+    // is.
+    //
+    // Gated on the face being VERTICAL, not on `vTw`. The drape is textured too,
+    // so keying off the texture flag lit the whole city block-by-block including
+    // the streets, and the first night frame came out as an amber sheet. A
+    // window is on a wall; a roof has none and the ground has none, and the
+    // normal already computed says which is which for nothing.
+    // The panes are the DARK cells, not the bright ones: textures.facadeTexture
+    // paints spandrel and mullion at 1.16 and glass at 0.42..0.92, because by
+    // day what reads as a facade is the dark/light rhythm rather than the glass.
+    // Selecting the bright half lit the wall BETWEEN the windows and turned every
+    // tower into a uniform amber slab. Keying on the darkest panes also lights
+    // only some of them, pane by pane, off the hash that is already in there --
+    // which is what a city at night looks like and what a fully lit grid does
+    // not.
+    float wall = smoothstep(0.55, 0.25, abs(nrm.y));
+    if (wall > 0.001 && tw > 0.5 && nightK() > 0.001) {
+        float pane = smoothstep(0.80, 0.48, texel.r);
+        col += vec3(1.10, 0.78, 0.38) * pane * wall * nightK() * 0.55;
+    }
+
     // Glass, which is to say: a mirror with a slight tint.
     //
     // A curtain wall is not a diffuse surface with windows drawn on it, and
@@ -154,8 +195,7 @@ void main() {
     // knows: two neighbouring fragments on a flat wall differ by exactly the two
     // tangents of that wall.
     if (glass > 0.001) {
-        vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
-        if (dot(n, -rd) < 0.0) { n = -n; }
+        vec3 n = nrm;
         vec3 r = reflect(rd, n);
         // Never let the reflected ray point into the ground: a vertical wall
         // reflects almost horizontally, and half a degree of numerical noise
@@ -786,12 +826,14 @@ fn bindSlot(g: &GpuWorld, slot: i64) {
     }
 }
 
-// The four uniforms `SKY_GLSL` declares. Every shader that pastes it needs all
-// four set, and a shader that got three of them right is a sea lit by a
+// The uniforms `SKY_GLSL` declares. Every shader that pastes it needs all of
+// them set, and a shader that got three of them right is a sea lit by a
 // different sun than the sky above it — which is invisible in a diff and obvious
 // on screen. One function, called from every bind site.
 pub fn skyUniforms(sh: &Shader, s: &Scene, time: f64) {
     sh.uniform3F("uSun", s.sunX, s.sunY, s.sunZ)
+    sh.uniform3F("uMoon", s.moonX, s.moonY, s.moonZ)
+    sh.uniformF("uMoonLight", s.moonLight)
     sh.uniformF("uTime", time)
     sh.uniformF("uTurbidity", s.turbidity)
     sh.uniformF("uCloud", s.cloud)

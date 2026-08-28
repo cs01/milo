@@ -16,13 +16,9 @@ from "./live" import {
 from "./city" import {
     City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, COVER_URBAN
 }
-
-// One turn and half a turn. Both were open-coded at every use, and in two
-// different truncations — 6.28318530717959 in the steering code,
-// 6.283185307179586 everywhere else.
-pub let TAU: f64 = 6.283185307179586
-
-pub let PI: f64 = 3.141592653589793
+from "./geom" import {
+    TAU, PI, foldIn, wrapPi
+}
 
 // The stretches of invented country the procedural world cycles through. An
 // enum rather than a bare i64: `theme` was compared against 0..3 in five places
@@ -395,44 +391,6 @@ fn proceduralHeight(x: f64, z: f64): f64 {
     let b = noise(x * 0.0090, z * 0.0090) * 74.0
     let c = noise(x * 0.0280, z * 0.0280) * 17.0
     return a + b + c - 120.0
-}
-
-// A real city is a finite square; the flight is not. Rather than fence the
-// player in or let them fly off into blank sea, the map REFLECTS: cross the
-// eastern edge and you come back over the same city travelling west.
-//
-// A reflection, not a modulo. Taking coordinates modulo the map joins the far
-// edge to the near one, and since the two do not match you get a cliff and a
-// visible seam every span. A reflection is continuous at the join by
-// construction — the height, the coastline and the streets all line up, because
-// on both sides of the seam they are the same points.
-//
-// blockOf/foldIn are the two halves of that map: which reflected copy of the
-// city a coordinate lands in, and where inside the city it lands.
-pub fn blockOf(v: f64, reach: f64): i64 {
-    return Math.floor((v + reach) / (reach * 2.0)) as i64
-}
-
-pub fn foldIn(v: f64, reach: f64): f64 {
-    let period = reach * 2.0
-    let k = blockOf(v, reach)
-    let r = v + reach - (k as f64) * period
-    if k % 2 == 0 {
-        return r - reach
-    }
-    return reach - r
-}
-
-// The inverse: where local coordinate u inside reflected copy k sits in the
-// world. Odd copies are mirrored, which also flips polygon winding — the
-// building draw has to reverse its point order to match, or every facade in
-// every other copy is backface-culled away.
-pub fn unfold(k: i64, u: f64, reach: f64): f64 {
-    let base = (k as f64) * reach * 2.0
-    if k % 2 == 0 {
-        return base + u
-    }
-    return base - u
 }
 
 pub fn heightAt(c: &City, x: f64, z: f64): f64 {
@@ -955,19 +913,6 @@ pub fn fmtTime(s: f64): string {
 // "Ahead" matters. Targeting the nearest live hoop makes the aircraft turn
 // around and go back for one it has just passed, which is the single worst thing
 // an autopilot can do to a six-year-old.
-// An angle difference folded into -pi..pi, so a heading either side of due
-// north is a small correction rather than most of a circle.
-pub fn wrapPi(a: f64): f64 {
-    var d = a
-    while d > PI {
-        d = d - TAU
-    }
-    while d < 0.0 - PI {
-        d = d + TAU
-    }
-    return d
-}
-
 fn autoSteer(w: &mut World, dt: f64) {
     let fwdX = Math.sin(w.plane.yaw)
     let fwdZ = Math.cos(w.plane.yaw)

@@ -6,10 +6,11 @@ update-when: the bootstrap converges or diverges, or the fixture parity number m
 last-verified: 2026-08-06 (fixpoint HOLDS stage2==stage3; 586/586 fixtures; 750/750 ASan-clean; 117/247 negative tests)
 -->
 
-## `flybyGeometry` left the manifest (2026-08-17)
+## `flybyGeometry` left the manifest and came back (2026-08-17, restored 2026-08-28)
 
 It is the only fixture ever removed from `tests/selfhost-manifest.txt` for a reason that is
 not a compiler regression, so the reason is written down rather than inferred from a diff.
+It is back in the manifest: the fixture no longer reaches a package at all.
 
 The fixture imports `examples/games/flight/world3d`, and that example grew a dependency on
 the `gl` package. Two things had to be fixed before the failure was even legible, and both
@@ -26,12 +27,21 @@ were real bugs found by chasing it:
   `&& !this.functions.has("forget")`; `src-milo` now does too. A name-matched builtin
   quietly beating the program's own function is the one thing it must not do.
 
-What remains is a real gap, not a wart: **`src-milo` has no per-package symbol mangling.**
-`src/mangle.ts` gives each package's symbols a `$`-prefixed identity, so `gl`'s `forget`
-cannot collide with `std/runtime`'s call to the builtin. Without it the flat namespace takes
-the package's definition program-wide and `std/runtime.milo` fails with *"function 'forget'
-expects 2 args, got 1"*. Until that lands, no fixture reaching a package that defines a
-top-level name colliding with a builtin can build under `milo-self`.
+One real gap remains, and it is what kept the fixture out until now: **`src-milo` has no
+per-package symbol mangling.** `src/mangle.ts` gives each package's symbols a `$`-prefixed
+identity, so `gl`'s `forget` cannot collide with `std/runtime`'s call to the builtin.
+Without it the flat namespace takes the package's definition program-wide and
+`std/runtime.milo` fails with *"function 'forget' expects 2 args, got 1"*. Until that lands,
+no fixture reaching a package that defines a top-level name colliding with a builtin can
+build under `milo-self`.
+
+`flybyGeometry` is no longer such a fixture. The pure geometry it locks moved to
+`examples/games/flight/geom.milo`, which imports `std/math` and nothing else, so the
+fixture's whole import closure is package-free and it builds under both compilers. That
+was the right fix regardless of self-hosting: while the geometry lived in `world3d.milo`
+and `render3d.milo` the fixture also carried `@requires-package: gl` and was SKIPPED by
+`tests/run.test.ts` in CI, which installs nothing. It had stopped being a gate in both
+harnesses at once.
 
 ## The three things that get measured, and the one that used to not be
 

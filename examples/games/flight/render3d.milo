@@ -6,14 +6,6 @@ from "std/math" import {
 from "./gfx" import {
     Canvas, fillRect, shadeRect, spot, line, thickLine, darkLine, text, textCentered, textWidth
 }
-// Small by-value carrier. Returning a Vec<i64> from this allocated once per
-// terrain quad per frame — a few thousand mallocs a frame, and most of the
-// frame time.
-pub struct Off {
-    x: i64,
-    z: i64,
-}
-
 from "./gfx3d" import {
     Vec3,
     Scene, View, Camera, viewOf, sceneClear, triangle, shade, toCamera,
@@ -32,8 +24,11 @@ from "./live" import {
     envWeatherLabel, envStamp
 }
 from "./world3d" import {
-    World, Trail, Theme, nextTheme, heightAt, coverAt, blockOf, foldIn, unfold, TILE, VIEW_TILES, TAU, MARK_REACH,
+    World, Trail, Theme, nextTheme, heightAt, coverAt, TILE, VIEW_TILES, MARK_REACH,
     fmtTime, fenceK, FENCE_SOFT, terrainTile
+}
+from "./geom" import {
+    Off, TAU, blockOf, foldIn, unfold, ringCount, ringOffset
 }
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal,
@@ -178,43 +173,6 @@ pub let FINE_RINGS: i64 = 9
 // 100, about six hundred extra triangles, which is nothing against the twelve
 // thousand a city already costs.
 pub let VFINE_RINGS: i64 = 3
-
-pub fn ringCount(r: i64): i64 {
-    if r == 0 {
-        return 1
-    }
-    return 8 * r
-}
-
-// The `i`th tile offset around ring `r`, walking the square perimeter.
-pub fn ringOffset(r: i64, i: i64): Off {
-    if r == 0 {
-        return Off {
-            x: 0, z: 0
-        }
-    }
-    let side = 2 * r
-    let seg = i / side
-    let k = i % side
-    if seg == 0 {
-        return Off {
-            x: 0 - r + k, z: 0 - r
-        }
-    }
-    if seg == 1 {
-        return Off {
-            x: r, z: 0 - r + k
-        }
-    }
-    if seg == 2 {
-        return Off {
-            x: r - k, z: r
-        }
-    }
-    return Off {
-        x: 0 - r, z: r - k
-    }
-}
 
 // ── smooth terrain colour ─────────────────────────────────────────────────────
 //

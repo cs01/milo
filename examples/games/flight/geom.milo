@@ -1,0 +1,119 @@
+// The pure geometry FLYBY is built on: the mirrored world map, angle wrapping,
+// and the ring walk over terrain tiles. Nothing here touches a City, a Canvas or
+// a GL context, and that is the point rather than a coincidence.
+//
+// It used to live in world3d.milo and render3d.milo. Both of those import ./live,
+// which imports ./cloud, which imports the `gl` package -- so tests/fixtures/
+// flybyGeometry.milo could not be BUILT anywhere `gl` was absent, which includes
+// CI, which installs nothing. It was annotated `@requires-package: gl` and
+// skipped there: a gate that never runs. This file is the package-free import
+// path that fixture needed.
+
+from "std/math" import {
+    Math
+}
+
+// One turn and half a turn. Both were open-coded at every use, and in two
+// different truncations — 6.28318530717959 in the steering code,
+// 6.283185307179586 everywhere else.
+pub let TAU: f64 = 6.283185307179586
+
+pub let PI: f64 = 3.141592653589793
+
+// A real city is a finite square; the flight is not. Rather than fence the
+// player in or let them fly off into blank sea, the map REFLECTS: cross the
+// eastern edge and you come back over the same city travelling west.
+//
+// A reflection, not a modulo. Taking coordinates modulo the map joins the far
+// edge to the near one, and since the two do not match you get a cliff and a
+// visible seam every span. A reflection is continuous at the join by
+// construction — the height, the coastline and the streets all line up, because
+// on both sides of the seam they are the same points.
+//
+// blockOf/foldIn are the two halves of that map: which reflected copy of the
+// city a coordinate lands in, and where inside the city it lands.
+pub fn blockOf(v: f64, reach: f64): i64 {
+    return Math.floor((v + reach) / (reach * 2.0)) as i64
+}
+
+pub fn foldIn(v: f64, reach: f64): f64 {
+    let period = reach * 2.0
+    let k = blockOf(v, reach)
+    let r = v + reach - (k as f64) * period
+    if k % 2 == 0 {
+        return r - reach
+    }
+    return reach - r
+}
+
+// The inverse: where local coordinate u inside reflected copy k sits in the
+// world. Odd copies are mirrored, which also flips polygon winding — the
+// building draw has to reverse its point order to match, or every facade in
+// every other copy is backface-culled away.
+pub fn unfold(k: i64, u: f64, reach: f64): f64 {
+    let base = (k as f64) * reach * 2.0
+    if k % 2 == 0 {
+        return base + u
+    }
+    return base - u
+}
+
+// An angle difference folded into -pi..pi, so a heading either side of due
+// north is a small correction rather than most of a circle.
+pub fn wrapPi(a: f64): f64 {
+    var d = a
+    while d > PI {
+        d = d - TAU
+    }
+    while d < 0.0 - PI {
+        d = d + TAU
+    }
+    return d
+}
+
+// Small by-value carrier. Returning a Vec<i64> from this allocated once per
+// terrain quad per frame — a few thousand mallocs a frame, and most of the
+// frame time.
+pub struct Off {
+    x: i64,
+    z: i64,
+}
+
+// How many tiles sit on ring `r` of the square walk: one at the centre, then
+// the perimeter of a (2r+1) square.
+pub fn ringCount(r: i64): i64 {
+    if r == 0 {
+        return 1
+    }
+    return 8 * r
+}
+
+// The `i`th tile offset around ring `r`, walking the square perimeter.
+pub fn ringOffset(r: i64, i: i64): Off {
+    if r == 0 {
+        return Off {
+            x: 0, z: 0
+        }
+    }
+    let side = 2 * r
+    let seg = i / side
+    let k = i % side
+    if seg == 0 {
+        return Off {
+            x: 0 - r + k, z: 0 - r
+        }
+    }
+    if seg == 1 {
+        return Off {
+            x: r, z: 0 - r + k
+        }
+    }
+    if seg == 2 {
+        return Off {
+            x: r - k, z: r
+        }
+    }
+    return Off {
+        x: 0 - r, z: r - k
+    }
+}

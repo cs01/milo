@@ -14,8 +14,8 @@
 from "../../examples/games/flight/flight" import {
     Air, Flight, FlightConfig, FlightIn,
     airOf, airStill, flightBankDeg, flightConfig, flightGroundSpeed,
-    flightClimbAuthority, flightHeadingDeg, flightNew, flightReset, flightSettle,
-    flightUpdate, DEG
+    flightClimbAuthority, flightDriftDeg, flightFpaDeg, flightHeadingDeg,
+    flightNew, flightReset, flightSettle, flightTrackDeg, flightUpdate, DEG
 }
 from "std/math" import {
     Math
@@ -328,6 +328,49 @@ fn abuse(cfg: &FlightConfig): bool {
     return ok
 }
 
+// The numbers the instruments are drawn from. They have no visual tell either:
+// a flight path marker on the wrong side of the reference reads as a marker.
+fn instrumentReadouts(cfg: &FlightConfig): bool {
+    var ok = true
+    let still = airStill()
+
+    // Still air: the aircraft goes exactly where its nose points, so track and
+    // heading agree and the drift is zero. A marker that sits off the reference
+    // in calm air is the first thing this catches.
+    var calm = fresh(cfg, 400.0, 45.0)
+    fly(calm, cfg, still, neutral(), 10.0)
+    ok = claim("no drift in still air", Math.abs(flightDriftDeg(calm)) < 0.2, flightDriftDeg(calm).toString()) && ok
+    ok = claim("track is the heading in still air", Math.abs(flightTrackDeg(calm) - flightHeadingDeg(calm)) < 0.2, flightTrackDeg(calm).toString() + " vs " + flightHeadingDeg(calm).toString()) && ok
+
+    // A westerly on a northbound aircraft pushes it east, so the track is east
+    // OF the heading and the drift is positive. The sign is the whole content of
+    // the marker and it is invisible in a screenshot.
+    var crab = fresh(cfg, 400.0, 0.0)
+    fly(crab, cfg, air(20.0, 270.0), neutral(), 10.0)
+    let drift = flightDriftDeg(crab)
+    ok = claim("a westerly drifts a northbound aircraft east", drift > 2.0 && drift < 20.0, drift.toString()) && ok
+
+    // The flight path angle is not the pitch attitude: the nose is deliberately
+    // held a little above the path so a climb LOOKS like one.
+    var up = fresh(cfg, 400.0, 0.0)
+    fly(up, cfg, still, stick(0.0, 1.0, 0.0, 1.0, 0.0), 10.0)
+    let fpa = flightFpaDeg(up)
+    ok = claim("climbing gives a positive flight path angle", fpa > 10.0 && fpa < 40.0, fpa.toString()) && ok
+    // At a HALF climb, where the pitch clamp is not active. At full stick the
+    // nose runs into `maxPitch` and the margin closes to a few tenths of a
+    // degree, so asserting it there would be asserting the clamp.
+    var half = fresh(cfg, 400.0, 0.0)
+    fly(half, cfg, still, stick(0.0, 0.5, 0.0, 1.0, 0.0), 10.0)
+    ok = claim("the nose sits above the path", half.pitch / DEG > flightFpaDeg(half) + 1.5, (half.pitch / DEG).toString() + " vs " + flightFpaDeg(half).toString()) && ok
+
+    var down = fresh(cfg, 4000.0, 0.0)
+    fly(down, cfg, still, stick(0.0, 0.0 - 1.0, 0.0, 0.0, 0.0), 10.0)
+    ok = claim("descending gives a negative flight path angle", flightFpaDeg(down) < 0.0 - 5.0, flightFpaDeg(down).toString()) && ok
+
+    ok = claim("level flight is a flat path", Math.abs(flightFpaDeg(calm)) < 0.5, flightFpaDeg(calm).toString()) && ok
+    return ok
+}
+
 fn main() {
     let cfg = flightConfig()
     var ok = true
@@ -341,6 +384,7 @@ fn main() {
     ok = densityAltitude(cfg) && ok
     ok = turbulenceBounded(cfg) && ok
     ok = surfaces(cfg) && ok
+    ok = instrumentReadouts(cfg) && ok
     ok = abuse(cfg) && ok
     if ok {
         print("flight model ok")

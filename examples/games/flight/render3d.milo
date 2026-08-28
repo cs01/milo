@@ -30,6 +30,9 @@ from "./world3d" import {
 from "./geom" import {
     Off, TAU, blockOf, foldIn, unfold, ringCount, ringOffset
 }
+from "./flight" import {
+    DEG, flightDriftDeg, flightFpaDeg, flightGroundSpeed, flightHeadingDeg
+}
 from "./city" import {
     City, COVER_URBAN, COVER_PARK, COVER_SAND, COVER_WATER, BUILDING_MARGIN, cityCellX, cityCellZ, cityOrthoLocal,
     cityRoofKind, cityRoofHeight, cityBase, ROOF_FLAT, ROOF_PYRAMIDAL, ROOF_DOME, ROOF_HIPPED, ROOF_GABLED
@@ -2860,6 +2863,192 @@ pub fn drawFound(c: &mut Canvas, w: &World) {
     textCentered(c, cx, 114, fmtTime(w.marks[w.showIdx].took) + "     " + w.markFound.toString() + " OF " + w.marks.len.toString(), 2, 0.55 * k, 1.55 * k, 1.00 * k)
 }
 
+// ── instruments ───────────────────────────────────────────────────────────────
+//
+// An attitude ball, a heading ribbon and a vertical speed bar, plus the numbers.
+// They exist because the flight model now has things to say that the picture
+// cannot: the aircraft flies through moving air, and where it is GOING is not
+// where its nose is pointing.
+//
+// The mark worth knowing about is the FLIGHT PATH MARKER on the ball. It sits at
+// the drift angle to one side of the reference and at the flight path angle
+// below the nose, so in still air it sits on the reference and in a crosswind it
+// slides off by exactly the angle the aircraft is being blown. It is the most
+// legible evidence in the game that the weather is measured rather than drawn.
+//
+// Every number here comes out of flight.milo and is asserted in
+// tests/fixtures/flybyFlight.milo. What is left in this file is pixels: an
+// instrument that draws the right number in the wrong place is a thing a
+// screenshot shows, and a marker on the wrong SIDE of the reference is not.
+
+// Degrees of pitch across the ball's radius. Twenty-five is the usual choice: a
+// full-deflection climb still leaves the horizon on the glass.
+let BALL_DEG: f64 = 25.0
+
+// Rotate a point in the ball's own frame onto the canvas. The horizon turns
+// AGAINST the bank, which is what makes the fixed reference read as the
+// aircraft rather than as a decal.
+fn ballX(cx: f64, dx: f64, dy: f64, bank: f64): f64 {
+    return cx + dx * Math.cos(bank) + dy * Math.sin(bank)
+}
+
+fn ballY(cy: f64, dx: f64, dy: f64, bank: f64): f64 {
+    return cy - dx * Math.sin(bank) + dy * Math.cos(bank)
+}
+
+fn ballLine(c: &mut Canvas, cx: f64, cy: f64, bank: f64, ax: f64, ay: f64, bx: f64, by: f64, r: f64, g: f64, b: f64) {
+    line(c, ballX(cx, ax, ay, bank), ballY(cy, ax, ay, bank), ballX(cx, bx, by, bank), ballY(cy, bx, by, bank), r, g, b)
+}
+
+fn drawAttitude(c: &mut Canvas, w: &World, cx: f64, cy: f64, rad: f64) {
+    let bank = w.plane.roll
+    // A backing panel, because the ball is drawn over a city: thin bright lines
+    // over a photograph of rooftops read as more rooftops. Darkening rather than
+    // filling, so the scene still shows through it.
+    shadeRect(c, cx - rad, cy - rad, cx + rad, cy + rad, 0.18)
+    let ppd = rad / BALL_DEG
+    let pitchDeg = w.plane.pitch / DEG
+
+    // The horizon, and a pitch ladder either side of it. Rungs are drawn only
+    // while they are on the glass, which is the whole of the clipping this
+    // needs: there is no scissor in the canvas.
+    let hy = pitchDeg * ppd
+    if Math.abs(hy) < rad {
+        ballLine(c, cx, cy, bank, 0.0 - rad, hy, rad, hy, 0.42, 0.62, 0.66)
+    }
+    for i in 0..7 {
+        let rung = ((i as f64) - 3.0) * 10.0
+        if rung == 0.0 {
+            continue
+        }
+        let dy = (pitchDeg - rung) * ppd
+        if Math.abs(dy) > rad * 0.86 {
+            continue
+        }
+        var half = rad * 0.34
+        if rung < 0.0 {
+            half = rad * 0.24
+        }
+        ballLine(c, cx, cy, bank, 0.0 - half, dy, 0.0 - half * 0.45, dy, 0.30, 0.46, 0.50)
+        ballLine(c, cx, cy, bank, half * 0.45, dy, half, dy, 0.30, 0.46, 0.50)
+    }
+
+    // The fixed reference: this is the nose, and it does not move.
+    let wing = rad * 0.40
+    thickLine(c, cx - wing, cy, cx - wing * 0.30, cy, 1.6, 0.85, 0.85, 0.80)
+    thickLine(c, cx + wing * 0.30, cy, cx + wing, cy, 1.6, 0.85, 0.85, 0.80)
+
+    // The flight path marker. Drift moves it sideways, the flight path angle
+    // moves it down from the nose. In still air both are zero and it sits
+    // exactly on the reference, which is how you know the air is still.
+    let fx = cx + Math.clampF64(flightDriftDeg(w.flight), 0.0 - BALL_DEG, BALL_DEG) * ppd
+    let fpa = flightFpaDeg(w.flight)
+    let fy = cy + Math.clampF64(pitchDeg - fpa, 0.0 - BALL_DEG, BALL_DEG) * ppd
+    let mr = rad * 0.10
+    spot(c, fx, fy, mr * 0.55, 0.95, 0.72, 0.22)
+    line(c, fx - mr * 2.0, fy, fx - mr, fy, 0.95, 0.72, 0.22)
+    line(c, fx + mr, fy, fx + mr * 2.0, fy, 0.95, 0.72, 0.22)
+    line(c, fx, fy - mr * 2.0, fx, fy - mr, 0.95, 0.72, 0.22)
+}
+
+// Degrees of heading across the ribbon's half width.
+let RIBBON_DEG: f64 = 40.0
+
+fn drawHeadingRibbon(c: &mut Canvas, w: &World, cx: f64, y: f64, half: f64) {
+    let hdg = flightHeadingDeg(w.flight)
+    let ppd = half / RIBBON_DEG
+    shadeRect(c, cx - half, y - 12.0, cx + half, y + 12.0, 0.28)
+    // Ticks every ten degrees, labelled every thirty. Walking the visible span
+    // in tens rather than the whole circle: 36 ticks of which four are on screen
+    // is 32 lines drawn off the edge of the canvas every frame.
+    let first = ((hdg - RIBBON_DEG) / 10.0) as i64
+    for i in 0..10 {
+        let deg = ((first + i) as f64) * 10.0
+        var d = deg - hdg
+        while d > 180.0 {
+            d = d - 360.0
+        }
+        while d < 0.0 - 180.0 {
+            d = d + 360.0
+        }
+        if Math.abs(d) > RIBBON_DEG {
+            continue
+        }
+        let x = cx + d * ppd
+        var whole = (deg as i64) % 360
+        if whole < 0 {
+            whole = whole + 360
+        }
+        if whole % 30 == 0 {
+            line(c, x, y - 8.0, x, y + 2.0, 0.55, 0.70, 0.74)
+            var lab = (whole / 10).toString()
+            if whole < 100 {
+                lab = "0" + lab
+            }
+            textCentered(c, x as i64, (y + 5.0) as i64, lab, 2, 0.55, 0.70, 0.74)
+        } else {
+            line(c, x, y - 5.0, x, y, 0.30, 0.40, 0.44)
+        }
+    }
+    // Where the aircraft is actually going, as against where it points. The two
+    // separate by exactly the drift angle, and in still air the bug sits on the
+    // index.
+    let bug = cx + Math.clampF64(flightDriftDeg(w.flight), 0.0 - RIBBON_DEG, RIBBON_DEG) * ppd
+    line(c, bug, y - 11.0, bug, y - 6.0, 0.95, 0.72, 0.22)
+    // The index: the heading the nose is on.
+    line(c, cx, y - 14.0, cx, y - 9.0, 0.90, 0.90, 0.85)
+}
+
+// Full scale on the vertical speed bar, m/s. The aircraft climbs at 90 at full
+// stick, so the bar pegs only under the burner.
+let VS_FULL: f64 = 100.0
+
+fn drawVsi(c: &mut Canvas, w: &World, x: f64, cy: f64, half: f64) {
+    shadeRect(c, x - 5.0, cy - half, x + 5.0, cy + half, 0.28)
+    line(c, x - 7.0, cy, x + 7.0, cy, 0.40, 0.52, 0.56)
+    let k = Math.clampF64(w.flight.velY / VS_FULL, 0.0 - 1.0, 1.0)
+    let ty = cy - k * half
+    thickLine(c, x - 6.0, ty, x + 6.0, ty, 1.4, 0.85, 0.85, 0.80)
+}
+
+// The numbers, and the wind that explains the gap between two of them.
+fn drawReadouts(c: &mut Canvas, w: &World, x: i64, y: i64) {
+    let ias = (w.plane.speed as i64).toString()
+    let gs = (flightGroundSpeed(w.flight) as i64).toString()
+    text(c, x, y, "IAS " + ias, 2, 0.62, 0.72, 0.74)
+    // Ground speed sits under it because the DIFFERENCE is the point: it is the
+    // wind, and it is the same wind the flight path marker is offset by.
+    text(c, x, y + 20, "GS  " + gs, 2, 0.48, 0.58, 0.60)
+    text(c, x, y + 40, "ALT " + ((w.plane.y - w.env.groundM) as i64).toString(), 2, 0.48, 0.58, 0.60)
+    // Named only when it is measured. A synthetic sky invents a wind and saying
+    // so here is the same rule the weather label already keeps.
+    if w.env.obs.ok && w.env.obs.hasWind {
+        var wind = (w.env.obs.windDirDeg as i64).toString() + "/" + (w.env.obs.windMps as i64).toString()
+        if w.env.obs.hasGust {
+            wind = wind + "G" + (w.env.obs.gustMps as i64).toString()
+        }
+        text(c, x, y + 60, "WIND " + wind, 2, 0.48, 0.58, 0.60)
+    }
+}
+
+// The cluster, sized off the canvas so it is the same fraction of the picture at
+// any window size. Bottom centre: the top of the frame belongs to the sky and
+// the two corners are already spoken for by the checklist and the weather label.
+fn drawInstruments(c: &mut Canvas, w: &World) {
+    let rad = Math.clampF64((c.h as f64) * 0.085, 44.0, 100.0)
+    // The ribbon goes across the top, where a heading tape belongs and where
+    // nothing else is: the checklist owns the top RIGHT and stops well short of
+    // the middle. The ball goes bottom left rather than bottom centre, because
+    // bottom centre is where the aircraft is drawn and an attitude ball over the
+    // aircraft hides the one thing the chase camera exists to show.
+    drawHeadingRibbon(c, w, (c.w as f64) * 0.5, 30.0, rad * 2.1)
+    let cx = rad + 30.0
+    let cy = (c.h as f64) - rad - 96.0
+    drawAttitude(c, w, cx, cy, rad)
+    drawVsi(c, w, cx + rad * 1.35, cy, rad * 0.85)
+    drawReadouts(c, w, (cx + rad * 1.35 + 18.0) as i64, (cy - rad * 0.85) as i64)
+}
+
 pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
     // Deliberately almost empty. Score, altitude, speed, triangle count, the
     // afterburner gauge, the streak and the control hints were all in service of
@@ -2881,6 +3070,7 @@ pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
         // invented it says so, in the same place, in the same words.
         text(c, 24, c.h - 48, envWeatherLabel(w.env), 2, 0.26, 0.30, 0.34)
         text(c, 24, c.h - 70, envStamp(w.env) + "Z", 2, 0.22, 0.25, 0.29)
+        drawInstruments(c, w)
         return
     }
     // Invented country still runs the hoop game, so it keeps its readouts.

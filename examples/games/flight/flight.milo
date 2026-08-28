@@ -297,6 +297,18 @@ pub fn flightDriftDeg(f: &Flight): f64 {
     return d
 }
 
+// The flight path angle: how steeply the aircraft is actually going, as against
+// how far its nose is up. The two differ by the angle of attack, and the gap
+// between them is what the flight path marker on the attitude ball draws.
+pub fn flightFpaDeg(f: &Flight): f64 {
+    let over = flightGroundSpeed(f)
+    let total = Math.sqrt(over * over + f.velY * f.velY)
+    if total < 1.0e-6 {
+        return 0.0
+    }
+    return Math.asin(Math.clampF64(f.velY / total, 0.0 - 1.0, 1.0)) / DEG
+}
+
 pub fn flightPitchDeg(f: &Flight): f64 {
     return f.pitch / DEG
 }

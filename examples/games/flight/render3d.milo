@@ -21,7 +21,7 @@ from "./plane" import {
     drawAirframe
 }
 from "./live" import {
-    envWeatherLabel, envStamp
+    envScrubHours, envStamp, envSwatchAt, envWeatherLabel
 }
 from "./world3d" import {
     World, Trail, Theme, nextTheme, heightAt, coverAt, drawPitch, drawRoll, TILE,
@@ -3038,6 +3038,59 @@ fn drawReadouts(c: &mut Canvas, w: &World, x: i64, y: i64) {
     }
 }
 
+// The clock band: the next two and a half days, each hour painted the colour of
+// its own sky.
+//
+// This is the difference between a scrubber you sweep blind and one you can
+// read. A clear dawn or an incoming front is a stripe you can see and go to,
+// rather than something you find by dragging the clock and watching what
+// happens. Both halves of every swatch are already computed for the scene -- the
+// sun from arithmetic, the cover from the hourly forecast -- so the whole band is
+// sixty solar positions and no network.
+//
+// The LIGHT half of a swatch is always known -- the sun is arithmetic and needs
+// no feed -- so the band shows where the nights and the twilights are even with
+// no network at all. The CLOUD half is what a missing forecast costs, and an
+// hour without one keeps its light, loses its grey, and says so with a notch.
+// The band must not invent a sky for a time nothing reported on.
+let BAND_HOURS: i64 = 60
+
+let BAND_BACK: i64 = 12
+
+fn drawClockBand(c: &mut Canvas, w: &World, x0: f64, y: f64, wide: f64, tall: f64) {
+    let total = BAND_HOURS + BAND_BACK
+    let step = wide / (total as f64)
+    for i in 0..total {
+        let epoch = w.env.epoch + ((i - BAND_BACK) as i64) * 3600
+        let sw = envSwatchAt(w.env, epoch)
+        let bx = x0 + (i as f64) * step
+        fillRect(c, bx, y, bx + step + 0.5, y + tall, sw.r, sw.g, sw.b)
+        // An hour the forecast does not reach keeps its light and loses its
+        // cloud, and says so with a notch along the bottom rather than by
+        // guessing at a grey.
+        if !sw.hasCover {
+            fillRect(c, bx, y + tall - 2.0, bx + step + 0.5, y + tall, 0.10, 0.11, 0.13)
+        }
+    }
+    // Midnight rules, so the band reads as days rather than as a gradient.
+    for i in 0..total {
+        let epoch = w.env.epoch + ((i - BAND_BACK) as i64) * 3600
+        let t = DateTime.fromEpoch(epoch)
+        if t.hour == 0 {
+            let bx = x0 + (i as f64) * step
+            line(c, bx, y, bx, y + tall, 0.55, 0.58, 0.62)
+        }
+    }
+    // Where the clock is now, and where NOW is. They separate when you scrub,
+    // and the gap between them is what `envScrubHours` reports.
+    let atX = x0 + ((BAND_BACK as f64) + 0.5) * step
+    thickLine(c, atX, y - 3.0, atX, y + tall + 3.0, 1.4, 0.98, 0.92, 0.55)
+    let nowX = x0 + ((BAND_BACK as f64) - envScrubHours(w.env) + 0.5) * step
+    if nowX > x0 && nowX < x0 + wide {
+        line(c, nowX, y - 2.0, nowX, y + tall + 2.0, 0.45, 0.50, 0.55)
+    }
+}
+
 // The cluster, sized off the canvas so it is the same fraction of the picture at
 // any window size. Bottom centre: the top of the frame belongs to the sky and
 // the two corners are already spoken for by the checklist and the weather label.
@@ -3077,6 +3130,7 @@ pub fn drawHud(c: &mut Canvas, w: &World, _s: &Scene, _fps: i64) {
         // invented it says so, in the same place, in the same words.
         text(c, 24, c.h - 48, envWeatherLabel(w.env), 2, 0.26, 0.30, 0.34)
         text(c, 24, c.h - 70, envStamp(w.env) + "Z", 2, 0.22, 0.25, 0.29)
+        drawClockBand(c, w, 24.0, (c.h as f64) - 92.0, 340.0, 12.0)
         drawInstruments(c, w)
         return
     }

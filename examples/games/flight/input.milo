@@ -7,8 +7,8 @@ from "sdl" import {
     SDL_QUIT
 }
 from "sdl/keys" import {
-    SC_A, SC_D, SC_DOWN, SC_E, SC_ESCAPE, SC_F, SC_LEFT, SC_M, SC_Q, SC_RETURN,
-    SC_RIGHT, SC_S, SC_SPACE, SC_UP, SC_W, SC_X, SC_Z
+    SC_0, SC_A, SC_COMMA, SC_D, SC_DOWN, SC_E, SC_ESCAPE, SC_F, SC_LEFT, SC_M,
+    SC_PERIOD, SC_Q, SC_RETURN, SC_RIGHT, SC_S, SC_SPACE, SC_UP, SC_W, SC_X, SC_Z
 }
 
 // One frame of input, snapshotted out of SDL so the rest of the game never
@@ -23,6 +23,13 @@ pub struct Input {
     // so a tap is a nudge and a hold winds the lever open or shut.
     throttle: f64,
     boost: bool,
+    // The scene clock. -1 back, +1 forward, held rather than edge-triggered: a
+    // scrub is a sweep, not a step, and the band under the clock is there to be
+    // dragged along until the sky looks like something.
+    clock: f64,
+    // Back to now, edge-triggered.
+    clockNow: bool,
+    clockNowHeld: bool,
     quit: bool,
     mute: bool, // edge-triggered: true only on the frame M goes down
     muteHeld: bool,
@@ -47,6 +54,7 @@ pub struct Input {
 pub fn inputNew(invert: bool): Input {
     return Input {
         moveX: 0.0, moveY: 0.0, rudder: 0.0, throttle: 0.0,
+        clock: 0.0, clockNow: false, clockNowHeld: false,
         boost: false, quit: false, mute: false, muteHeld: false,
         placeStep: 0, placeHeld: false,
         fullscreen: false, fullHeld: false,
@@ -61,6 +69,8 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
     inp.moveY = 0.0
     inp.rudder = 0.0
     inp.throttle = 0.0
+    inp.clock = 0.0
+    inp.clockNow = false
     inp.boost = false
     inp.mute = false
     inp.placeStep = 0
@@ -153,6 +163,19 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
         if ks[SC_Z] != 0 {
             inp.throttle = inp.throttle - 1.0
         }
+        // The scene clock, on the two keys that already look like arrows on a
+        // transport control.
+        if ks[SC_COMMA] != 0 {
+            inp.clock = inp.clock - 1.0
+        }
+        if ks[SC_PERIOD] != 0 {
+            inp.clock = inp.clock + 1.0
+        }
+        let zeroDown = ks[SC_0] != 0
+        if zeroDown && !inp.clockNowHeld {
+            inp.clockNow = true
+        }
+        inp.clockNowHeld = zeroDown
         if ks[SC_SPACE] != 0 {
             inp.boost = true
         }

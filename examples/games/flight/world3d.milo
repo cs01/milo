@@ -11,7 +11,7 @@ from "./gfx3d" import {
     Camera, Scene, Vec3, altScale
 }
 from "./live" import {
-    LiveEnv, envNew, envSetPlace, envRetime, envF64
+    LiveEnv, envNew, envScrub, envScrubReset, envSetPlace, envRetime, envF64
 }
 from "./city" import {
     City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, COVER_URBAN
@@ -279,6 +279,8 @@ pub struct World {
     trailR: Vec<Trail>,
     trailTick: f64,
     boosting: bool,
+    // How long the clock key has been held, for the scrub rate ramp.
+    clockHeld: f64,
     boostBlend: f64, // eased 0..1, drives every visual speed cue
     // The dynamics. `plane` stays the presentation copy every other file already
     // reads, and the two are synced either side of the step: IN first, because
@@ -566,6 +568,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         trailR: Vec.new(),
         trailTick: 0.0,
         boosting: false,
+        clockHeld: 0.0,
         boostBlend: 0.0,
         flight: flightNew(),
         fcfg: flightConfig(),
@@ -1019,6 +1022,29 @@ pub fn settleUnderCeiling(w: &mut World) {
 // attitude on the next step and accumulate. An integrated gust is a resonance
 // rather than weather: the aircraft rocks continuously and fights its own
 // wings-level damping, at any amplitude.
+// The scene clock, driven from the keyboard.
+//
+// A HELD key rather than a step, and the rate ramps: the first second moves the
+// clock a few minutes so an hour can be found, and holding it walks whole days.
+// A fixed rate is either too slow to reach tomorrow morning or too fast to stop
+// on a sunset, and both of those are the same key.
+pub fn worldClock(w: &mut World, dir: f64, backToNow: bool, dt: f64) {
+    if backToNow {
+        envScrubReset(w.env)
+        w.clockHeld = 0.0
+        return
+    }
+    if dir == 0.0 {
+        w.clockHeld = 0.0
+        return
+    }
+    w.clockHeld = Math.minF64(w.clockHeld + dt, 4.0)
+    // Minutes per second of holding, ramped: 6 at the start, about 90 after four
+    // seconds. Squared rather than linear so the slow end is genuinely slow.
+    let rate = 360.0 + 4800.0 * w.clockHeld * w.clockHeld
+    envScrub(w.env, ((dir * rate * dt) as i64))
+}
+
 pub fn drawRoll(w: &World): f64 {
     return w.plane.roll + w.flight.turbBank
 }

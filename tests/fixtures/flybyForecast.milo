@@ -1,0 +1,155 @@
+// The gate on FLYBY's hourly weather.
+//
+// The scene clock moves the sun AND the weather, and the weather half is an
+// interpolation between two hours of an Open-Meteo series. Nothing about it has
+// a visual tell: a wind direction interpolated the wrong way round the circle
+// gives a perfectly plausible sky with the drift pointing the wrong way, for
+// half an hour, once, whenever the reading crosses north.
+//
+// No network here. The series is built by hand, which is the only way to assert
+// what comes out of a given input -- and the fetch itself is not what breaks.
+
+from "../../examples/games/flight/wx" import {
+    Forecast, WxHour, forecastAt, forecastCovers, forecastEmpty
+}
+from "std/math" import {
+    Math
+}
+
+fn hour(epoch: i64, temp: f64, dir: f64, wind: f64, gust: f64, cover: f64): WxHour {
+    return WxHour {
+        epoch: epoch,
+        tempC: temp,
+        dewC: temp - 6.0,
+        pressureHpa: 1010.0,
+        windDirDeg: dir,
+        windMps: wind,
+        gustMps: gust,
+        coverOktas: cover,
+        lowFrac: 0.0,
+        midFrac: 0.0,
+        highFrac: 0.0,
+        precipMm: 0.0,
+    }
+}
+
+fn claim(name: string, ok: bool, detail: string): bool {
+    if ok {
+        return true
+    }
+    print(name + " FAILED: " + detail)
+    return false
+}
+
+fn near(name: string, v: f64, want: f64, tol: f64): bool {
+    return claim(name, Math.abs(v - want) < tol, v.toString() + " want " + want.toString())
+}
+
+fn seriesOf(): Forecast {
+    var h: Vec<WxHour> = Vec.new()
+    h.push(hour(1000, 10.0, 350.0, 4.0, 4.0, 0.0))
+    h.push(hour(4600, 20.0, 10.0, 8.0, 14.0, 8.0))
+    h.push(hour(8200, 30.0, 90.0, 8.0, 8.0, 4.0))
+    return Forecast {
+        ok: true, hours: h
+    }
+}
+
+// Halfway between two hours is halfway between their numbers.
+fn interpolates(): bool {
+    let f = seriesOf()
+    var ok = true
+    let mid = forecastAt(f, 2800)
+    ok = claim("midpoint is ok", mid.ok, "") && ok
+    ok = near("temperature at the midpoint", mid.tempC, 15.0, 0.01) && ok
+    ok = near("wind at the midpoint", mid.windMps, 6.0, 0.01) && ok
+    ok = near("cover at the midpoint", mid.coverOktas, 4.0, 0.01) && ok
+
+    // On an hour exactly, it is that hour.
+    let onTheHour = forecastAt(f, 4600)
+    ok = near("on the hour, temperature", onTheHour.tempC, 20.0, 0.01) && ok
+    ok = near("on the hour, direction", onTheHour.windDirDeg, 10.0, 0.01) && ok
+    return ok
+}
+
+// A direction is not a number. Halfway between 350 and 010 is 000, and a naive
+// lerp says 180 -- which turns a steady northerly into a southerly for half an
+// hour every time the reading crosses north, and looks like nothing at all.
+fn directionWrapsTheShortWay(): bool {
+    let f = seriesOf()
+    var ok = true
+    let mid = forecastAt(f, 2800)
+    // 350 -> 010 the short way is 000, so the halfway point is due north.
+    let d = mid.windDirDeg
+    let north = d < 1.0 || d > 359.0
+    ok = claim("direction takes the short way", north, d.toString()) && ok
+
+    // And the long way round the other side is still the short way: 010 -> 090
+    // is a plain 50 at the midpoint, so this is not a rule that only fires near
+    // zero.
+    let later = forecastAt(f, 6400)
+    ok = near("direction between 010 and 090", later.windDirDeg, 50.0, 0.01) && ok
+    return ok
+}
+
+// A gust is only a gust when it exceeds the mean wind, and "not gusting" is not
+// the same statement as "unknown". Both halves matter: the flight model scales
+// its turbulence by the difference, so a gust equal to the wind must read as
+// calm rather than as a gust of zero strength that is nevertheless present.
+fn gusts(): bool {
+    let f = seriesOf()
+    var ok = true
+    let gusty = forecastAt(f, 4600)
+    ok = claim("a gust above the wind is a gust", gusty.hasGust, gusty.gustMps.toString()) && ok
+    let calm = forecastAt(f, 1000)
+    ok = claim("a gust equal to the wind is not", !calm.hasGust, calm.gustMps.toString()) && ok
+    return ok
+}
+
+// Outside the series it reports NOTHING rather than the nearest hour. Pinning a
+// three-day-old observation to a scrubbed clock and calling it the weather is
+// exactly the fabrication this chain exists to avoid, and it is invisible.
+fn refusesOutsideTheSeries(): bool {
+    let f = seriesOf()
+    var ok = true
+    ok = claim("covers the middle", forecastCovers(f, 2800), "") && ok
+    ok = claim("does not cover before the start", !forecastCovers(f, 500), "") && ok
+    ok = claim("does not cover after the end", !forecastCovers(f, 99999), "") && ok
+    ok = claim("before the start reports nothing", !forecastAt(f, 500).ok, "") && ok
+    ok = claim("after the end reports nothing", !forecastAt(f, 99999).ok, "") && ok
+
+    // The last hour is the END of the series, not a segment of its own: there is
+    // no hour after it to interpolate toward.
+    ok = claim("the final hour is the end", !forecastCovers(f, 8200), "") && ok
+
+    let none = forecastEmpty()
+    ok = claim("an empty forecast covers nothing", !forecastCovers(none, 2800), "") && ok
+    ok = claim("an empty forecast reports nothing", !forecastAt(none, 2800).ok, "") && ok
+    return ok
+}
+
+// A cloudy hour gets a base out of the condensation level; a clear one gets no
+// base at all, which is a different statement from a base of zero.
+fn cloudBase(): bool {
+    let f = seriesOf()
+    var ok = true
+    let clear = forecastAt(f, 1000)
+    ok = claim("a clear hour reports no base", clear.baseM < 0.0, clear.baseM.toString()) && ok
+    let cloudy = forecastAt(f, 4600)
+    ok = claim("a cloudy hour gets a condensation level", cloudy.baseM > 0.0, cloudy.baseM.toString()) && ok
+    return ok
+}
+
+fn main() {
+    var ok = true
+    ok = interpolates() && ok
+    ok = directionWrapsTheShortWay() && ok
+    ok = gusts() && ok
+    ok = refusesOutsideTheSeries() && ok
+    ok = cloudBase() && ok
+    if ok {
+        print("forecast ok")
+    }
+}
+
+// @expect: forecast ok

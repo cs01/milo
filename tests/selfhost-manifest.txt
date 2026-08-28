@@ -184,6 +184,7 @@ floatNanCompare
 floatRoundTrip
 flybyEphemeris
 flybyFlight
+flybyForecast
 flybyGeometry
 fnArgI64Lit
 fnInStruct

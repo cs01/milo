@@ -39,7 +39,8 @@ from "./cloud" import {
     CLOUD_N, CloudField, cloudEmpty, cloudSynthetic, cloudAddTestCell
 }
 from "./wx" import {
-    Obs, obsEmpty, fetchObs, fetchIr, fetchRadar, lclMetres
+    Forecast, Obs, fetchForecast, fetchIr, fetchObs, fetchRadar,
+    forecastAt, forecastCovers, forecastEmpty, lclMetres, obsEmpty
 }
 
 // How the environment was arrived at, so the HUD can say so rather than implying
@@ -71,6 +72,20 @@ pub struct WxSnapshot {
     hazeK: f64,
     rainPeak: f64,
     rainFrac: f64,
+    // The two grids the field was COMPOSED from, kept rather than thrown away.
+    //
+    // They are the expensive half -- a satellite image and a radar mosaic, over
+    // the network -- and they are also the half that does not change when the
+    // clock does. Keeping them is what lets the scene clock move the weather
+    // without going back out to the network: the structure stays and the station
+    // numbers are re-read out of the hourly forecast.
+    structure: Vec<f32>,
+    rainGrid: Vec<f32>,
+    haveIr: bool,
+    // The hourly series. This is what a scrubbed clock is answered from, and it
+    // covers the past day as well as the next three, so scrubbing backwards is
+    // answered by measurement rather than by extrapolation.
+    fc: Forecast,
 }
 
 pub struct LiveEnv {
@@ -147,6 +162,22 @@ pub struct LiveEnv {
     // Set when the field has changed and the GPU copy is stale. The renderer
     // clears it after uploading; nothing else writes it.
     cloudsDirty: bool,
+    // Everything a clock scrub needs, so moving the clock costs a recomposition
+    // and not a fetch. See composeField.
+    fc: Forecast,
+    structure: Vec<f32>,
+    rainGrid: Vec<f32>,
+    haveIr: bool,
+    reachM: f64,
+    // The scene epoch the current cloud field was composed for.
+    wxEpoch: i64,
+    // How far the scene clock has been scrubbed from real time, in seconds.
+    scrubSecs: i64,
+    // How far the weather being shown is from an observation, in hours. Zero is
+    // now; positive is a prediction. The HUD says which, because a forecast came
+    // off the wire exactly as much as the current observation did and "live"
+    // cannot be the distinction between them.
+    aheadHours: i64,
 }
 
 fn envI64(name: string, fallback: i64): i64 {
@@ -208,6 +239,14 @@ pub fn envNew(lat: f64, lon: f64, reach: f64, groundM: f64): LiveEnv {
         rainPeak: 0.0,
         rainFrac: 0.0,
         cloudsDirty: true,
+        fc: forecastEmpty(),
+        structure: Vec.new(),
+        rainGrid: Vec.new(),
+        haveIr: false,
+        reachM: reach,
+        wxEpoch: 0,
+        scrubSecs: 0,
+        aheadHours: 0,
     }
     envRetime(e, 0.0)
     envSynthWeather(e, reach)
@@ -282,11 +321,17 @@ var WX_SNAP: WxSnapshot = WxSnapshot {
     hazeK: 0.00013,
     rainPeak: 0.0,
     rainFrac: 0.0,
+    structure: Vec.new(),
+    rainGrid: Vec.new(),
+    haveIr: false,
+    fc: forecastEmpty(),
 }
 
 var WX_READY: bool = false
 
 fn snapshotEmpty(): WxSnapshot {
+    let noStruct: Vec<f32> = Vec.new()
+    let noRain: Vec<f32> = Vec.new()
     return WxSnapshot {
         ok: false,
         forLat: 0.0,
@@ -296,6 +341,10 @@ fn snapshotEmpty(): WxSnapshot {
         hazeK: 0.00013,
         rainPeak: 0.0,
         rainFrac: 0.0,
+        structure: noStruct,
+        rainGrid: noRain,
+        haveIr: false,
+        fc: forecastEmpty(),
     }
 }
 
@@ -308,8 +357,20 @@ fn envInstall(e: &mut LiveEnv, snap: WxSnapshot) {
     e.hazeK = s.hazeK
     e.rainPeak = s.rainPeak
     e.rainFrac = s.rainFrac
+    let empty32: Vec<f32> = Vec.new()
+    e.structure = replace(s.structure, empty32)
+    let empty32b: Vec<f32> = Vec.new()
+    e.rainGrid = replace(s.rainGrid, empty32b)
+    e.haveIr = s.haveIr
+    e.fc = replace(s.fc, forecastEmpty())
+    e.wxEpoch = e.epoch
+    e.aheadHours = 0
     e.cloudSource = EnvSource.Live
     e.cloudsDirty = true
+    // The clock may already be somewhere other than now -- a frozen shot, or a
+    // scrub that happened while the fetch was in flight -- so ask for the hour
+    // the scene is actually at rather than assuming it is this one.
+    envRetimeWeather(e)
 }
 
 // Fetch on this stack and install. Used at startup and at a place change, both
@@ -324,16 +385,16 @@ pub fn envFetchLive(e: &mut LiveEnv, reachIn: f64): bool {
     return true
 }
 
-fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
-    var reach = reachIn
-    if reach < 1000.0 {
-        reach = 8000.0
-    }
-    let o = fetchObs(lat, lon)
-    if !o.ok {
-        return snapshotEmpty()
-    }
-
+// Compose the cloud field from the two fetched grids and ONE observation.
+//
+// Split out of the fetch on purpose. The grids are the expensive half -- a
+// satellite image and a radar mosaic, over the network -- and they are the half
+// that does not change when the scene clock moves. The station numbers are the
+// cheap half and they are exactly what an hourly forecast can re-answer. So
+// scrubbing the clock re-runs this and nothing else: no fetch, no stall, and the
+// sky over the city changes with the hour because the numbers it is built from
+// did.
+fn composeField(structure: &Vec<f32>, rain: &Vec<f32>, haveIr: bool, o: &Obs, reach: f64, groundM: f64, peak: f64): CloudField {
     // Measured where reported, modelled where not. A station that sees cloud
     // reports its base; one that sees none reports no layers at all, and the
     // condensation level is then the honest guess at where cloud WOULD form.
@@ -351,37 +412,6 @@ fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
     // The observation is above ground; the renderer is above sea level.
     base = base + groundM
     let coverage = o.coverOktas / 8.0
-
-    var structure: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 1.0)
-    var haveIr = false
-    match fetchIr(lat, lon, reach, CLOUD_N) {
-        Option.Some(g) => {
-            structure = g
-            haveIr = true
-        }
-        Option.None => {
-        }
-    }
-    var rain: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 0.0)
-    var peak = 0.0
-    var wet = 0
-    match fetchRadar(lat, lon, reach, CLOUD_N) {
-        Option.Some(g) => {
-            for i in 0..g.len {
-                let v = g[i] as f64
-                if v > peak {
-                    peak = v
-                }
-                if v > 0.15 {
-                    wet = wet + 1
-                }
-            }
-            rain = g
-        }
-        Option.None => {
-        }
-    }
-    let rainFrac = (wet as f64) / ((CLOUD_N * CLOUD_N) as f64)
 
     var f = cloudEmpty()
     f.reach = reach
@@ -467,6 +497,78 @@ fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
         }
     }
     f.topMaxM = topMax
+    return f
+}
+
+fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
+    var reach = reachIn
+    if reach < 1000.0 {
+        reach = 8000.0
+    }
+    // Two sources, and which one is the fallback has swapped.
+    //
+    // The NWS chain is the better observation and stops at the American border:
+    // this game ships Honolulu, which its radar composite does not even cover.
+    // Open-Meteo is keyless, global, and hourly, so it is the source; the station
+    // is enrichment, and it is the only one of the two that gives a NAME and a
+    // measured ceiling. A named station is what makes "the weather in the game is
+    // the weather outside" checkable by someone standing under it.
+    let fc = fetchForecast(lat, lon)
+    let now = epochSecs()
+    var o = fetchObs(lat, lon)
+    if !o.ok {
+        o = forecastAt(fc, now)
+    } else {
+        // The station reported. Fill in only what it did NOT report, so a
+        // measurement is never overwritten by a model.
+        let model = forecastAt(fc, now)
+        if model.ok {
+            if !o.hasGust {
+                o.gustMps = model.gustMps
+                o.hasGust = model.hasGust
+            }
+            if !o.hasPressure {
+                o.pressureHpa = model.pressureHpa
+                o.hasPressure = model.hasPressure
+            }
+        }
+    }
+    if !o.ok {
+        return snapshotEmpty()
+    }
+
+    var structure: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 1.0)
+    var haveIr = false
+    match fetchIr(lat, lon, reach, CLOUD_N) {
+        Option.Some(g) => {
+            structure = g
+            haveIr = true
+        }
+        Option.None => {
+        }
+    }
+    var rain: Vec<f32> = Vec.filled(CLOUD_N * CLOUD_N, 0.0)
+    var peak = 0.0
+    var wet = 0
+    match fetchRadar(lat, lon, reach, CLOUD_N) {
+        Option.Some(g) => {
+            for i in 0..g.len {
+                let v = g[i] as f64
+                if v > peak {
+                    peak = v
+                }
+                if v > 0.15 {
+                    wet = wet + 1
+                }
+            }
+            rain = g
+        }
+        Option.None => {
+        }
+    }
+    let rainFrac = (wet as f64) / ((CLOUD_N * CLOUD_N) as f64)
+
+    let f = composeField(structure, rain, haveIr, o, reach, groundM, peak)
 
     var hazeK = 0.00013
     // Koschmieder. A reported 16 km visibility is 2.4e-4 per metre, which is a
@@ -484,6 +586,10 @@ fn buildSnapshot(lat: f64, lon: f64, reachIn: f64, groundM: f64): WxSnapshot {
         hazeK: hazeK,
         rainPeak: peak,
         rainFrac: rainFrac,
+        structure: structure,
+        rainGrid: rain,
+        haveIr: haveIr,
+        fc: fc,
     }
 }
 
@@ -576,7 +682,22 @@ pub fn envGoLive(e: &mut LiveEnv, reach: f64): bool {
 // One line describing where the sky came from, for the HUD and the console.
 pub fn envWeatherLabel(e: &LiveEnv): string {
     if (e.cloudSource as i32) == (EnvSource.Live as i32) {
-        var s = "LIVE " + e.obs.station.clone()
+        // LIVE, FORECAST or SIMULATED, and the distinction is not where the bytes
+        // came from. A prediction came off the wire exactly as much as the current
+        // observation did; what separates them is WHEN they describe. A panel that
+        // said LIVE over a prediction would be the one dishonesty this whole chain
+        // exists to avoid, and it is the one nothing on screen could reveal.
+        var s = "LIVE"
+        if e.aheadHours > 0 {
+            s = "FORECAST +" + e.aheadHours.toString() + "H"
+        } else {
+            if e.aheadHours < 0 {
+                s = "OBSERVED " + (0 - e.aheadHours).toString() + "H AGO"
+            }
+        }
+        if e.obs.station.len > 0 {
+            s = s + " " + e.obs.station.clone()
+        }
         // "0/8" and "nobody told us" are different statements and only one of
         // them is a measurement. Hawaii is the live case: PHNL is the nearest
         // station and an airport, and its observation currently carries no
@@ -597,6 +718,99 @@ pub fn envWeatherLabel(e: &LiveEnv): string {
         return s
     }
     return "SYNTHETIC SKY"
+}
+
+// Move the scene clock, in seconds. The sun and the weather both follow, because
+// envRetime drives both -- see envRetimeWeather for why answering only one of
+// them would be worse than answering neither.
+//
+// Clamped to the span the forecast actually covers, so the clock cannot be
+// scrubbed somewhere the weather has nothing to say about. Open-Meteo is asked
+// for a day of history and three of forecast; the hard bounds here are what stops
+// a held key from walking off the end of that in a few seconds.
+pub fn envScrub(e: &mut LiveEnv, deltaSecs: i64) {
+    var v = e.scrubSecs + deltaSecs
+    if v < 0 - 86400 {
+        v = 0 - 86400
+    }
+    if v > 60 * 3600 {
+        v = 60 * 3600
+    }
+    e.scrubSecs = v
+}
+
+// Back to now.
+pub fn envScrubReset(e: &mut LiveEnv) {
+    e.scrubSecs = 0
+}
+
+pub fn envScrubHours(e: &LiveEnv): f64 {
+    return (e.scrubSecs as f64) / 3600.0
+}
+
+// One hour of the clock band, as the colour of its sky.
+pub struct SkySwatch {
+    r: f64,
+    g: f64,
+    b: f64,
+    // Cover in eighths at that hour, so the band can also say how solid it is.
+    oktas: f64,
+    // Whether the CLOUD half is known. The light half always is -- the sun is
+    // arithmetic and needs no feed -- so a band drawn with no forecast at all
+    // still shows where the nights and the twilights are, and only declines to
+    // say how grey they will be.
+    hasCover: bool,
+}
+
+// What the sky over this place looks like at `epoch`.
+//
+// A band of these under the clock is the difference between a scrubber you have
+// to sweep blind and one you can read: a clear dawn or an incoming front becomes
+// something you can SEE and go to, rather than something you find by dragging
+// and watching. Both halves of it are already computed for the scene -- the sun
+// from arithmetic and the cover from the hourly series -- so the band costs one
+// solar position per hour and no network at all.
+//
+// A cheap stand-in for sky.skyColor rather than a call to it: that one is GLSL,
+// it lives on the GPU, and pasting a second CPU copy of it here would be a third
+// disagreeing notion of what the sky looks like, which is the exact thing that
+// file was written to end. What the band needs is the three things the eye reads
+// at a glance -- dark, blue, or orange, and how grey.
+pub fn envSwatchAt(e: &LiveEnv, epoch: i64): SkySwatch {
+    let t = DateTime.fromEpoch(epoch)
+    let sun = sunAt(e.lat, e.lon, t)
+    let day = Math.clampF64(sun.y * 2.4 + 0.22, 0.0, 1.0)
+    let dusk = Math.clampF64(1.0 - Math.abs(sun.y) * 4.0, 0.0, 1.0)
+
+    var r = 0.030 + (0.36 - 0.030) * day
+    var g = 0.045 + (0.56 - 0.045) * day
+    var b = 0.095 + (0.86 - 0.095) * day
+    // Twilight peaks as the sun CROSSES the horizon, which is what makes dawn
+    // and dusk the two bands worth finding in a day.
+    r = r + (0.95 - r) * dusk * 0.75
+    g = g + (0.42 - g) * dusk * 0.55
+    b = b + (0.22 - b) * dusk * 0.45
+
+    var oktas = 0.0
+    var hasCover = false
+    if e.fc.ok && forecastCovers(e.fc, epoch) {
+        let o = forecastAt(e.fc, epoch)
+        if o.ok {
+            oktas = o.coverOktas
+            hasCover = true
+            // Cloud greys the sky and dims it, and it dims it MORE at night,
+            // because at night the light it is blocking is the only light there
+            // is.
+            let k = Math.clampF64(oktas / 8.0, 0.0, 1.0) * 0.80
+            let grey = 0.16 + 0.52 * day
+            r = r + (grey - r) * k
+            g = g + (grey * 1.02 - g) * k
+            b = b + (grey * 1.08 - b) * k
+        }
+    }
+    return SkySwatch {
+        r: r, g: g, b: b, oktas: oktas, hasCover: hasCover
+    }
 }
 
 // Point the environment at a new place without losing the clock.
@@ -627,6 +841,10 @@ pub fn envRetime(e: &mut LiveEnv, elapsed: f64) {
             e.epoch = e.baseEpoch + ((elapsed * e.timeScale) as i64)
         }
     }
+    // The scrub. Added last so it composes with a frozen clock, a timelapse and
+    // real time alike -- it is an offset from whatever the clock would otherwise
+    // have said, not a third way of deciding what the clock is.
+    e.epoch = e.epoch + e.scrubSecs
     let t = DateTime.fromEpoch(e.epoch)
     let s = sunAt(e.lat, e.lon, t)
     e.sunX = s.x
@@ -647,6 +865,50 @@ pub fn envRetime(e: &mut LiveEnv, elapsed: f64) {
     // strength the frame it clears a ridge is a pop nobody can explain.
     let up = Math.clampF64(m.y * 8.0, 0.0, 1.0)
     e.moonLight = m.illuminated * up
+
+    envRetimeWeather(e)
+}
+
+// Re-read the weather at the scene clock.
+//
+// The sun and the weather have to move TOGETHER. Answering only one of them
+// would be worse than answering neither: a dawn sky under this afternoon's cloud
+// is a picture of a moment that will never exist, and it is a picture that looks
+// entirely plausible, which is what makes it the wrong kind of wrong.
+//
+// Costs a recomposition of the cloud grid and no network at all -- see
+// composeField -- and only when the clock has actually moved an appreciable
+// fraction of an hour, because at real time this is called every frame and the
+// weather does not change in a sixtieth of a second.
+pub fn envRetimeWeather(e: &mut LiveEnv) {
+    if !e.fc.ok {
+        return
+    }
+    if Math.absI64(e.epoch - e.wxEpoch) < 300 {
+        return
+    }
+    if !forecastCovers(e.fc, e.epoch) {
+        // Scrubbed outside the series. The last good field stays rather than
+        // being cleared: a clock past the end of the forecast is not a report of
+        // clear skies, and pinning a three-day-old observation to it would be a
+        // fabrication presented as a measurement.
+        return
+    }
+    let o = forecastAt(e.fc, e.epoch)
+    if !o.ok {
+        return
+    }
+    // The station's NAME survives a scrub; its readings do not. It named the
+    // place the weather is measured at, and that stays true at any hour; what it
+    // measured was true at one.
+    let station = e.obs.station.clone()
+    e.obs = o
+    e.obs.station = station
+    e.clouds = composeField(e.structure, e.rainGrid, e.haveIr, e.obs, e.reachM, e.groundM, e.rainPeak)
+    e.wxEpoch = e.epoch
+    let now = epochSecs()
+    e.aheadHours = (e.epoch - now) / 3600
+    e.cloudsDirty = true
 }
 
 // UTC label for the HUD, e.g. "2026-08-17 06:12Z".

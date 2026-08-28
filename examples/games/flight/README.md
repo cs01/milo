@@ -39,6 +39,38 @@ honestly and one is deliberately not:
   the part worth having: a burner pass comes round visibly wider than a cruise
   pass, and banking harder is what tightens it.
 
+## The clock
+
+`,` and `.` move the scene clock and `0` puts it back to now. The clock moves the
+sun AND the weather, and answering only one of them would be worse than answering
+neither: a dawn sky under this afternoon's cloud is a picture of a moment that
+will never exist, and it is a picture that looks entirely plausible.
+
+The band under the instruments paints the next sixty hours, and the twelve
+behind, as the colour of each hour's own sky, so a clear dawn or an incoming
+front is a stripe you can see and scrub to rather than something you find by
+dragging blind. The light half of every swatch is arithmetic and needs no feed;
+the cloud half comes from the hourly forecast, and an hour the forecast does not
+reach keeps its light, loses its grey, and says so with a notch.
+
+Weather comes from **Open-Meteo** now, which is keyless, global and hourly. The
+NWS chain is kept and demoted to enrichment: it is the better observation and it
+stops at the American border, and this game ships Honolulu, which its radar
+composite does not even cover. It is also the only one of the two that names a
+station, and a named station is what makes "the weather in the game is the
+weather outside" checkable by someone standing under it.
+
+The label says `LIVE`, `FORECAST +11H` or `SYNTHETIC SKY`. A prediction came off
+the wire exactly as much as the current observation did, so "live" cannot be the
+distinction between them; what separates them is when they describe. A panel that
+said LIVE over a prediction would be the one dishonesty this chain exists to
+avoid, and it is the one nothing on screen could reveal.
+
+Scrubbing costs a recomposition of the cloud grid and no network at all. The
+satellite and radar layers are the expensive half and they do not change when the
+clock does; the station numbers are the cheap half and are exactly what an hourly
+series can re-answer. See `composeField` in `live.milo`.
+
 Gusts move the aircraft as a bounded OFFSET on the attitude, never as a rate
 added to it. Integrating turbulence is a resonance rather than weather: the
 aircraft rocks continuously and fights its own wings-level damping.

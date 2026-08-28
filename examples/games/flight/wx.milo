@@ -151,6 +151,239 @@ fn httpJson(url: &string): Option<Json> {
     }
 }
 
+// ── Open-Meteo: the whole planet, keyless ─────────────────────────────────────
+//
+// The NWS chain below is excellent and it stops at the American border. Its own
+// coverage note already admitted the hole: the Iowa Mesonet radar composite runs
+// 23-50N, 126-65W, so Honolulu -- one of the five places this game ships -- falls
+// outside it. Every place outside CONUS was getting invented weather while the
+// HUD said so, which is honest and is not the same as being right.
+//
+// Open-Meteo is keyless, CORS-open, global, and gives BOTH the current
+// conditions and an hourly series. The series is what makes a scene clock
+// possible at all: moving the clock has to move the weather as well as the sun,
+// because a dawn sky under this afternoon's cloud is a picture of a moment that
+// will never exist.
+//
+// The NWS path is kept and is now enrichment rather than the source: it is the
+// only one of the two that names a STATION, and a named station is what makes
+// "the weather in the game is the weather outside" checkable by someone standing
+// under it.
+
+// One hour of the forecast. Same fields as `Obs`, because the whole point is
+// that the scene cannot tell where its weather came from.
+pub struct WxHour {
+    epoch: i64,
+    tempC: f64,
+    dewC: f64,
+    pressureHpa: f64,
+    windDirDeg: f64,
+    windMps: f64,
+    gustMps: f64,
+    coverOktas: f64,
+    // Low cloud separately, because COVERAGE IS NOT OPACITY: 100% high cirrus
+    // and 100% low stratus both report a total cover of 100 and only one of them
+    // takes the sun away.
+    lowFrac: f64,
+    midFrac: f64,
+    highFrac: f64,
+    precipMm: f64,
+}
+
+pub struct Forecast {
+    ok: bool,
+    // Hourly, oldest first, starting at `hours[0].epoch`. Open-Meteo returns
+    // past hours as well as future ones, so a clock scrubbed backwards is
+    // answered by measurement rather than by extrapolation.
+    hours: Vec<WxHour>,
+}
+
+pub fn forecastEmpty(): Forecast {
+    let none: Vec<WxHour> = Vec.new()
+    return Forecast {
+        ok: false, hours: none
+    }
+}
+
+fn arrF64(j: &Json, path: &string, i: i64, fallback: f64): f64 {
+    let cur = j.curPath(path)
+    if cur < 0 {
+        return fallback
+    }
+    let v = j.curChild(cur, i)
+    if v < 0 {
+        return fallback
+    }
+    return j.curFloat(v) ?? fallback
+}
+
+// Total cover in eighths. Open-Meteo reports a percentage; a human observer
+// reports eighths, and eighths is the unit the rest of this file is in.
+fn oktasOfPercent(pct: f64): f64 {
+    return Math.clampF64(pct * 0.08, 0.0, 8.0)
+}
+
+// The forecast for a place: past hours, this hour, and the next few days.
+//
+// `wind_speed_unit=ms` matters. The default is km/h and the NWS feed below
+// reports km/h too while labelling it m/s, which is exactly the sort of thing
+// that produces a game where the wind is 3.6 times too strong and nothing in a
+// screenshot says so.
+pub fn fetchForecast(lat: f64, lon: f64): Forecast {
+    let url = "https://api.open-meteo.com/v1/forecast"
+    + "?latitude=" + formatFloat(lat, 4)
+    + "&longitude=" + formatFloat(lon, 4)
+    + "&hourly=temperature_2m,dew_point_2m,surface_pressure,wind_speed_10m"
+    + ",wind_direction_10m,wind_gusts_10m,cloud_cover,cloud_cover_low"
+    + ",cloud_cover_mid,cloud_cover_high,precipitation"
+    + "&wind_speed_unit=ms&past_days=1&forecast_days=3&timeformat=unixtime"
+    let Option.Some(j) = httpJson(url) else {
+        return forecastEmpty()
+    }
+    let timeCur = j.curPath("hourly.time")
+    if timeCur < 0 {
+        return forecastEmpty()
+    }
+    let n = j.curLen(timeCur)
+    if n < 2 {
+        return forecastEmpty()
+    }
+    var hours: Vec<WxHour> = Vec.new()
+    for i in 0..n {
+        let tv = j.curChild(timeCur, i)
+        if tv < 0 {
+            continue
+        }
+        let Option.Some(epoch) = j.curInt(tv) else {
+            continue
+        }
+        let temp = arrF64(j, "hourly.temperature_2m", i, 15.0)
+        hours.push(WxHour {
+            epoch: epoch,
+            tempC: temp,
+            dewC: arrF64(j, "hourly.dew_point_2m", i, temp - 6.0),
+            pressureHpa: arrF64(j, "hourly.surface_pressure", i, 1013.25),
+            windDirDeg: arrF64(j, "hourly.wind_direction_10m", i, 270.0),
+            windMps: arrF64(j, "hourly.wind_speed_10m", i, 0.0),
+            gustMps: arrF64(j, "hourly.wind_gusts_10m", i, 0.0),
+            coverOktas: oktasOfPercent(arrF64(j, "hourly.cloud_cover", i, 0.0)),
+            lowFrac: Math.clampF64(arrF64(j, "hourly.cloud_cover_low", i, 0.0) * 0.01, 0.0, 1.0),
+            midFrac: Math.clampF64(arrF64(j, "hourly.cloud_cover_mid", i, 0.0) * 0.01, 0.0, 1.0),
+            highFrac: Math.clampF64(arrF64(j, "hourly.cloud_cover_high", i, 0.0) * 0.01, 0.0, 1.0),
+            precipMm: arrF64(j, "hourly.precipitation", i, 0.0),
+        }
+        )
+    }
+    if hours.len < 2 {
+        return forecastEmpty()
+    }
+    return Forecast {
+        ok: true, hours: hours
+    }
+}
+
+fn lerpF(a: f64, b: f64, k: f64): f64 {
+    return a + (b - a) * k
+}
+
+// Interpolating a DIRECTION is not interpolating a number: halfway between 350
+// and 010 is 000, and a naive lerp says 180, which turns a steady northerly into
+// a southerly for half an hour every time the reading crosses north.
+fn lerpDeg(a: f64, b: f64, k: f64): f64 {
+    var d = b - a
+    while d > 180.0 {
+        d = d - 360.0
+    }
+    while d < 0.0 - 180.0 {
+        d = d + 360.0
+    }
+    var v = (a + d * k) % 360.0
+    if v < 0.0 {
+        v = v + 360.0
+    }
+    return v
+}
+
+// The hour before `epoch` in the series, or -1 if it is outside the span. Linear
+// search: the series is about a hundred entries and this runs once every five
+// minutes, off the frame path.
+fn hourIndex(f: &Forecast, epoch: i64): i64 {
+    if !f.ok || f.hours.len < 2 {
+        return 0 - 1
+    }
+    if epoch < f.hours[0].epoch {
+        return 0 - 1
+    }
+    for i in 0..f.hours.len - 1 {
+        if epoch < f.hours[i + 1].epoch {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+pub fn forecastCovers(f: &Forecast, epoch: i64): bool {
+    return hourIndex(f, epoch) >= 0
+}
+
+// The weather at a MOMENT, interpolated between the two hours either side of it.
+// Returns not-ok when the clock is outside the series, and the caller falls back
+// to a synthetic sky rather than to the nearest hour: pinning a three-day-old
+// observation to a scrubbed clock is the kind of lie this whole chain avoids.
+pub fn forecastAt(f: &Forecast, epoch: i64): Obs {
+    let i = hourIndex(f, epoch)
+    if i < 0 {
+        return obsEmpty()
+    }
+    let span = (f.hours[i + 1].epoch - f.hours[i].epoch) as f64
+    var k = 0.0
+    if span > 0.0 {
+        k = Math.clampF64(((epoch - f.hours[i].epoch) as f64) / span, 0.0, 1.0)
+    }
+    var o = obsEmpty()
+    o.ok = true
+    o.station = ""
+    o.tempC = lerpF(f.hours[i].tempC, f.hours[i + 1].tempC, k)
+    o.dewC = lerpF(f.hours[i].dewC, f.hours[i + 1].dewC, k)
+    o.hasTemp = true
+    o.windDirDeg = lerpDeg(f.hours[i].windDirDeg, f.hours[i + 1].windDirDeg, k)
+    o.windMps = lerpF(f.hours[i].windMps, f.hours[i + 1].windMps, k)
+    o.hasWind = true
+    o.gustMps = lerpF(f.hours[i].gustMps, f.hours[i + 1].gustMps, k)
+    o.hasGust = o.gustMps > o.windMps
+    o.pressureHpa = lerpF(f.hours[i].pressureHpa, f.hours[i + 1].pressureHpa, k)
+    o.hasPressure = true
+    o.coverOktas = lerpF(f.hours[i].coverOktas, f.hours[i + 1].coverOktas, k)
+    // The base comes from the lifting condensation level, the same estimate the
+    // NWS path falls back to when a station reports no ceiling. A forecast has
+    // no ceilometer on it.
+    o.baseM = 0.0 - 1.0
+    if o.coverOktas > 0.5 {
+        o.baseM = lclMetres(o.tempC, o.dewC)
+    }
+    o.visibilityM = 20000.0
+    let precip = lerpF(f.hours[i].precipMm, f.hours[i + 1].precipMm, k)
+    if precip > 0.05 {
+        // Rain cuts visibility, roughly and monotonically. Not a measurement:
+        // Open-Meteo does not report visibility everywhere and inventing one that
+        // says "measured" would be worse than this, which says nothing.
+        o.visibilityM = Math.clampF64(20000.0 / (1.0 + precip * 3.0), 900.0, 20000.0)
+    }
+    o.hasVis = false
+    return o
+}
+
+// Which deck is actually in the way, for the cloud volume. Low cloud is what you
+// fly into and what takes the sun; high cirrus reports the same cover and does
+// neither.
+pub fn forecastLowFrac(f: &Forecast, epoch: i64): f64 {
+    let i = hourIndex(f, epoch)
+    if i < 0 {
+        return 0.0
+    }
+    return f.hours[i].lowFrac
+}
+
 // Read one station's latest observation. Returns not-ok when the station has no
 // temperature, which is the marker for "this one is a river gauge, try the next".
 fn readStation(stationUrl: &string): Obs {

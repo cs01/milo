@@ -85,6 +85,8 @@ controls:
   LEFT / RIGHT                bank
   Q / E                       rudder
   Z / X                       throttle: Z slows, X opens up
+  , / .                       move the scene clock back / forward
+  0                           back to now
   SPACE                       afterburner — hold as long as you like
   ENTER                       fly somewhere else
   F                           fullscreen on / off
@@ -451,6 +453,7 @@ pub fn main(): i32 {
         // fetching task and returns, it never waits on the network itself.
         envWeatherTick(w.env, w.city.reach)
         worldUpdate(w, dt, inp.moveX, inp.moveY, inp.rudder, inp.throttle, inp.boost)
+        worldClock(w, inp.clock, inp.clockNow, dt)
         let view = viewOf(w.cam, c.w, c.h)
         // Bind the scene target and match it to the window before any geometry is
         // recorded, because the render size is what the projection is built from.

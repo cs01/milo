@@ -14,7 +14,8 @@ from "./live" import {
     LiveEnv, envNew, envScrub, envScrubReset, envSetPlace, envRetime, envF64
 }
 from "./city" import {
-    City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, COVER_URBAN
+    City, cityEmpty, cityHeightAt, cityCoverAt, cityRoofAt, solveCullK,
+    COVER_URBAN
 }
 from "./geom" import {
     TAU, PI, foldIn, wrapPi
@@ -281,6 +282,12 @@ pub struct World {
     boosting: bool,
     // How long the clock key has been held, for the scrub rate ramp.
     clockHeld: f64,
+    // The apparent height a building has to reach to be drawn, solved per place
+    // against a triangle budget rather than hard-coded. See city.solveCullK: San
+    // Francisco and Manhattan differ in building count by three times over a
+    // similar radius, so one constant is either wasteful over the sparse city or
+    // unaffordable over the dense one.
+    cullK: f64,
     boostBlend: f64, // eased 0..1, drives every visual speed cue
     // The dynamics. `plane` stays the presentation copy every other file already
     // reads, and the two are synced either side of the step: IN first, because
@@ -461,6 +468,37 @@ pub fn worldSeeded(seed: i64): World {
 // How far out a place starts you from its first landmark. A short run: long
 // enough to see the beam standing on it and to be flying rather than falling out
 // of the sky, short enough that the opening leg is not the longest one.
+// The skyline budget, and the viewpoint it is solved from.
+//
+// Measured, not chosen. Frame time over the five places at 1280x720, before and
+// after, with the fixed 0.010 threshold as the baseline:
+//
+//   place        fixed 0.010    solved to 200k
+//   San Francisco     10 ms          12 ms
+//   Manhattan         14 ms          11 ms
+//   Honolulu           7 ms           7 ms
+//   Yosemite           7 ms           7 ms
+//   Grand Canyon       7 ms           7 ms
+//
+// The number that matters is the WORST one, and it went from 14 to 12. The three
+// cheap places did not get slower and are drawing about ten times the skyline
+// they were -- Honolulu's pack costs 40k triangles at the floor threshold and it
+// was being shown 4k. That is the "wasteful" half of a fixed constant, and it is
+// the half nobody notices, because a city with buildings missing looks like a
+// city with fewer buildings in it.
+pub let SKYLINE_TRIS: i64 = 200000
+
+// Eye height for the solve, in metres above the city. The place starts at about
+// 320 m above the spawn and this is the same order; what the budget buys is a
+// threshold proportional to the city's own density, and the density seen from
+// the middle is the density.
+pub let SKYLINE_EYE: f64 = 400.0
+
+// Draw distance for the solve. Not optional: cities differ in EXTENT as well as
+// density, and a budget solved over a whole pack would tighten the threshold on a
+// place merely because its pack reaches further than the aircraft can see.
+pub let SKYLINE_RANGE: f64 = 5000.0
+
 pub let SPAWN_RUN: f64 = 1500.0
 
 // The survey that plays when a place is swapped in mid-run. Shorter than the
@@ -569,6 +607,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         trailTick: 0.0,
         boosting: false,
         clockHeld: 0.0,
+        cullK: 0.010,
         boostBlend: 0.0,
         flight: flightNew(),
         fcfg: flightConfig(),
@@ -631,6 +670,7 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         lastFind: false,
     }
     w.marks = marksFor(w.city.name)
+    w.cullK = solveCullK(w.city, SKYLINE_EYE, SKYLINE_RANGE, SKYLINE_TRIS)
     computeFence(w)
     w.plane.y = heightAt(w.city, 0.0, 0.0) + 320.0
     spawnAt(w)
@@ -678,6 +718,9 @@ fn rotatePlace(w: &mut World) {
 // time; the caller decodes the next on demand.
 pub fn worldSetPlace(w: &mut World, c: City) {
     w.city = c
+    // Solve the skyline budget for THIS city, once. Nothing later in the frame
+    // has to know how dense the place is.
+    w.cullK = solveCullK(w.city, SKYLINE_EYE, SKYLINE_RANGE, SKYLINE_TRIS)
     envSetPlace(w.env, w.city.originLat, w.city.originLon, w.city.reach, cityGroundRef(w.city))
     w.marks = marksFor(w.city.name)
     w.markIdx = 0

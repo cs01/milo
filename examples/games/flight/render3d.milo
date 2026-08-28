@@ -1615,12 +1615,15 @@ fn drawCity(s: &mut Scene, w: &World, v: &View, facade: &Texture) {
                         // they cost as much as the towers and show nothing.
                         let hgt = w.city.bHeight[b]
                         let d = Math.sqrt(d2) + 1.0
-                        // About six pixels tall at a 720p vertical field of view.
-                        // It was 0.0055 — three pixels — and in a city the size of
-                        // Manhattan the difference is thousands of prisms a frame,
-                        // each of them recorded, uploaded and rasterised twice, to
-                        // show a smudge.
-                        if hgt / d < 0.010 {
+                        // Solved per place, not hard-coded. It used to be 0.010 —
+                        // about six pixels at a 720p vertical field of view — walked
+                        // there by hand from 0.0055 because Manhattan could not
+                        // afford three pixels. Tuning one constant against the
+                        // densest city means throwing away buildings in every other
+                        // one, so `city.solveCullK` bisects the curve until THIS
+                        // city's skyline fits the triangle budget. See world3d's
+                        // SKYLINE_TRIS.
+                        if hgt / d < w.cullK {
                             continue
                         }
                         // The box stands in for the real outline only once the

@@ -39,6 +39,31 @@ honestly and one is deliberately not:
   the part worth having: a burner pass comes round visibly wider than a cruise
   pass, and banking harder is what tightens it.
 
+## The skyline budget
+
+Buildings are budgeted, not fixed. `city.solveCullK` bisects the cull curve until
+THIS city's skyline fits `SKYLINE_TRIS`, once, at load. Cities differ in density
+by more than five times over the same radius, so a single hand-tuned constant is
+either wasteful over the sparse city or unaffordable over the dense one -- and the
+constant it replaces had been walked from three pixels to six by hand, tuned
+against Manhattan and therefore throwing buildings away everywhere else.
+
+Frame time at 1280x720, measured, before and after:
+
+| place | fixed 0.010 | solved to 200k |
+|---|---|---|
+| San Francisco | 10 ms | 12 ms |
+| Manhattan | **14 ms** | **11 ms** |
+| Honolulu | 7 ms | 7 ms |
+| Yosemite | 7 ms | 7 ms |
+| Grand Canyon | 7 ms | 7 ms |
+
+The number that matters is the worst one and it went from 14 to 12. The three
+cheap places did not get slower and are drawing about ten times the skyline they
+were: Honolulu's pack costs 40k triangles at the floor threshold and it was being
+shown 4k. That is the wasteful half, and it is the half nobody notices, because a
+city with buildings missing looks like a city with fewer buildings in it.
+
 ## The clock
 
 `,` and `.` move the scene clock and `0` puts it back to now. The clock moves the

@@ -148,6 +148,100 @@ pub struct City {
     orthoLoaded: bool,
 }
 
+// ── the skyline budget ────────────────────────────────────────────────────────
+//
+// Cities differ in density by more than five times. San Francisco bakes to about
+// sixty thousand buildings and Manhattan to nearly two hundred thousand over a
+// similar radius, so ONE cull constant is either wasteful over the sparse city
+// or unaffordable over the dense one -- and it was unaffordable, which is why the
+// constant had been walked from three pixels to six by hand, tuned against
+// Manhattan and therefore throwing away buildings everywhere else.
+//
+// So solve it instead. `solveCullK` searches the cull curve for the apparent
+// height at which THIS city's skyline fits a triangle budget, once, at load. The
+// search is over a monotone function -- raising the threshold can only drop
+// buildings -- so a bisection is exact to whatever tolerance it is run to, and
+// twenty-four steps take it far below what a pixel means.
+//
+// The reference viewpoint is the city centre at the height the place starts at.
+// That is not where the camera will be, and it does not need to be: what the
+// budget buys is a threshold proportional to the city's own density, and the
+// density seen from the middle is the density.
+
+// How many triangles a prism costs: two per wall segment plus the roof fan.
+fn prismTris(n: i64): i64 {
+    if n < 3 {
+        return 0
+    }
+    return 2 * n + (n - 2)
+}
+
+// Triangles the skyline would cost from the reference viewpoint at threshold `k`.
+//
+// `range` is the draw distance and it is not optional: without it this counts
+// the whole city, and cities differ in EXTENT as well as in density, so a
+// budget solved against a whole-city count would tighten the threshold on a
+// place merely because its pack reaches further than the aircraft can see. The
+// renderer culls at `far`; so does this.
+pub fn skylineTris(c: &City, eyeY: f64, range: f64, k: f64): i64 {
+    var total = 0
+    let r2 = range * range
+    for b in 0..c.bCount {
+        if c.bSkip[b] {
+            continue
+        }
+        let midX = (c.bMinX[b] + c.bMaxX[b]) * 0.5
+        let midZ = (c.bMinZ[b] + c.bMaxZ[b]) * 0.5
+        if midX * midX + midZ * midZ > r2 {
+            continue
+        }
+        // Slant range from the reference eye, not ground distance: a tower
+        // directly below the aircraft is close on the map and far up the frame.
+        let d = Math.sqrt(midX * midX + midZ * midZ + eyeY * eyeY) + 1.0
+        if c.bHeight[b] / d < k {
+            continue
+        }
+        total = total + prismTris(c.bLen[b])
+    }
+    return total
+}
+
+// The apparent height at which this city's skyline fits `triBudget`.
+//
+// Bounded below by the point at which raising it further would start deleting
+// the skyline rather than the noise, and above by nothing useful: a city that
+// cannot fit the budget at all gets the tightest threshold in the range and
+// draws over budget, which is a slow frame rather than an empty city. Losing the
+// towers to hit a number would be the wrong trade in a game whose whole subject
+// is the towers.
+pub let CULL_MIN: f64 = 0.0030
+
+pub let CULL_MAX: f64 = 0.0400
+
+pub fn solveCullK(c: &City, eyeY: f64, range: f64, triBudget: i64): f64 {
+    if !c.loaded || c.bCount == 0 {
+        return CULL_MIN
+    }
+    // Already inside the budget with everything drawn: take the whole skyline.
+    if skylineTris(c, eyeY, range, CULL_MIN) <= triBudget {
+        return CULL_MIN
+    }
+    var lo = CULL_MIN
+    var hi = CULL_MAX
+    // Monotone in k, so bisection is exact. Twenty-four steps take a 0.037 range
+    // to about two-billionths, which is far below what a pixel means; the loop
+    // is cheap and this runs once per place.
+    for _ in 0..24 {
+        let mid = (lo + hi) * 0.5
+        if skylineTris(c, eyeY, range, mid) > triBudget {
+            lo = mid
+        } else {
+            hi = mid
+        }
+    }
+    return hi
+}
+
 pub fn cityEmpty(): City {
     return City {
         loaded: false,

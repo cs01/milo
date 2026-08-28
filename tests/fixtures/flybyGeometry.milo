@@ -14,7 +14,8 @@ from "../../examples/games/flight/geom" import {
     foldIn, unfold, blockOf, wrapPi, PI, TAU, ringCount, ringOffset
 }
 from "../../examples/games/flight/city" import {
-    cityParse, putI32, putCm, MAGIC, VERSION
+    City, cityEmpty, cityParse, putI32, putCm, skylineTris, solveCullK,
+    CULL_MAX, CULL_MIN, MAGIC, VERSION
 }
 from "std/math" import {
     Math
@@ -141,6 +142,153 @@ fn tinyCity(): string {
     return out
 }
 
+// A city of `n` four-sided buildings on a spiral out to radius `r`, tall in the
+// middle and low at the edge -- which is the shape of a real one and, more to the
+// point here, gives a SPREAD of apparent heights.
+//
+// A ring of identical buildings at one radius would not exercise the solver at
+// all: every building would have the same apparent height, the cull would be a
+// step function, and a bisection over a step returns the step. The first version
+// of this fixture did exactly that and reported the solver broken.
+fn ringCity(n: i64, r: f64, hTop: f64): City {
+    var c = cityEmpty()
+    c.loaded = true
+    c.bCount = n
+    for i in 0..n {
+        let t = (i as f64) / (n as f64)
+        let a = TAU * (i as f64) * 0.381966
+        let rad = r * (0.04 + 0.96 * t)
+        let x = Math.cos(a) * rad
+        let z = Math.sin(a) * rad
+        c.bHeight.push(8.0 + (hTop - 8.0) * (1.0 - t) * (1.0 - t))
+        c.bMinX.push(x - 10.0)
+        c.bMaxX.push(x + 10.0)
+        c.bMinZ.push(z - 10.0)
+        c.bMaxZ.push(z + 10.0)
+        c.bLen.push(4)
+        c.bSkip.push(false)
+    }
+    return c
+}
+
+// The skyline budget. Cities differ in density by more than five times, so a
+// single hand-tuned cull constant is either wasteful over the sparse city or
+// unaffordable over the dense one -- and being tuned against the densest city is
+// how it ends up throwing buildings away in every other one.
+//
+// None of this has a visual tell worth the name: a threshold that is too high
+// looks like a city with fewer buildings in it, which is what a city with fewer
+// buildings in it also looks like.
+fn skylineBudget(): bool {
+    let budget = 200000
+    let eye = 400.0
+    let range = 5000.0
+    var ok = true
+
+    // Raising the threshold can only ever drop buildings. The solver is a
+    // bisection and bisection on a non-monotone function returns nonsense, so
+    // this is the assumption the whole thing rests on rather than a nicety.
+    let dense = ringCity(40000, 4800.0, 220.0)
+    var prev = skylineTris(dense, eye, range, CULL_MIN)
+    var monotone = true
+    for i in 1..40 {
+        let k = CULL_MIN + (CULL_MAX - CULL_MIN) * (i as f64) / 40.0
+        let t = skylineTris(dense, eye, range, k)
+        if t > prev {
+            monotone = false
+        }
+        prev = t
+    }
+    if !monotone {
+        print("skyline triangle count is not monotone in the threshold")
+        ok = false
+    }
+
+    // A city that already fits takes the whole skyline: the budget is a ceiling,
+    // not a target to be spent up to.
+    let sparse = ringCity(400, 4800.0, 220.0)
+    if solveCullK(sparse, eye, range, budget) != CULL_MIN {
+        print("a sparse city should keep every building")
+        ok = false
+    }
+
+    // A city that does not fit gets a threshold that makes it fit.
+    let kDense = solveCullK(dense, eye, range, budget)
+    if kDense <= CULL_MIN {
+        print("a dense city should tighten the threshold")
+        ok = false
+    }
+    let cost = skylineTris(dense, eye, range, kDense)
+    if cost > budget {
+        print("solved threshold still over budget: " + cost.toString())
+        ok = false
+    }
+    // And not by throwing away far more than it had to. A solver that just
+    // returned CULL_MAX would pass the line above and fail this one.
+    if cost < budget / 3 {
+        print("solved threshold throws away too much: " + cost.toString())
+        ok = false
+    }
+
+    // Denser city, tighter threshold. This is the whole point of solving rather
+    // than hard-coding, and it is the assertion a fixed constant would fail.
+    let denser = ringCity(120000, 4800.0, 220.0)
+    if solveCullK(denser, eye, range, budget) <= kDense {
+        print("a denser city should get a tighter threshold")
+        ok = false
+    }
+
+    // A city that cannot fit at any threshold in range draws over budget rather
+    // than drawing nothing. Losing the towers to hit a number would be the wrong
+    // trade in a game whose subject is the towers.
+    let impossible = ringCity(200000, 300.0, 400.0)
+    let kImp = solveCullK(impossible, eye, range, budget)
+    if skylineTris(impossible, eye, range, kImp) == 0 {
+        print("an unaffordable city should still draw its skyline")
+        ok = false
+    }
+
+    // Extent is not density. A pack that reaches twice as far as the aircraft can
+    // see must not be charged for the half it cannot: without the draw-distance
+    // cull, a wide sparse city solves to a tighter threshold than a compact one
+    // holding exactly the same buildings within view, and the visible result is
+    // buildings missing from the near field of the wider pack.
+    let compact = ringCity(2000, range, 220.0)
+    var wide = ringCity(2000, range, 220.0)
+    let far = ringCity(6000, range * 4.0, 220.0)
+    for b in 0..far.bCount {
+        let mx = (far.bMinX[b] + far.bMaxX[b]) * 0.5
+        let mz = (far.bMinZ[b] + far.bMaxZ[b]) * 0.5
+        if mx * mx + mz * mz <= range * range {
+            continue
+        }
+        wide.bCount = wide.bCount + 1
+        wide.bHeight.push(far.bHeight[b])
+        wide.bMinX.push(far.bMinX[b])
+        wide.bMaxX.push(far.bMaxX[b])
+        wide.bMinZ.push(far.bMinZ[b])
+        wide.bMaxZ.push(far.bMaxZ[b])
+        wide.bLen.push(far.bLen[b])
+        wide.bSkip.push(false)
+    }
+    if wide.bCount <= compact.bCount {
+        print("the wide city gained no out-of-range buildings")
+        ok = false
+    }
+    if skylineTris(wide, eye, range, CULL_MIN) != skylineTris(compact, eye, range, CULL_MIN) {
+        print("out-of-range buildings were charged to the budget")
+        ok = false
+    }
+
+    // An empty or unloaded city must not divide by anything or spin.
+    let nothing = cityEmpty()
+    if solveCullK(nothing, eye, range, budget) != CULL_MIN {
+        print("an empty city should not tighten anything")
+        ok = false
+    }
+    return ok
+}
+
 pub fn main(): i32 {
     if foldRoundTrip() {
         print("fold roundtrip ok")
@@ -152,6 +300,9 @@ pub fn main(): i32 {
     }
     if ringWalkCovers() {
         print("ring walk ok")
+    }
+    if skylineBudget() {
+        print("skyline budget ok")
     }
 
     let full = tinyCity()
@@ -222,6 +373,7 @@ pub fn main(): i32 {
 // @expect: fold roundtrip ok
 // @expect: wrapPi ok
 // @expect: ring walk ok
+// @expect: skyline budget ok
 // @expect: parsed Town 1 building 1 bridge
 // @expect: truncations rejected 141/141
 // @expect: bad magic rejected

@@ -1,0 +1,45 @@
+// @expect: own=alice
+// @expect: missing=-1
+// @expect: holds-own=true
+// @expect: holds-missing=false
+// @expect: holds-foreign=false
+// @expect: holds-handbuilt=false
+// @expect: sub-title=t
+// @expect: holds-parent-in-sub=false
+// Positive half of cursor branding (the aborting half is pinned in
+// tests/runtime-errors/jsonCursorWrongDoc.milo and jsonCursorHandBuilt.milo):
+// -1 still flows through navigation as "nothing here", curHolds is the
+// tolerant probe for a cursor of unknown origin, and a document extracted by
+// path() carries its own brand because extraction renumbers the node pool.
+from "std/json" import {
+    Json
+}
+
+pub fn main(): i32 {
+    let doc = match Json.parse("{\"user\":{\"name\":\"alice\"},\"item\":{\"title\":\"t\"}}") {
+        Result.Ok(j) => j, Result.Err(_) => {
+            return 1
+        }
+    }
+    let other = match Json.parse("{\"user\":{\"name\":\"bob\"}}") {
+        Result.Ok(j) => j, Result.Err(_) => {
+            return 1
+        }
+    }
+    let user = doc.curField(doc.curRoot(), "user")
+    print("own=" + (doc.curStr(doc.curField(user, "name")) ?? "?"))
+    let missing = doc.curField(doc.curRoot(), "nope")
+    print($"missing={missing}")
+    print($"holds-own={doc.curHolds(user)}")
+    print($"holds-missing={doc.curHolds(missing)}")
+    print($"holds-foreign={other.curHolds(user)}")
+    print($"holds-handbuilt={doc.curHolds(0 as i64)}")
+    let sub = match doc.path("item") {
+        Option.Some(j) => j, Option.None => {
+            return 1
+        }
+    }
+    print("sub-title=" + (sub.curStr(sub.curField(sub.curRoot(), "title")) ?? "?"))
+    print($"holds-parent-in-sub={sub.curHolds(user)}")
+    return 0
+}

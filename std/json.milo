@@ -22,6 +22,66 @@ pub struct Json {
     keyOffsets: Vec<i64>,
     keyLens: Vec<i64>,
     root: i64,
+    // Identity of this parse, carried in the high bits of every cursor the
+    // document hands out (see the cursor-branding section below). Always in
+    // 1..2^31-1; 0 is reserved so a hand-built cursor never matches. The same
+    // runtime brand seal.Span carries as _bufferId — docs/residue-vs-rust.md.
+    _docId: i64,
+}
+
+// ── Cursor branding ──
+//
+// A cursor is (document brand << 32) | node index, still one i64. The brand is
+// what stops the one silent failure the raw-index cursor had: a cursor from
+// document A resolved against document B named an in-bounds node of B and
+// nothing objected. Rust rejects that tie-up at compile time with an invariant
+// lifetime; Milo has no lifetimes to carry the tie, so it is a runtime tag,
+// exactly as seal.Span carries _bufferId. See docs/residue-vs-rust.md.
+//
+// -1 stays the "nothing here" cursor: brands fit 31 bits, so every packed
+// cursor is positive and `cur < 0` still separates missing from present.
+
+fn jsonCurPack(docId: i64, idx: i64): i64 {
+    return (docId << 32) | idx
+}
+
+fn jsonCurIdx(cur: i64): i64 {
+    return cur & 0xFFFFFFFF
+}
+
+// The check every cursor accessor funnels through. A negative cursor is the
+// total-navigation "nothing here" and passes through as -1. A cursor branded
+// for a DIFFERENT document is not "nothing here": it is a program that mixed
+// two documents, and answering Option.None would launder that bug into the
+// missing-key path, where `?? fallback` swallows it silently. seal resolved
+// the same tension for eq() the same way (assert, with holds() as the
+// tolerant probe): the accessors abort, and curHolds is the branch point for
+// a cursor of unknown origin. A hand-built integer cursor carries brand 0,
+// which no document ever has, so the old raw-index habit fails closed too.
+fn jsonCurResolve(doc: &Json, cur: i64): i64 {
+    if cur < 0 {
+        return -1
+    }
+    assert((cur >> 32) == doc._docId, "json: cursor belongs to a different document")
+    return cur & 0xFFFFFFFF
+}
+
+// Doc brands start at 1 so a hand-built or zeroed cursor never matches a real
+// document. Atomic for the same reason seal's buffer ids are: parsing can run
+// on Promise.blocking worker threads, not only the scheduler thread.
+var nextJsonDocId: i64 = 1
+
+fn jsonMintDocId(): i64 {
+    var b: i64 = 0
+    unsafe {
+        b = _atomicAddI64((nextJsonDocId.addrOf()) as *u8, 1)
+    }
+    // Fold into 1..2^31-1: the packed cursor gives the brand 31 bits, and 0 is
+    // reserved for hand-built cursors. Brands repeat after 2^31-1 documents; a
+    // stale cursor is then wrongly accepted only if it was held across an exact
+    // multiple of that many parses, the same residual window seal accepts for
+    // its i32 buffer ids.
+    return ((b - 1) % 2147483647) + 1
 }
 
 // ── Key comparison (byte-by-byte against source, zero allocation) ──
@@ -361,12 +421,22 @@ impl Json {
     //
     // `get`/`at` above return an owned Json by deep-cloning the whole document
     // (source string + every node) per call — navigating a large doc thousands
-    // of times blows up to gigabytes. The cursor API instead treats a plain
-    // `i64` node index as a cursor into THIS document: navigation returns child
-    // indices (‑1 = missing) with zero allocation, and only leaf-string reads
-    // materialize (just that one string). Start at `curRoot()` and chain:
+    // of times blows up to gigabytes. The cursor API instead hands out an `i64`
+    // cursor into THIS document: navigation returns cursors (-1 = missing) with
+    // zero allocation, and only leaf-string reads materialize (just that one
+    // string). Start at `curRoot()` and chain:
     //   let user = doc.curField(doc.curChild(doc.curRoot(), 0), "name")
     //   match doc.curStr(user) { Option.Some(s) => ..., Option.None => ... }
+    //
+    // A cursor is not a bare node index: the document's brand rides in its
+    // high bits (see jsonCurResolve above). Resolving a cursor against a
+    // different Json used to read a wrong-but-in-bounds node of the other
+    // document and report nothing; now it aborts, naming the mistake. -1 still
+    // flows through every accessor as "nothing here", so navigation stays
+    // total for any in-document miss. A memberwise copy of a Json shares its
+    // brand, which is sound because copying preserves node numbering; the
+    // documents `get`/`at`/`path` return carry a fresh brand because
+    // extraction renumbers the pool.
     //
     // This is one of two ways to reach a nested value. The other is to chain the
     // owned accessors with `Option.andThen` — `doc.at(0).andThen((j) => j.str("name"))`
@@ -374,41 +444,44 @@ impl Json {
     // of fixed-shape accessors (`strAt`, `childI64At`, …) this module used to carry;
     // see docs/breaking-changes.md.
     fn curRoot(self: &Self): i64 {
-        return self.root
+        return jsonCurPack(self._docId, self.root)
     }
 
     fn curChild(self: &Self, cur: i64, index: i64): i64 {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return -1
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind != 4 || index < 0 || index >= node.childCount {
             return -1
         }
-        return self.childIdx[node.childStart + index]
+        return jsonCurPack(self._docId, self.childIdx[node.childStart + index])
     }
 
     fn curField(self: &Self, cur: i64, key: &string): i64 {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return -1
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind != 5 {
             return -1
         }
         for i in 0..node.childCount {
             if jsonKeyEq(self.source, self.keyOffsets[node.keyStart + i], self.keyLens[node.keyStart + i], key) {
-                return self.childIdx[node.childStart + i]
+                return jsonCurPack(self._docId, self.childIdx[node.childStart + i])
             }
         }
         return -1
     }
 
     fn curLen(self: &Self, cur: i64): i64 {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return 0
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind != 4 && node.kind != 5 {
             return 0
         }
@@ -418,17 +491,32 @@ impl Json {
     // Node kind at the cursor: 0 null, 1 bool, 2 number, 3 string, 4 array,
     // 5 object; -1 if the cursor is invalid.
     fn curKind(self: &Self, cur: i64): i32 {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return -1
         }
-        return self.nodes[cur].kind
+        return self.nodes[raw].kind
+    }
+
+    // Whether `cur` is a cursor into THIS document (and in range). Branch on
+    // this for a cursor you did not navigate to yourself; the accessors abort
+    // on a foreign cursor instead. False for -1. Mirrors Sealed.holds.
+    fn curHolds(self: &Self, cur: i64): bool {
+        if cur < 0 {
+            return false
+        }
+        if (cur >> 32) != self._docId {
+            return false
+        }
+        return (cur & 0xFFFFFFFF) < self.nodes.len()
     }
 
     fn curInt(self: &Self, cur: i64): Option<i64> {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return Option.None
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind == 2 {
             return jsonNodeInt(self.source, node)
         }
@@ -437,10 +525,11 @@ impl Json {
 
     // Unsigned read, for values above i64::MAX that `curInt` must reject.
     fn curUint(self: &Self, cur: i64): Option<u64> {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return Option.None
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind == 2 {
             return jsonNodeUint(self.source, node)
         }
@@ -448,10 +537,11 @@ impl Json {
     }
 
     fn curFloat(self: &Self, cur: i64): Option<f64> {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return Option.None
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind == 2 {
             return Option.Some(node.numVal)
         }
@@ -459,10 +549,11 @@ impl Json {
     }
 
     fn curBool(self: &Self, cur: i64): Option<bool> {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return Option.None
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind == 1 {
             return Option.Some(node.boolVal)
         }
@@ -470,10 +561,11 @@ impl Json {
     }
 
     fn curStr(self: &Self, cur: i64): Option<string> {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return Option.None
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind == 3 {
             return Option.Some(jsonMaterializeStr(self.source, node.strStart, node.strLen))
         }
@@ -563,7 +655,7 @@ impl Json {
     // accessor already reads as "nothing here", so the walk is total for any input.
     // A key containing '.' or '[' is not addressable this way; use get()/at().
     fn curPath(self: &Self, p: &string): i64 {
-        var cur: i64 = self.root
+        var cur: i64 = self.curRoot()
         var seg: string = ""
         var inIndex: bool = false
         var idx: i64 = 0
@@ -612,7 +704,7 @@ impl Json {
         if cur < 0 {
             return Option.None
         }
-        return Option.Some(jsonExtractSubtree(self, cur))
+        return Option.Some(jsonExtractSubtree(self, jsonCurIdx(cur)))
     }
 
     fn strPath(self: &Self, p: &string): Option<string> {
@@ -637,10 +729,11 @@ impl Json {
     // Empty string for a non-object cursor or an out-of-range index; "" is also a legal
     // JSON key, so bound the walk with `curLen` rather than testing the result.
     fn curKeyAt(self: &Self, cur: i64, index: i64): string {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return ""
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind != 5 || index < 0 || index >= node.childCount {
             return ""
         }
@@ -652,21 +745,23 @@ impl Json {
     // "element i of an array" and "entry i of an object" are different questions, and one
     // function answering both would make an object walked as an array look like it worked.
     fn curValueAt(self: &Self, cur: i64, index: i64): i64 {
-        if cur < 0 {
+        let raw = jsonCurResolve(self, cur)
+        if raw < 0 {
             return -1
         }
-        let node = self.nodes[cur]
+        let node = self.nodes[raw]
         if node.kind != 5 || index < 0 || index >= node.childCount {
             return -1
         }
-        return self.childIdx[node.childStart + index]
+        return jsonCurPack(self._docId, self.childIdx[node.childStart + index])
     }
 
     fn keys(self: &Self): Vec<string> {
         var result: Vec<string> = Vec.new()
+        let root = self.curRoot()
         var i: i64 = 0
-        while i < self.curLen(self.root) {
-            result.push(self.curKeyAt(self.root, i))
+        while i < self.curLen(root) {
+            result.push(self.curKeyAt(root, i))
             i = i + 1
         }
         return result
@@ -762,8 +857,13 @@ fn jsonExtractSubtree(src: &Json, nodeIdx: i64): Json {
         )
         processed = processed + 1
     }
+    // A fresh brand, not src's: extraction renumbers the pool (BFS order, the
+    // subtree root becomes node 0), so a cursor into src resolved against the
+    // extract would name a renumbered-wrong node. Its own brand turns that
+    // mistake into the named abort. No node-count assert needed here: the pool
+    // is a subset of one jsonParse already capped.
     return Json {
-        source: src.source.clone(), nodes: nodes, childIdx: childIdx, keyOffsets: keyOffsets, keyLens: keyLens, root: 0
+        source: src.source.clone(), nodes: nodes, childIdx: childIdx, keyOffsets: keyOffsets, keyLens: keyLens, root: 0, _docId: jsonMintDocId()
     }
 }
 
@@ -795,8 +895,13 @@ fn jsonParse(s: string): Result<Json> {
     if pos != s.len {
         return Result.Err("trailing json content at byte " + pos.toString())
     }
+    // A cursor gives the node index 32 bits (the brand takes the rest), so a
+    // pool past 2^32 nodes would pack a truncated index: in bounds, brand
+    // matching, and wrong. Same rule as seal's 2GB span cap: enforce at mint,
+    // not on resolve.
+    assert(nodes.len() <= 0xFFFFFFFF, "json: document exceeds 2^32 nodes, cursors cannot address it")
     return Result.Ok(Json {
-        source: s, nodes: nodes, childIdx: childIdx, keyOffsets: keyOffsets, keyLens: keyLens, root: rootIdx
+        source: s, nodes: nodes, childIdx: childIdx, keyOffsets: keyOffsets, keyLens: keyLens, root: rootIdx, _docId: jsonMintDocId()
     }
     )
 }

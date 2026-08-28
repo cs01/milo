@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: positioning
 purpose: honest account of where Rust genuinely wins over Milo, and the claims Milo may and may not make
-key-files: docs/ownership-model.md, docs/memory-safety-vs-rust.md, docs/design.md, std/arena.milo, std/seal.milo, std/shard.milo
+key-files: docs/ownership-model.md, docs/memory-safety-vs-rust.md, docs/design.md, std/arena.milo, std/seal.milo, std/shard.milo, std/json.milo
 update-when: the residue changes (a feature lands that closes one of the three gaps, or the safe-claim boundary moves)
 last-verified: 2026-08-22
 -->
@@ -21,7 +21,7 @@ checker proves the removal:
 |---|---|---|---|
 | 1 staleness | a stored reference never goes stale | removal (`free`/`clear` do not exist) | `Arena.freeze` |
 | 2 aliasing | disjoint `&mut` borrows | aliasing (ownership divides) | `shatter` / `weld` |
-| 3 invalidation | a borrow outlives its referent | mutation (no mutating method exists) | `seal` + `Span` |
+| 3 invalidation | a borrow outlives its referent | mutation (no mutating method exists) | `seal` + `Span`, branded `json` cursors |
 
 Each section below says what its mechanism closed and, at more length, what it did not. The residue
 did not disappear; it split into a compile-time half and a smaller runtime-checked half, and naming
@@ -91,12 +91,16 @@ against it (`Span`: two integers, `Copy`, storable anywhere) cannot be invalidat
 operation that could invalidate them exists. Mutation is not rejected by a check that might have a
 hole in it; it is absent from the type. There is no `unsafe` in the module.
 
-What does NOT close: a `Span` carries no record of WHICH buffer it was measured from. Resolving one
-against the wrong `Sealed` reads wrong-but-in-bounds bytes, or fails the bounds check. That is a
-deterministic logic error, never memory-unsafety, and it is precisely what Rust's lifetimes reject
-outright. Binding a span to one buffer at compile time needs a lifetime or a brand to carry the
-tie, and neither exists under the axiom. Buffers that must keep mutating while views are held (an
-editor's rope, an incremental parser's live text) stay on offsets-by-convention.
+What does NOT close at compile time: nothing ties a `Span` to the buffer it was
+measured from, or a `json` cursor to the document it was navigated in. Rust
+rejects that mix-up outright with an invariant lifetime; binding it statically
+needs a lifetime or a type-level brand, and neither exists under the axiom. Both
+types therefore carry a runtime brand instead (`Span._bufferId`,
+`Json._docId`): resolving against the wrong owner is a named abort, never
+wrong-but-in-bounds data. That is the demotion discipline below applied to the
+pattern's own gap, a runtime demotion rather than a compile-time rejection.
+Buffers that must keep mutating while views are held (an editor's rope, an
+incremental parser's live text) stay on offsets-by-convention.
 
 ## The claim discipline
 

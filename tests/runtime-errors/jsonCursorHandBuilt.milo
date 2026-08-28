@@ -1,0 +1,19 @@
+// @runtime-error: cursor belongs to a different document
+
+// The old cursor was a bare node index, so `0` (or any small integer) resolved
+// as a real node. A hand-built cursor carries brand 0, which no document ever
+// has (brands start at 1), so the old habit fails closed instead of quietly
+// working until the day it is a cross-document read.
+from "std/json" import {
+    Json
+}
+
+pub fn main(): i32 {
+    let doc = match Json.parse("[1,2,3]") {
+        Result.Ok(j) => j, Result.Err(_) => {
+            return 1
+        }
+    }
+    print($"{doc.curKind(0 as i64)}")
+    return 0
+}

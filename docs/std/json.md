@@ -98,6 +98,16 @@ fn Json.curFloat(self: &Json, cur: i64): Option<f64>
 
 _Undocumented._
 
+### `Json.curHolds`
+
+```milo
+fn Json.curHolds(self: &Json, cur: i64): bool
+```
+
+Whether `cur` is a cursor into THIS document (and in range). Branch on
+this for a cursor you did not navigate to yourself; the accessors abort
+on a foreign cursor instead. False for -1. Mirrors Sealed.holds.
+
 ### `Json.curInt`
 
 ```milo
@@ -155,12 +165,22 @@ fn Json.curRoot(self: &Json): i64
 
 `get`/`at` above return an owned Json by deep-cloning the whole document
 (source string + every node) per call — navigating a large doc thousands
-of times blows up to gigabytes. The cursor API instead treats a plain
-`i64` node index as a cursor into THIS document: navigation returns child
-indices (‑1 = missing) with zero allocation, and only leaf-string reads
-materialize (just that one string). Start at `curRoot()` and chain:
+of times blows up to gigabytes. The cursor API instead hands out an `i64`
+cursor into THIS document: navigation returns cursors (-1 = missing) with
+zero allocation, and only leaf-string reads materialize (just that one
+string). Start at `curRoot()` and chain:
   let user = doc.curField(doc.curChild(doc.curRoot(), 0), "name")
   match doc.curStr(user) { Option.Some(s) => ..., Option.None => ... }
+
+A cursor is not a bare node index: the document's brand rides in its
+high bits (see jsonCurResolve above). Resolving a cursor against a
+different Json used to read a wrong-but-in-bounds node of the other
+document and report nothing; now it aborts, naming the mistake. -1 still
+flows through every accessor as "nothing here", so navigation stays
+total for any in-document miss. A memberwise copy of a Json shares its
+brand, which is sound because copying preserves node numbering; the
+documents `get`/`at`/`path` return carry a fresh brand because
+extraction renumbers the pool.
 
 This is one of two ways to reach a nested value. The other is to chain the
 owned accessors with `Option.andThen` — `doc.at(0).andThen((j) => j.str("name"))`

@@ -17,6 +17,34 @@ Below 1.0 the MINOR is the breaking position: everything in this file shipped in
 [the package manager plan](plans/package-manager.md#the-milo-constraint)). A release
 marker is added here each time a version is cut.
 
+## `std/json` cursors are branded with their document (2026-08-28)
+
+**Cursor values from `curRoot`/`curChild`/`curField`/`curValueAt`/`curPath` are no
+longer bare node indices.** The document's identity now rides in the high 31 bits
+of the same `i64`, and every cursor accessor checks it: resolving a cursor
+against a `Json` other than the one that produced it aborts with
+`json: cursor belongs to a different document` instead of silently reading a
+wrong-but-in-bounds node of the other document. This is the runtime brand
+`seal.Span` already carries as `_bufferId`, applied to the other zero-copy
+handle in std (see docs/residue-vs-rust.md).
+
+No signature changed and `-1` still means "nothing here" everywhere, so code
+that navigates a document it parsed itself (every caller found in-tree and in
+downstream users) compiles and behaves identically. What does break:
+
+- A cursor invented by arithmetic (`0` for the root, `cur + 1`, a stored small
+  integer) now aborts when resolved: hand-built cursors carry brand 0, which no
+  document ever has. Navigate from `curRoot()` instead.
+- A cursor held across `get`/`at`/`path` never resolved to the extracted
+  document correctly (extraction renumbers the node pool); doing so now aborts
+  instead of returning plausible garbage.
+- Cursor values are no longer small integers when printed or stored; only `-1`
+  is stable. Nothing found in-tree relied on the numeric value.
+
+To branch on a cursor of unknown origin instead of aborting, use the new
+`curHolds(cur)`, the analogue of `Sealed.holds`. One new limit: a single
+document is capped at 2^32 nodes (enforced at parse, like seal's 2GB span cap).
+
 ## `std/net.gSigpipeIgnored` is no longer public (2026-08-22)
 
 **The `gSigpipeIgnored` global is now private to `std/net`.** Nothing outside that module

@@ -1,0 +1,29 @@
+// @runtime-error: cursor belongs to a different document
+
+// A cursor carries the identity of the document it was navigated in. Without
+// that brand this program printed "WRONG" and reported nothing: the cursor is
+// a valid node index for the other document, so neither the bounds check nor
+// anything else had a reason to object. Same demotion as seal's Span brand
+// (docs/residue-vs-rust.md): a wrong answer becomes a named failure.
+from "std/json" import {
+    Json
+}
+
+pub fn main(): i32 {
+    let a = match Json.parse("{\"name\":\"right\"}") {
+        Result.Ok(j) => j, Result.Err(_) => {
+            return 1
+        }
+    }
+    let b = match Json.parse("{\"name\":\"WRONG\"}") {
+        Result.Ok(j) => j, Result.Err(_) => {
+            return 1
+        }
+    }
+    let curA = a.curField(a.curRoot(), "name")
+    print(a.curStr(curA) ?? "?")
+
+    // Same shape, perfectly in bounds for b. Different document.
+    print(b.curStr(curA) ?? "?")
+    return 0
+}

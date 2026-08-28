@@ -1,0 +1,434 @@
+// The flight model, and nothing else.
+//
+// It imports std/math and ./geom, so its whole closure is package-free and
+// tests/fixtures/flybyFlight.milo can build it anywhere. That is the point: a
+// flight model is the one part of this program with NO visual tell when it goes
+// wrong by a factor of two. An aircraft that takes thirty seconds to come round
+// instead of seven still looks like an aircraft in a screenshot, and the only
+// way to notice is to fly it and be vaguely dissatisfied.
+//
+// Arcade, still. No stall, no spin, no fuel, no way to break it. What changed is
+// that it no longer FAKES THE AIR. The old model was six lines: bank fed yaw
+// through a constant, pitch was commanded directly, speed eased to one of two
+// numbers, and position advanced along the nose. It had no wind in it at all —
+// `grep wind` found a windscreen and a triangle winding — so the live weather it
+// draws so carefully was decoration the aircraft could not feel.
+//
+// Three things are modelled honestly now and one is deliberately not:
+//
+//   AIRSPEED IS NOT GROUNDSPEED. The throttle and the turn act on airspeed; the
+//     position advances by airspeed PLUS the wind vector. Drift, crab and a
+//     downwind leg that eats the ground while the ASI never moves all fall out
+//     of that one separation, and none of them are possible if the wind is
+//     merely added to the velocity that gets displayed.
+//   ALTITUDE HOLD. The vertical axis commands a RATE OF CLIMB, not an attitude.
+//     A pitch axis that self-centres cannot hold a climb and one that does not
+//     needs trimming; a vertical-speed command needs neither, and it holds
+//     height through a turn for free.
+//   DENSITY ALTITUDE. Thrust and climb fall with air density, so a hot
+//     afternoon really is mushier than a cold morning. It comes off the same
+//     station observation the sky is built from.
+//
+//   THE TURN RATE IS NOT TRUTHFUL, and `turnGain` says by how much. `rate =
+//     g*tan(bank)/V` at 175 m/s and 40 degrees of bank is a 135-second circle.
+//     The gain is 19, which is a large number and is stated rather than hidden:
+//     this is a fast jet flown at arcade turn rates, and 19 is what it costs to
+//     keep the seven-second circle the game already had. The RELATION is kept
+//     rather than replaced by a constant rate, which is what buys the part worth
+//     having — a burner pass comes round visibly wider than a cruise pass, and
+//     banking harder is what tightens it.
+
+from "std/math" import {
+    Math
+}
+from "./geom" import {
+    PI
+}
+
+// Degrees to radians. The observation reports a wind direction in degrees and
+// the instruments read out in degrees; everything between them is radians.
+pub let DEG: f64 = 0.017453292519943295
+
+let G: f64 = 9.81
+
+pub struct FlightConfig {
+    // Airspeed at a closed throttle, at an open one, and with the burner lit.
+    minSpeed: f64,
+    cruiseSpeed: f64,
+    boostSpeed: f64,
+    // Radians per second of roll at full stick, and the bank it stops at.
+    rollRate: f64,
+    maxBank: f64,
+    boostBank: f64,
+    // Radians per second of yaw at full rudder.
+    rudderRate: f64,
+    // Metres per second of commanded climb at full stick.
+    climbRate: f64,
+    // How much faster than g*tan(bank)/V the aircraft actually turns. See the
+    // file header: large, deliberate, and scaling the relation rather than
+    // replacing it.
+    turnGain: f64,
+    // The turn relation is evaluated at the airspeed clamped into this band.
+    // The upper end is what makes a fast pass turn wider; the lower end stops a
+    // slow one from turning on a sixpence.
+    turnRefLo: f64,
+    turnRefHi: f64,
+    // Seconds for the airspeed to close most of the way onto its command.
+    speedTau: f64,
+    // The nose is cosmetic — the climb rate is the truth — but it still has a
+    // limit, and it is the one the old model clamped its pitch to.
+    maxPitch: f64,
+    // Hard envelope. Nothing inside the model may leave it, whatever the input.
+    floorSpeed: f64,
+    ceilSpeed: f64,
+}
+
+// The numbers that define the feel. Every one of them is asserted in
+// tests/fixtures/flybyFlight.milo with bounds tight enough to catch a
+// regression and loose enough to survive tuning.
+pub fn flightConfig(): FlightConfig {
+    return FlightConfig {
+        minSpeed: 130.0,
+        cruiseSpeed: 175.0,
+        boostSpeed: 320.0,
+        // 0.62 rad/s onto a 0.70 rad limit is 1.13 s to full bank, which is the
+        // "roll builds over about a second rather than a third of one" the old
+        // filtered roll was tuned for. Rate-limited rather than filtered: an
+        // exponential never actually reaches the value you asked for, which
+        // reads as lag at any time constant.
+        rollRate: 0.62,
+        maxBank: 0.70,
+        boostBank: 0.90,
+        rudderRate: 0.35,
+        // 90 m/s. Large because the aircraft is: it is what 175 m/s at the old
+        // 0.55 rad pitch limit was already climbing at.
+        climbRate: 90.0,
+        turnGain: 19.0,
+        turnRefLo: 120.0,
+        turnRefHi: 430.0,
+        speedTau: 1.1,
+        maxPitch: 0.55,
+        floorSpeed: 110.0,
+        ceilSpeed: 430.0,
+    }
+}
+
+// The block of air the aircraft is flying through, in world axes. Everything
+// here is derived from a surface observation; `airStill` is what a place with no
+// feed gets, and it is calm ISA rather than a plausible-looking invention.
+pub struct Air {
+    windX: f64,
+    windZ: f64,
+    // Gust spread: how much more the gusts are than the mean wind. This is what
+    // turbulence is scaled by, so a calm day is glassy by construction.
+    gust: f64,
+    // Density over ISA sea level. Thrust and climb are both multiplied by it.
+    density: f64,
+}
+
+pub fn airStill(): Air {
+    return Air {
+        windX: 0.0, windZ: 0.0, gust: 0.0, density: 1.0
+    }
+}
+
+// Build the air from what a station actually reports.
+//
+// `dirDeg` is METEOROLOGICAL: where the wind comes FROM. Flying it as where it
+// goes to reverses every drift in the game and is invisible in a screenshot.
+//
+// The wind aloft is stronger than the ten-metre reading. A power law is plenty
+// for the feel of it, and it is why a climb into a headwind slows the track.
+pub fn airOf(dirDeg: f64, windMps: f64, gustMps: f64, tempC: f64, pressureHpa: f64, altM: f64): Air {
+    let to = (dirDeg + 180.0) * DEG
+    let shear = Math.pow(Math.maxF64(altM, 10.0) / 10.0, 0.16)
+    let speed = windMps * shear
+    // World axes: +x is east and +z is north, the same pair the position
+    // integrates along, so a wind blowing TO 090 is +x.
+    let wx = Math.sin(to) * speed
+    let wz = Math.cos(to) * speed
+
+    // Density ratio from the ideal gas law against ISA sea level, with a rough
+    // pressure lapse for the height the aircraft is at.
+    let tempK = tempC + 273.15 - 0.0065 * altM
+    let lapse = 1.0 - (0.0065 * altM) / (tempC + 273.15)
+    var press = pressureHpa
+    if lapse > 0.0 {
+        press = pressureHpa * Math.pow(lapse, 5.256)
+    }
+    let dens = (press / 1013.25) * (288.15 / Math.maxF64(tempK, 200.0))
+    return Air {
+        windX: wx,
+        windZ: wz,
+        gust: Math.maxF64(0.0, gustMps - windMps),
+        density: Math.clampF64(dens, 0.35, 1.35),
+    }
+}
+
+// What the pilot is asking for this frame. All five are -1..1 except `boost`,
+// which is 0..1 so a trigger can be analogue later without changing this.
+pub struct FlightIn {
+    roll: f64,
+    // Vertical SPEED command, positive climbs. Not an attitude.
+    lift: f64,
+    yaw: f64,
+    throttle: f64,
+    boost: f64,
+}
+
+pub fn flightInZero(): FlightIn {
+    return FlightIn {
+        roll: 0.0, lift: 0.0, yaw: 0.0, throttle: 0.0, boost: 0.0
+    }
+}
+
+pub struct Flight {
+    x: f64,
+    y: f64,
+    z: f64,
+    // Heading about +y, the same convention the rest of the game already uses:
+    // forward is (sin heading, cos heading) and heading INCREASES to the right.
+    heading: f64,
+    bank: f64,
+    // Cosmetic. It follows the flight path; it does not drive it.
+    pitch: f64,
+    airspeed: f64,
+    // The lever, 0..1. It commands a SPEED rather than a power, so closing it
+    // actively slows the aircraft instead of waiting for drag. It starts open:
+    // with no throttle key touched the aircraft cruises exactly where it used to.
+    throttle: f64,
+    // Rate of climb through the air, m/s. Commanded, then damped.
+    climb: f64,
+    // Velocity over the GROUND. Airspeed plus wind, which is what the map sees
+    // and what the flight path marker is drawn from.
+    velX: f64,
+    velY: f64,
+    velZ: f64,
+    // Body rates in degrees per second, measured from the attitude that actually
+    // resulted rather than from the command. Reporting the command here would
+    // make the instruments agree with the controller instead of with the
+    // aircraft, which is exactly the reading that hides a bug.
+    rollRateDps: f64,
+    pitchRateDps: f64,
+    yawRateDps: f64,
+    // Load factor in the aircraft's own vertical, in g.
+    loadFactor: f64,
+    // Turbulence is a BOUNDED OFFSET on the attitude, never a rate added to it.
+    // Integrating it is a resonance, not weather: the aircraft rocks
+    // continuously and fights its own wings-level damping.
+    turbPhase: f64,
+    turbBank: f64,
+    turbPitch: f64,
+}
+
+pub fn flightNew(): Flight {
+    return Flight {
+        x: 0.0, y: 0.0, z: 0.0,
+        heading: 0.0, bank: 0.0, pitch: 0.0,
+        airspeed: 175.0, throttle: 1.0, climb: 0.0,
+        velX: 0.0, velY: 0.0, velZ: 0.0,
+        rollRateDps: 0.0, pitchRateDps: 0.0, yawRateDps: 0.0,
+        loadFactor: 1.0,
+        turbPhase: 0.0, turbBank: 0.0, turbPitch: 0.0,
+    }
+}
+
+// Put the aircraft somewhere, straight and level on a heading, at cruise.
+pub fn flightReset(f: &mut Flight, cfg: &FlightConfig, x: f64, y: f64, z: f64, heading: f64) {
+    f.x = x
+    f.y = y
+    f.z = z
+    f.heading = heading
+    f.bank = 0.0
+    f.pitch = 0.0
+    f.climb = 0.0
+    f.airspeed = cfg.cruiseSpeed
+    f.throttle = 1.0
+    f.velX = 0.0
+    f.velY = 0.0
+    f.velZ = 0.0
+    f.rollRateDps = 0.0
+    f.pitchRateDps = 0.0
+    f.yawRateDps = 0.0
+    f.loadFactor = 1.0
+    f.turbBank = 0.0
+    f.turbPitch = 0.0
+}
+
+// Compass heading, 0..360, clockwise from north. The stored heading already runs
+// clockwise, so this is a wrap and a conversion and no sign flip.
+pub fn flightHeadingDeg(f: &Flight): f64 {
+    var d = (f.heading / DEG) % 360.0
+    if d < 0.0 {
+        d = d + 360.0
+    }
+    return d
+}
+
+// Speed over the ground. Differs from the airspeed by exactly the wind, which is
+// the most legible evidence in the game that the weather is real.
+pub fn flightGroundSpeed(f: &Flight): f64 {
+    return Math.sqrt(f.velX * f.velX + f.velZ * f.velZ)
+}
+
+// Where the aircraft is actually GOING, as against where its nose points. In
+// still air this is the heading; in a crosswind it differs by the drift angle.
+pub fn flightTrackDeg(f: &Flight): f64 {
+    if Math.abs(f.velX) < 1.0e-9 && Math.abs(f.velZ) < 1.0e-9 {
+        return flightHeadingDeg(f)
+    }
+    var d = Math.atan2(f.velX, f.velZ) / DEG
+    if d < 0.0 {
+        d = d + 360.0
+    }
+    return d
+}
+
+// The angle between where the nose points and where the aircraft goes, folded
+// into -180..180. Zero in still air, and it is the drift angle otherwise.
+pub fn flightDriftDeg(f: &Flight): f64 {
+    var d = flightTrackDeg(f) - flightHeadingDeg(f)
+    while d > 180.0 {
+        d = d - 360.0
+    }
+    while d < 0.0 - 180.0 {
+        d = d + 360.0
+    }
+    return d
+}
+
+pub fn flightPitchDeg(f: &Flight): f64 {
+    return f.pitch / DEG
+}
+
+pub fn flightBankDeg(f: &Flight): f64 {
+    return Math.abs(f.bank) / DEG
+}
+
+// What fraction of the full commanded climb the aircraft can actually deliver.
+//
+// A named function rather than a line inside the step because it is otherwise
+// unobservable: density also moves the commanded AIRSPEED, and airspeed is the
+// other factor here, so deleting the density term entirely still leaves "a hot
+// day climbs worse" true through the speed path alone. The fixture asserts this
+// directly, at a fixed airspeed, where the two paths are separated.
+pub fn flightClimbAuthority(cfg: &FlightConfig, air: &Air, airspeed: f64): f64 {
+    return air.density * Math.clampF64(airspeed / cfg.cruiseSpeed, 0.35, 1.2)
+}
+
+pub fn flightUpdate(f: &mut Flight, cfg: &FlightConfig, air: &Air, inp: &FlightIn, dt: f64) {
+    let boost = Math.clampF64(inp.boost, 0.0, 1.0)
+
+    // ── Throttle ─────────────────────────────────────────────────────────────
+    // The lever moves at a finite rate so a tap is a nudge rather than a step.
+    let lever = Math.clampF64(inp.throttle, 0.0 - 1.0, 1.0)
+    f.throttle = Math.clampF64(f.throttle + lever * dt * 0.85, 0.0, 1.0)
+    let top = cfg.cruiseSpeed + (cfg.boostSpeed - cfg.cruiseSpeed) * boost
+    let wantSpeed = (cfg.minSpeed + (top - cfg.minSpeed) * f.throttle) * air.density
+
+    // ── Roll ─────────────────────────────────────────────────────────────────
+    let bankLimit = cfg.maxBank + (cfg.boostBank - cfg.maxBank) * boost
+    let prevBank = f.bank
+    let stick = Math.clampF64(inp.roll, 0.0 - 1.0, 1.0)
+    f.bank = f.bank + stick * cfg.rollRate * dt
+    // Wings level with the stick centred, slowly enough that a bank can be HELD
+    // through a lap of a landmark rather than flown continuously.
+    if Math.abs(stick) < 0.02 {
+        f.bank = f.bank * Math.pow(0.20, dt)
+    }
+    f.bank = Math.clampF64(f.bank, 0.0 - bankLimit, bankLimit)
+
+    // ── Turn ─────────────────────────────────────────────────────────────────
+    let prevHeading = f.heading
+    let vRef = Math.clampF64(f.airspeed, cfg.turnRefLo, cfg.turnRefHi)
+    let turnRate = G * Math.tan(f.bank) * cfg.turnGain / vRef
+    f.heading = f.heading + turnRate * dt
+    // The rudder is a small direct yaw, for lining up on a landmark rather than
+    // for turning. It is the only axis that changes heading without banking.
+    f.heading = f.heading + Math.clampF64(inp.yaw, 0.0 - 1.0, 1.0) * cfg.rudderRate * dt
+
+    // ── Climb ────────────────────────────────────────────────────────────────
+    // Climb performance falls with density and with speed: a slow aircraft in
+    // thin air is a mushy one, and that is a real and legible effect.
+    let authority = flightClimbAuthority(cfg, air, f.airspeed)
+    let wantClimb = Math.clampF64(inp.lift, 0.0 - 1.0, 1.0) * cfg.climbRate * authority
+    f.climb = f.climb + (wantClimb - f.climb) * (1.0 - Math.pow(0.02, dt))
+
+    // The nose follows the flight path, plus a little so a climb LOOKS like one.
+    // Deriving the climb from the attitude is the reverse of this and is what
+    // made the old model impossible to settle at a height.
+    let prevPitch = f.pitch
+    let fpa = Math.asin(Math.clampF64(f.climb / Math.maxF64(f.airspeed, 12.0), 0.0 - 0.6, 0.6))
+    let wantPitch = Math.clampF64(fpa * 1.25, 0.0 - cfg.maxPitch, cfg.maxPitch)
+    f.pitch = f.pitch + (wantPitch - f.pitch) * (1.0 - Math.pow(0.02, dt))
+
+    // ── Speed ────────────────────────────────────────────────────────────────
+    // Energy: climbing costs speed and descending gains it, on top of whatever
+    // the throttle asked for.
+    let gravityTerm = (0.0 - f.climb / Math.maxF64(f.airspeed, 12.0)) * G * 1.15
+    f.airspeed = f.airspeed + ((wantSpeed - f.airspeed) / cfg.speedTau + gravityTerm) * dt
+    f.airspeed = Math.clampF64(f.airspeed, cfg.floorSpeed, cfg.ceilSpeed)
+
+    // ── Turbulence ───────────────────────────────────────────────────────────
+    // Two sine products per axis, at incommensurate rates, so the chop does not
+    // read as a loop. Bounded by construction: it is an offset on the attitude
+    // the pilot commanded, and the commanded attitude is never written to.
+    f.turbPhase = f.turbPhase + dt
+    var bumpY = 0.0
+    f.turbBank = 0.0
+    f.turbPitch = 0.0
+    if air.gust > 0.3 {
+        let g = air.gust
+        let p = f.turbPhase
+        f.turbBank = Math.sin(p * 1.7 + 0.7) * Math.sin(p * 0.41 + 1.9) * g * 0.006
+        f.turbPitch = Math.sin(p * 2.1) * Math.sin(p * 0.33 + 0.4) * g * 0.003
+        bumpY = Math.sin(p * 2.7) * Math.sin(p * 0.9 + 1.3) * g * 0.6
+    }
+
+    if dt > 0.0 {
+        f.rollRateDps = (f.bank - prevBank) / DEG / dt
+        f.pitchRateDps = (f.pitch - prevPitch) / DEG / dt
+        f.yawRateDps = (f.heading - prevHeading) / DEG / dt
+    }
+    f.loadFactor = 1.0 / Math.maxF64(0.2, Math.cos(f.bank))
+
+    // ── Integrate ────────────────────────────────────────────────────────────
+    // Airspeed along the nose in the horizontal plane, plus the climb rate. The
+    // horizontal component is scaled by cos(fpa) so a steep climb does not
+    // secretly cover more ground than a level cruise at the same airspeed.
+    let cosFpa = Math.cos(fpa)
+    let airX = Math.sin(f.heading) * f.airspeed * cosFpa
+    let airZ = Math.cos(f.heading) * f.airspeed * cosFpa
+
+    // Ground velocity is airspeed PLUS wind. This is the whole of the drift.
+    f.velX = airX + air.windX
+    f.velZ = airZ + air.windZ
+    f.velY = f.climb + bumpY
+
+    f.x = f.x + f.velX * dt
+    f.y = f.y + f.velY * dt
+    f.z = f.z + f.velZ * dt
+}
+
+// The floor and the ceiling, applied after the caller has sampled the world at
+// the position the integration just produced.
+//
+// PUSHED, not clamped, and that is the existing behaviour kept deliberately: a
+// hard clamp on y with the nose still down flies the aircraft along an invisible
+// sheet of glass at full dive attitude. The push also bleeds the climb rate, so
+// the aircraft settles onto the pad instead of grinding against it.
+pub fn flightSettle(f: &mut Flight, floorY: f64, ceilY: f64, dt: f64) {
+    let k = Math.minF64(1.0, dt * 7.0)
+    if f.y < floorY {
+        f.y = f.y + (floorY - f.y) * k
+        if f.climb < 0.0 {
+            f.climb = f.climb * 0.85
+        }
+    }
+    if f.y > ceilY {
+        f.y = f.y + (ceilY - f.y) * k
+        if f.climb > 0.0 {
+            f.climb = f.climb * 0.85
+        }
+    }
+}

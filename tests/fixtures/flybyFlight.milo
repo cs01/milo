@@ -1,0 +1,350 @@
+// The gate on FLYBY's flight model.
+//
+// A flight model is the one part of that program with no visual tell when it
+// goes wrong by a factor of two: an aircraft that takes thirty seconds to come
+// round instead of seven still looks like an aircraft in a screenshot, and the
+// only way to notice is to fly it and be vaguely dissatisfied. So the numbers
+// that define the FEEL are asserted here, with bounds tight enough to catch a
+// regression and loose enough to survive tuning.
+//
+// It reaches no package: examples/games/flight/flight.milo imports std/math and
+// ./geom and nothing else, which is why this can run in CI at all. The renderer
+// beside it cannot.
+
+from "../../examples/games/flight/flight" import {
+    Air, Flight, FlightConfig, FlightIn,
+    airOf, airStill, flightBankDeg, flightConfig, flightGroundSpeed,
+    flightClimbAuthority, flightHeadingDeg, flightNew, flightReset, flightSettle,
+    flightUpdate, DEG
+}
+from "std/math" import {
+    Math
+}
+
+let DT: f64 = 1.0 / 60.0
+
+fn stick(roll: f64, lift: f64, yaw: f64, throttle: f64, boost: f64): FlightIn {
+    return FlightIn {
+        roll: roll, lift: lift, yaw: yaw, throttle: throttle, boost: boost
+    }
+}
+
+fn neutral(): FlightIn {
+    return stick(0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// A wind whose gust equals its mean, so turbulence is off and a run is
+// reproducible. The gust response is exercised by eye, not here.
+fn air(windMps: f64, dirDeg: f64): Air {
+    return airOf(dirDeg, windMps, windMps, 15.0, 1013.25, 400.0)
+}
+
+fn fresh(cfg: &FlightConfig, alt: f64, hdgDeg: f64): Flight {
+    var f = flightNew()
+    flightReset(f, cfg, 0.0, alt, 0.0, hdgDeg * DEG)
+    return f
+}
+
+// Fly `secs` with a fixed stick over flat ground at y = 0.
+fn fly(f: &mut Flight, cfg: &FlightConfig, a: &Air, inp: &FlightIn, secs: f64) {
+    let steps = (secs / DT) as i64
+    for _ in 0..steps {
+        flightUpdate(f, cfg, a, inp, DT)
+        flightSettle(f, 26.0, 100000.0, DT)
+    }
+}
+
+fn between(name: string, v: f64, lo: f64, hi: f64): bool {
+    if v >= lo && hi >= v {
+        return true
+    }
+    print(name + " OUT OF RANGE: " + v.toString() + " want " + lo.toString() + ".." + hi.toString())
+    return false
+}
+
+fn claim(name: string, ok: bool, detail: string): bool {
+    if ok {
+        return true
+    }
+    print(name + " FAILED: " + detail)
+    return false
+}
+
+// The throttle commands a SPEED rather than a power, so both ends of its range
+// are directly assertable. Density at 400 m takes a few percent off each, which
+// is why the bounds are not the config numbers exactly.
+fn speedBand(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var ok = true
+    var fast = fresh(cfg, 400.0, 0.0)
+    fly(fast, cfg, still, stick(0.0, 0.0, 0.0, 1.0, 0.0), 25.0)
+    ok = between("full throttle airspeed", fast.airspeed, 168.0, 180.0) && ok
+
+    var slow = fresh(cfg, 400.0, 0.0)
+    fly(slow, cfg, still, stick(0.0, 0.0, 0.0, 0.0 - 1.0, 0.0), 25.0)
+    ok = between("closed throttle airspeed", slow.airspeed, 125.0, 137.0) && ok
+    ok = claim("slow flight still flies", slow.y > 380.0, slow.y.toString()) && ok
+
+    var lit = fresh(cfg, 400.0, 0.0)
+    fly(lit, cfg, still, stick(0.0, 0.0, 0.0, 1.0, 1.0), 25.0)
+    ok = between("burner airspeed", lit.airspeed, 305.0, 325.0) && ok
+    return ok
+}
+
+// The complaint that a turn takes forever is the one thing this number answers.
+// The old model came round in about seven seconds at full bank and this must not
+// regress: the relation changed, the feel did not.
+fn turnRate(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var ok = true
+    var f = fresh(cfg, 400.0, 0.0)
+    let hard = stick(1.0, 0.0, 0.0, 0.0, 0.0)
+    var t = 0.0
+    var turned = 0.0
+    var last = flightHeadingDeg(f)
+    while t < 60.0 && turned < 360.0 {
+        flightUpdate(f, cfg, still, hard, DT)
+        var d = flightHeadingDeg(f) - last
+        while d < 0.0 - 180.0 {
+            d = d + 360.0
+        }
+        while d > 180.0 {
+            d = d - 360.0
+        }
+        turned = turned + d
+        last = flightHeadingDeg(f)
+        t = t + DT
+    }
+    ok = between("full circle at cruise", t, 6.0, 10.0) && ok
+    ok = claim("turns the way it banks", turned > 0.0, turned.toString()) && ok
+    ok = between("bank reached", flightBankDeg(f), cfg.maxBank / DEG - 2.0, cfg.maxBank / DEG + 0.5) && ok
+
+    // The relation is SCALED, not replaced: a burner pass must come round
+    // measurably wider than a cruise pass at the same bank. Replacing
+    // g*tan(bank)/V with a constant rate is what this catches, and nothing in a
+    // screenshot would show it.
+    var slowTurn = fresh(cfg, 400.0, 0.0)
+    fly(slowTurn, cfg, still, stick(1.0, 0.0, 0.0, 0.0 - 1.0, 0.0), 4.0)
+    var fastTurn = fresh(cfg, 400.0, 0.0)
+    fly(fastTurn, cfg, still, stick(1.0, 0.0, 0.0, 1.0, 1.0), 4.0)
+    ok = claim("a fast pass turns wider than a slow one", Math.abs(slowTurn.yawRateDps) > Math.abs(fastTurn.yawRateDps) * 1.5, slowTurn.yawRateDps.toString() + " vs " + fastTurn.yawRateDps.toString()) && ok
+    return ok
+}
+
+// How long full stick takes to become full bank. This is the number that reads
+// as responsive or as mushy, and nothing else in the model compensates for it.
+fn rollResponse(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var f = fresh(cfg, 400.0, 0.0)
+    let hard = stick(1.0, 0.0, 0.0, 0.0, 0.0)
+    let target = cfg.maxBank / DEG * 0.9
+    var t = 0.0
+    while t < 4.0 && flightBankDeg(f) < target {
+        flightUpdate(f, cfg, still, hard, DT)
+        t = t + DT
+    }
+    return between("roll to 90% of full bank", t, 0.8, 1.5)
+}
+
+// A pitch axis that self-centres cannot hold a height and one that does not
+// needs trimming. A vertical-speed command needs neither, and this is what says
+// the axis is actually wired that way.
+fn altitudeHold(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var ok = true
+    var level = fresh(cfg, 400.0, 0.0)
+    fly(level, cfg, still, neutral(), 40.0)
+    ok = claim("holds altitude hands off", Math.abs(level.y - 400.0) < 3.0, (level.y - 400.0).toString()) && ok
+
+    var turning = fresh(cfg, 400.0, 0.0)
+    fly(turning, cfg, still, stick(1.0, 0.0, 0.0, 0.0, 0.0), 30.0)
+    ok = claim("holds altitude in a turn", Math.abs(turning.y - 400.0) < 6.0, (turning.y - 400.0).toString()) && ok
+    return ok
+}
+
+fn climbAndDescent(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var ok = true
+    var up = fresh(cfg, 400.0, 0.0)
+    fly(up, cfg, still, stick(0.0, 1.0, 0.0, 1.0, 0.0), 10.0)
+    ok = between("climb rate", up.velY, 55.0, cfg.climbRate + 0.5) && ok
+    ok = claim("climb gains height", up.y - 400.0 > 500.0, (up.y - 400.0).toString()) && ok
+
+    var down = fresh(cfg, 4000.0, 0.0)
+    fly(down, cfg, still, stick(0.0, 0.0 - 1.0, 0.0, 0.0, 0.0), 10.0)
+    ok = claim("descends when asked", down.y < 3400.0, down.y.toString()) && ok
+
+    // Energy, not an absolute number: the commanded speed itself moves with
+    // density, so "faster than X" would be asserting the altitude the test runs
+    // at. What the model owes is that a descent is faster than level flight at
+    // the same lever setting in the same air.
+    var flat = fresh(cfg, 4000.0, 0.0)
+    fly(flat, cfg, still, stick(0.0, 0.0, 0.0, 0.0, 0.0), 10.0)
+    ok = claim("descent trades height for speed", down.airspeed > flat.airspeed + 1.5, down.airspeed.toString() + " vs " + flat.airspeed.toString()) && ok
+    return ok
+}
+
+fn rudder(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var f = fresh(cfg, 400.0, 90.0)
+    fly(f, cfg, still, stick(0.0, 0.0, 1.0, 0.0, 0.0), 1.0)
+    var turned = flightHeadingDeg(f) - 90.0
+    while turned < 0.0 - 180.0 {
+        turned = turned + 360.0
+    }
+    // An ABSOLUTE bound. Writing it as `cfg.rudderRate / DEG +- 4` reads well and
+    // is worthless: it moves with the constant it is supposed to guard, so it
+    // passes for every value the constant could take. Verified by doubling
+    // rudderRate and watching this line fail.
+    return between("rudder yaw rate", turned, 16.0, 24.0)
+}
+
+// The airspeed indicator must not move when the wind does, and the track over
+// the ground must. Adding the wind to the DISPLAYED velocity instead of to the
+// integration is the mistake this catches: both would move together and there
+// would be no drift at all.
+fn windDrift(cfg: &FlightConfig): bool {
+    var ok = true
+    // Calm air built the SAME way as the windy air: same temperature, same
+    // pressure, same height. Comparing against airStill() compares the density
+    // as well as the wind, and the airspeed difference it produces is the
+    // density, not a leak of the wind into the airspeed.
+    let calm = air(0.0, 270.0)
+    var still = fresh(cfg, 400.0, 0.0)
+    fly(still, cfg, calm, neutral(), 25.0)
+
+    // 270 is a westerly: it blows FROM the west, so an aircraft flying north is
+    // pushed east. Flying it as a wind blowing TO 270 reverses every drift in
+    // the game and is invisible in a screenshot.
+    let westerly = air(18.0, 270.0)
+    var windy = fresh(cfg, 400.0, 0.0)
+    fly(windy, cfg, westerly, neutral(), 25.0)
+
+    ok = claim("wind does not change airspeed", Math.abs(windy.airspeed - still.airspeed) < 0.5, windy.airspeed.toString() + " vs " + still.airspeed.toString()) && ok
+    ok = claim("wind does change the track", Math.abs(flightGroundSpeed(windy) - windy.airspeed) > 0.8, flightGroundSpeed(windy).toString() + " vs " + windy.airspeed.toString()) && ok
+    ok = claim("blown downwind", windy.x > 300.0, windy.x.toString()) && ok
+    ok = claim("still air does not drift", Math.abs(still.x) < 1.0, still.x.toString()) && ok
+
+    // Shear: the wind aloft is stronger than the ten-metre reading, so the same
+    // observation must push harder at height.
+    let low = airOf(270.0, 18.0, 18.0, 15.0, 1013.25, 100.0)
+    let high = airOf(270.0, 18.0, 18.0, 15.0, 1013.25, 3000.0)
+    ok = claim("wind is stronger aloft", high.windX > low.windX * 1.2, high.windX.toString() + " vs " + low.windX.toString()) && ok
+    return ok
+}
+
+// Thrust and climb fall with air density, so a hot afternoon is mushier than a
+// cold morning. It is a small effect and it is the reason the observation's
+// temperature and pressure are parsed at all.
+fn densityAltitude(cfg: &FlightConfig): bool {
+    let cold = airOf(0.0, 0.0, 0.0, 0.0 - 5.0, 1030.0, 400.0)
+    let hot = airOf(0.0, 0.0, 0.0, 38.0, 1000.0, 400.0)
+    var ok = claim("hot air is thinner", hot.density < cold.density * 0.92, hot.density.toString() + " vs " + cold.density.toString())
+
+    // At the SAME airspeed, so this is the density term alone. Asserting only
+    // the climb over ten seconds does not reach it: density also moves the
+    // commanded airspeed, and airspeed is the other factor in the authority, so
+    // the height gap survives deleting the density term entirely.
+    let hotAuth = flightClimbAuthority(cfg, hot, cfg.cruiseSpeed)
+    let coldAuth = flightClimbAuthority(cfg, cold, cfg.cruiseSpeed)
+    ok = claim("thin air costs climb authority", hotAuth < coldAuth * 0.93, hotAuth.toString() + " vs " + coldAuth.toString()) && ok
+
+    var hotClimb = fresh(cfg, 400.0, 0.0)
+    fly(hotClimb, cfg, hot, stick(0.0, 1.0, 0.0, 1.0, 0.0), 10.0)
+    var coldClimb = fresh(cfg, 400.0, 0.0)
+    fly(coldClimb, cfg, cold, stick(0.0, 1.0, 0.0, 1.0, 0.0), 10.0)
+    ok = claim("a hot day climbs worse", coldClimb.y > hotClimb.y + 50.0, coldClimb.y.toString() + " vs " + hotClimb.y.toString()) && ok
+    return ok
+}
+
+// Turbulence is an OFFSET on the commanded attitude, never a rate added to it.
+// Integrating it was a real bug in the model this was ported from: the aircraft
+// rocked continuously and fought its own wings-level damping, which is a
+// resonance rather than weather. An offset cannot accumulate, and this is what
+// says so.
+fn turbulenceBounded(cfg: &FlightConfig): bool {
+    let gusty = airOf(270.0, 8.0, 25.0, 15.0, 1013.25, 400.0)
+    var f = fresh(cfg, 400.0, 0.0)
+    var worst = 0.0
+    var moved = false
+    for _ in 0..3600 {
+        flightUpdate(f, cfg, gusty, neutral(), DT)
+        let m = Math.abs(f.turbBank)
+        if m > worst {
+            worst = m
+        }
+        if m > 0.002 {
+            moved = true
+        }
+    }
+    var ok = claim("gusts do move the aircraft", moved, worst.toString())
+    ok = claim("turbulence stays bounded", worst < 0.15, worst.toString()) && ok
+    ok = claim("turbulence does not bank the aircraft", Math.abs(f.bank) < 0.02, f.bank.toString()) && ok
+    return ok
+}
+
+// Pushed, not clamped: a hard stop on y with the nose still down flies the
+// aircraft along an invisible sheet of glass at full dive attitude. So the floor
+// is a rule the aircraft settles onto, and what must hold is that it never
+// reaches the ground the floor stands above.
+fn surfaces(cfg: &FlightConfig): bool {
+    let still = airStill()
+    var ok = true
+    var down = fresh(cfg, 300.0, 0.0)
+    fly(down, cfg, still, stick(0.0, 0.0 - 1.0, 0.0, 0.0, 0.0), 40.0)
+    ok = claim("never sinks to the ground", down.y > 10.0, down.y.toString()) && ok
+    ok = claim("settles near the floor", down.y < 26.0, down.y.toString()) && ok
+
+    var up = fresh(cfg, 400.0, 0.0)
+    let hard = stick(0.0, 1.0, 0.0, 1.0, 1.0)
+    let steps = (40.0 / DT) as i64
+    for _ in 0..steps {
+        flightUpdate(up, cfg, still, hard, DT)
+        flightSettle(up, 26.0, 2000.0, DT)
+    }
+    ok = claim("held under the ceiling", up.y < 2010.0, up.y.toString()) && ok
+    return ok
+}
+
+// Everything at once, at the rates a hand on a keyboard cannot reach, for a
+// hundred seconds. Nothing may leave the envelope and nothing may go non-finite.
+fn abuse(cfg: &FlightConfig): bool {
+    let gusty = airOf(200.0, 14.0, 30.0, 30.0, 990.0, 400.0)
+    var f = fresh(cfg, 1200.0, 0.0)
+    for i in 0..6000 {
+        let phase = (i as f64) / 60.0
+        var b = 0.0
+        if Math.sin(phase * 0.9) > 0.0 {
+            b = 1.0
+        }
+        let inp = stick(Math.sin(phase * 4.7 + 1.0), Math.sin(phase * 1.7), Math.sin(phase * 2.3), Math.sin(phase * 3.1), b)
+        flightUpdate(f, cfg, gusty, inp, DT)
+        flightSettle(f, 26.0, 12000.0, DT)
+    }
+    var ok = claim("stays finite under abuse", Math.isFinite(f.x) && Math.isFinite(f.y) && Math.isFinite(f.z) && Math.isFinite(f.airspeed) && Math.isFinite(flightGroundSpeed(f)), f.x.toString() + " " + f.y.toString() + " " + f.z.toString())
+    ok = claim("bank stays inside the limit", flightBankDeg(f) <= cfg.boostBank / DEG + 0.5, flightBankDeg(f).toString()) && ok
+    ok = claim("airspeed stays inside the envelope", f.airspeed >= cfg.floorSpeed && f.airspeed <= cfg.ceilSpeed, f.airspeed.toString()) && ok
+    ok = claim("load factor is sane", f.loadFactor >= 1.0 && f.loadFactor < 6.0, f.loadFactor.toString()) && ok
+    return ok
+}
+
+fn main() {
+    let cfg = flightConfig()
+    var ok = true
+    ok = speedBand(cfg) && ok
+    ok = turnRate(cfg) && ok
+    ok = rollResponse(cfg) && ok
+    ok = altitudeHold(cfg) && ok
+    ok = climbAndDescent(cfg) && ok
+    ok = rudder(cfg) && ok
+    ok = windDrift(cfg) && ok
+    ok = densityAltitude(cfg) && ok
+    ok = turbulenceBounded(cfg) && ok
+    ok = surfaces(cfg) && ok
+    ok = abuse(cfg) && ok
+    if ok {
+        print("flight model ok")
+    }
+}
+
+// @expect: flight model ok

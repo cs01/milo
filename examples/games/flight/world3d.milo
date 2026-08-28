@@ -19,6 +19,10 @@ from "./city" import {
 from "./geom" import {
     TAU, PI, foldIn, wrapPi
 }
+from "./flight" import {
+    Air, Flight, FlightConfig, FlightIn, airOf, airStill, flightConfig,
+    flightNew, flightSettle, flightUpdate
+}
 
 // The stretches of invented country the procedural world cycles through. An
 // enum rather than a bare i64: `theme` was compared against 0..3 in five places
@@ -276,6 +280,19 @@ pub struct World {
     trailTick: f64,
     boosting: bool,
     boostBlend: f64, // eased 0..1, drives every visual speed cue
+    // The dynamics. `plane` stays the presentation copy every other file already
+    // reads, and the two are synced either side of the step: IN first, because
+    // the arrival orbit, the fence and the tour all write `plane` directly and
+    // must not be overwritten by a model state that has not seen them.
+    //
+    // The turbulence offsets are the one thing that does NOT cross. They live in
+    // `flight` and are added at draw time, so they cannot be read back in and
+    // integrated -- an integrated gust is a resonance, not weather.
+    flight: Flight,
+    fcfg: FlightConfig,
+    // The block of air, rebuilt from the observation as the aircraft climbs,
+    // because the wind aloft is not the wind at ten metres.
+    air: Air,
     // One-frame event flags, drained by the main loop to fire sounds. Keeps the
     // simulation free of any dependency on audio.
     evRing: bool,
@@ -550,6 +567,9 @@ pub fn worldIn(seed: i64, places: Vec<City>, easy: bool): World {
         trailTick: 0.0,
         boosting: false,
         boostBlend: 0.0,
+        flight: flightNew(),
+        fcfg: flightConfig(),
+        air: airStill(),
         evRing: false,
         evBonus: false,
         evRegion: false,
@@ -991,6 +1011,50 @@ pub fn settleUnderCeiling(w: &mut World) {
 // Canyon floor it sat a few hundred metres BELOW the rim, and over the Yosemite
 // valley floor below the top of El Capitan, so climbing out of either one hit an
 // invisible lid partway up the wall you were trying to get above.
+// The attitude the aircraft is DRAWN at: what the pilot commanded, plus the
+// turbulence offset.
+//
+// The offset is added here and nowhere else. It is never written back into
+// `flight.bank` or `flight.pitch`, so it cannot be read in as a starting
+// attitude on the next step and accumulate. An integrated gust is a resonance
+// rather than weather: the aircraft rocks continuously and fights its own
+// wings-level damping, at any amplitude.
+pub fn drawRoll(w: &World): f64 {
+    return w.plane.roll + w.flight.turbBank
+}
+
+pub fn drawPitch(w: &World): f64 {
+    return w.plane.pitch + w.flight.turbPitch
+}
+
+// The block of air, from the observation the sky was built from.
+//
+// A place with no feed gets calm ISA rather than an invented breeze: the whole
+// point of the weather chain is that what you feel is what is measured, and a
+// fabricated wind that drifts you off a landmark is the one lie that would be
+// felt rather than merely seen.
+fn airForPlane(w: &World): Air {
+    if !w.env.obs.ok || !w.env.obs.hasWind {
+        return airStill()
+    }
+    // Height above the station, not above sea level: shear is measured from the
+    // ground the anemometer stands on.
+    let agl = Math.maxF64(10.0, w.plane.y - w.env.groundM)
+    var gust = w.env.obs.windMps
+    if w.env.obs.hasGust {
+        gust = w.env.obs.gustMps
+    }
+    var press = 1013.25
+    if w.env.obs.hasPressure {
+        press = w.env.obs.pressureHpa
+    }
+    var temp = 15.0
+    if w.env.obs.hasTemp {
+        temp = w.env.obs.tempC
+    }
+    return airOf(w.env.obs.windDirDeg, w.env.obs.windMps, gust, temp, press, agl)
+}
+
 fn ceilingY(w: &World, ground: f64): f64 {
     var top = ground + 900.0
     if w.city.loaded {
@@ -1393,7 +1457,7 @@ fn advanceMark(w: &mut World) {
     }
 }
 
-pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: bool) {
+pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, inYaw: f64, inThrottle: f64, boost: bool) {
     w.evRing = false
     w.evBonus = false
     w.evRegion = false
@@ -1494,30 +1558,15 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
         w.gainPop = w.gainPop - dt * 0.8
     }
 
-    // Arcade flight: roll banks the aircraft, and a banked aircraft turns. Pitch
-    // is direct. Both self-centre, so letting go levels you out.
-    // Roll is rate-controlled and self-centres, so letting go rolls wings-level.
     // Free flight. The autopilot flew the course for you, which made sense when
     // the course WAS the game; over a real city the point is to go and look at
     // something, and being steered is the opposite of that.
     //
-    // Gentler than the old --pro numbers: roll builds over about a second rather
-    // than a third of one, and tops out at 40 degrees instead of 72. Fast enough
-    // to turn onto a landmark, slow enough that the horizon never swings.
-    w.plane.roll = w.plane.roll + (inRoll * 1.2 - w.plane.roll * 1.6) * dt
-    w.plane.roll = Math.clampF64(w.plane.roll, 0.0 - 0.70, 0.70)
-    // Pitch HOLDS where you put it, with only a weak return to level. Springing
-    // back to zero the instant you let go is what made the vertical axis feel
-    // wrong — you could never settle into a climb.
-    w.plane.pitch = w.plane.pitch + (inPitch * 1.1 - w.plane.pitch * 0.5) * dt
-    w.plane.pitch = Math.clampF64(w.plane.pitch, 0.0 - 0.55, 0.55)
-    // A banked aircraft turns. This is the only way to change heading, which is
-    // what makes it feel like flying rather than driving.
-    w.plane.yaw = w.plane.yaw + w.plane.roll * 1.30 * dt
-
-    // Energy, not a constant: a dive trades height for speed and a climb trades
-    // it back. Throttle shifts the whole band. This is why the number on the HUD
-    // was static before — nothing was driving it but the boost key.
+    // The dynamics live in flight.milo, which reaches no package and is gated by
+    // tests/fixtures/flybyFlight.milo. What is left here is the wiring: the
+    // aircraft's own state, the air it is flying through, and the two surfaces
+    // it is not allowed through.
+    //
     // The afterburner is a switch, not a budget. It used to be a four-second tank
     // that took eight to refill and locked out when run dry — a rationing rule
     // that made sense when the goal was a hoop course with a par time. The goal
@@ -1535,46 +1584,55 @@ pub fn worldUpdate(w: &mut World, dt: f64, inRoll: f64, inPitch: f64, boost: boo
         bt = 1.0
     }
     w.boostBlend = w.boostBlend + (bt - w.boostBlend) * Math.minF64(1.0, dt * 5.0)
-    var target = 175.0
-    if burning {
-        target = 320.0
+
+    // The air, from the station the sky was built from. Rebuilt every frame
+    // because the shear term depends on the height the aircraft is at, and a
+    // climb through a windy afternoon is supposed to feel like one.
+    w.air = airForPlane(w)
+
+    // Sync IN. Everything upstream of here that moves the aircraft — the arrival
+    // orbit, the fence, the tour — writes `plane`, so `plane` is the truth on the
+    // way in and the model is the truth on the way out.
+    w.flight.x = w.plane.x
+    w.flight.y = w.plane.y
+    w.flight.z = w.plane.z
+    w.flight.heading = w.plane.yaw
+    w.flight.bank = w.plane.roll
+    w.flight.pitch = w.plane.pitch
+
+    var fin = FlightIn {
+        roll: inRoll, lift: inPitch, yaw: inYaw, throttle: inThrottle, boost: 0.0
     }
-    w.plane.speed = w.plane.speed + (target - w.plane.speed) * Math.minF64(1.0, dt * 0.9)
-    w.plane.speed = w.plane.speed - Math.sin(w.plane.pitch) * 140.0 * dt
-    w.plane.speed = Math.clampF64(w.plane.speed, 130.0, 430.0)
-
-    let cp = Math.cos(w.plane.pitch)
-    w.plane.x = w.plane.x + Math.sin(w.plane.yaw) * cp * w.plane.speed * dt
-    w.plane.z = w.plane.z + Math.cos(w.plane.yaw) * cp * w.plane.speed * dt
-    w.plane.y = w.plane.y + Math.sin(w.plane.pitch) * w.plane.speed * dt
-
-    // No corridor. It existed to keep the player on the ring course by turning
-    // the aircraft for them; with nowhere you are supposed to be, an invisible
-    // hand on the stick is just a bug you cannot see the cause of.
+    if burning {
+        fin.boost = 1.0
+    }
+    flightUpdate(w.flight, w.fcfg, w.air, fin, dt)
 
     // You cannot crash: the ground pushes you up and the sky pushes you down.
     // Roofs push too — flying THROUGH a tower is worse than being bumped over
     // it, and the push is the same rule the terrain already uses, so there is
     // still no fail state. The pad is a wing half-span, so a wing does not
     // disappear into a facade the fuselage cleared.
-    let ground = solidAt(w.city, w.plane.x, w.plane.z, 12.0)
-    let floorY = ground + 26.0
-    if w.plane.y < floorY {
-        w.plane.y = w.plane.y + (floorY - w.plane.y) * Math.minF64(1.0, dt * 7.0)
-        if w.plane.pitch < 0.0 {
-            w.plane.pitch = w.plane.pitch * 0.85
-        }
-    }
-    let ceil = ceilingY(w, ground)
-    if w.plane.y > ceil {
-        // Pushed rather than clamped, and the nose is levelled the same way the
-        // floor levels a dive. A hard clamp on y with the nose still up flies the
-        // aircraft along an invisible sheet of glass at full climb attitude.
-        w.plane.y = w.plane.y + (ceil - w.plane.y) * Math.minF64(1.0, dt * 7.0)
-        if w.plane.pitch > 0.0 {
-            w.plane.pitch = w.plane.pitch * 0.85
-        }
-    }
+    //
+    // Sampled at the position the integration just produced, not the one it
+    // started from, which is why this is a second call rather than an argument.
+    let ground = solidAt(w.city, w.flight.x, w.flight.z, 12.0)
+    flightSettle(w.flight, ground + 26.0, ceilingY(w, ground), dt)
+
+    // Sync OUT. `speed` is the AIRSPEED: it is what the aircraft flies at and
+    // what the old HUD number meant. The ground speed is a separate readout now,
+    // and the difference between the two is the wind.
+    w.plane.x = w.flight.x
+    w.plane.y = w.flight.y
+    w.plane.z = w.flight.z
+    w.plane.yaw = w.flight.heading
+    w.plane.roll = w.flight.bank
+    w.plane.pitch = w.flight.pitch
+    w.plane.speed = w.flight.airspeed
+
+    // No corridor. It existed to keep the player on the ring course by turning
+    // the aircraft for them; with nowhere you are supposed to be, an invisible
+    // hand on the stick is just a bug you cannot see the cause of.
 
     fence(w, dt)
 

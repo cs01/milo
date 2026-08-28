@@ -28,7 +28,7 @@ from "./texture" import {
     Texture, Vtx, vtxC
 }
 from "./world3d" import {
-    World
+    World, drawPitch, drawRoll
 }
 
 // How many points go around a fuselage ring. Eight is where a body stops reading
@@ -201,7 +201,7 @@ fn slab(b: &mut Build, a: Vec3, c: Vec3, d: Vec3, e: Vec3, up: &Vec3, thick: f64
 // small thing that costs four numbers and is the difference between a model being
 // flown and a model being carried.
 pub fn drawAirframe(s: &mut Scene, w: &World, v: &View, skin: &Texture, ail: f64, elev: f64) {
-    let f = frameOf(w.plane.yaw, w.plane.pitch, w.plane.roll)
+    let f = frameOf(w.plane.yaw, drawPitch(w), drawRoll(w))
     let origin = v3(w.plane.x, w.plane.y, w.plane.z)
     var b = buildNew()
 

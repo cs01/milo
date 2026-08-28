@@ -65,6 +65,14 @@ pub struct Obs {
     windDirDeg: f64,
     windMps: f64,
     hasWind: bool,
+    // Gusts, and the pressure the density altitude comes off. Both are reported
+    // by the same observation the wind is, and both are optional in it: a calm
+    // station sends no gust at all, so `hasGust` false means "not gusting"
+    // rather than "unknown", the same distinction every other field here keeps.
+    gustMps: f64,
+    hasGust: bool,
+    pressureHpa: f64,
+    hasPressure: bool,
     visibilityM: f64,
     hasVis: bool,
     // Lowest reported layer base, metres above ground. Negative when nothing was
@@ -86,6 +94,10 @@ pub fn obsEmpty(): Obs {
         windDirDeg: 270.0,
         windMps: 4.0,
         hasWind: false,
+        gustMps: 0.0,
+        hasGust: false,
+        pressureHpa: 1013.25,
+        hasPressure: false,
         visibilityM: 20000.0,
         hasVis: false,
         baseM: 0.0 - 1.0,
@@ -181,6 +193,24 @@ fn readStation(stationUrl: &string): Obs {
         }
         Option.None => {
             o.hasWind = false
+        }
+    }
+    match getF64(j, "properties.windGust.value") {
+        Option.Some(g) => {
+            // Same unit as windSpeed: the feed reports km/h whatever the unit
+            // code says.
+            o.gustMps = g / 3.6
+            o.hasGust = true
+        }
+        Option.None => {
+        }
+    }
+    match getF64(j, "properties.barometricPressure.value") {
+        Option.Some(pa) => {
+            o.pressureHpa = pa / 100.0
+            o.hasPressure = true
+        }
+        Option.None => {
         }
     }
     match getF64(j, "properties.visibility.value") {

@@ -81,8 +81,10 @@ pub let EPILOG: string = "built-in places (--place):
   honolulu    Honolulu — a skyline with a volcano behind it, and reef below
 
 controls:
-  UP / DOWN                   pitch
+  UP / DOWN                   climb / dive
   LEFT / RIGHT                bank
+  Q / E                       rudder
+  Z / X                       throttle: Z slows, X opens up
   SPACE                       afterburner — hold as long as you like
   ENTER                       fly somewhere else
   F                           fullscreen on / off
@@ -448,7 +450,7 @@ pub fn main(): i32 {
         // Off the frame path in the sense that matters: this yields to the
         // fetching task and returns, it never waits on the network itself.
         envWeatherTick(w.env, w.city.reach)
-        worldUpdate(w, dt, inp.moveX, inp.moveY, inp.boost)
+        worldUpdate(w, dt, inp.moveX, inp.moveY, inp.rudder, inp.throttle, inp.boost)
         let view = viewOf(w.cam, c.w, c.h)
         // Bind the scene target and match it to the window before any geometry is
         // recorded, because the render size is what the projection is built from.

@@ -7,15 +7,21 @@ from "sdl" import {
     SDL_QUIT
 }
 from "sdl/keys" import {
-    SC_A, SC_D, SC_DOWN, SC_ESCAPE, SC_F, SC_LEFT, SC_M, SC_RETURN, SC_RIGHT,
-    SC_S, SC_SPACE, SC_UP, SC_W
+    SC_A, SC_D, SC_DOWN, SC_E, SC_ESCAPE, SC_F, SC_LEFT, SC_M, SC_Q, SC_RETURN,
+    SC_RIGHT, SC_S, SC_SPACE, SC_UP, SC_W, SC_X, SC_Z
 }
 
 // One frame of input, snapshotted out of SDL so the rest of the game never
 // touches a pointer.
 pub struct Input {
     moveX: f64, // bank: -1 left, +1 right
-    moveY: f64, // pitch: +1 climb, -1 dive
+    moveY: f64, // climb rate: +1 climb, -1 dive
+    // Rudder, -1 left +1 right. A small direct yaw for lining up on a landmark;
+    // the bank axis is still how you turn.
+    rudder: f64,
+    // Throttle LEVER movement, not a throttle setting: the model integrates it,
+    // so a tap is a nudge and a hold winds the lever open or shut.
+    throttle: f64,
     boost: bool,
     quit: bool,
     mute: bool, // edge-triggered: true only on the frame M goes down
@@ -40,7 +46,8 @@ pub struct Input {
 
 pub fn inputNew(invert: bool): Input {
     return Input {
-        moveX: 0.0, moveY: 0.0, boost: false, quit: false, mute: false, muteHeld: false,
+        moveX: 0.0, moveY: 0.0, rudder: 0.0, throttle: 0.0,
+        boost: false, quit: false, mute: false, muteHeld: false,
         placeStep: 0, placeHeld: false,
         fullscreen: false, fullHeld: false,
         menuStep: 0, menuHeld: false,
@@ -52,6 +59,8 @@ pub fn inputNew(invert: bool): Input {
 pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
     inp.moveX = 0.0
     inp.moveY = 0.0
+    inp.rudder = 0.0
+    inp.throttle = 0.0
     inp.boost = false
     inp.mute = false
     inp.placeStep = 0
@@ -128,6 +137,22 @@ pub fn pollInput(inp: &mut Input, ev: &mut [u8; 64]) {
             inp.fullscreen = true
         }
         inp.fullHeld = fDown
+        // Rudder and throttle sit off the flight axes on purpose: Q/E and Z/X are
+        // where a hand already is, and rebinding W/S — which every player of this
+        // has used to climb since it had a pitch axis — to a throttle would be a
+        // worse trade than an extra pair of keys.
+        if ks[SC_Q] != 0 {
+            inp.rudder = inp.rudder - 1.0
+        }
+        if ks[SC_E] != 0 {
+            inp.rudder = inp.rudder + 1.0
+        }
+        if ks[SC_X] != 0 {
+            inp.throttle = inp.throttle + 1.0
+        }
+        if ks[SC_Z] != 0 {
+            inp.throttle = inp.throttle - 1.0
+        }
         if ks[SC_SPACE] != 0 {
             inp.boost = true
         }

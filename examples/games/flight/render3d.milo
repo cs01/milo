@@ -24,8 +24,8 @@ from "./live" import {
     envWeatherLabel, envStamp
 }
 from "./world3d" import {
-    World, Trail, Theme, nextTheme, heightAt, coverAt, TILE, VIEW_TILES, MARK_REACH,
-    fmtTime, fenceK, FENCE_SOFT, terrainTile
+    World, Trail, Theme, nextTheme, heightAt, coverAt, drawPitch, drawRoll, TILE,
+    VIEW_TILES, MARK_REACH, fmtTime, fenceK, FENCE_SOFT, terrainTile
 }
 from "./geom" import {
     Off, TAU, blockOf, foldIn, unfold, ringCount, ringOffset
@@ -2170,7 +2170,7 @@ fn drawPlane(c: &mut Canvas, s: &mut Scene, w: &World, v: &View, skin: &Texture)
     // The burner glow stays a 2D additive splat: it is light in the air, not a
     // surface, and a splat with no depth is both cheaper and more correct than
     // geometry for that.
-    let f = frameOf(w.plane.yaw, w.plane.pitch, w.plane.roll)
+    let f = frameOf(w.plane.yaw, drawPitch(w), drawRoll(w))
     let origin = v3(w.plane.x, w.plane.y, w.plane.z)
     // twin nozzles, glowing with throttle
     let k = (w.plane.speed - 170.0) / 170.0

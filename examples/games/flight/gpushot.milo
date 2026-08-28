@@ -224,7 +224,7 @@ pub fn main(): i32 {
         if i == WARMUP {
             loopStart = epochMillis()
         }
-        worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, false)
+        worldUpdate(w, 1.0 / 60.0, 0.0, 0.0, 0.0, 0.0, false)
         if mark >= 0 {
             aimAtMark(w, place, mark, dist)
         }

@@ -182,6 +182,7 @@ floatExponent
 floatLiteralNarrowing
 floatNanCompare
 floatRoundTrip
+flybyFlight
 flybyGeometry
 fnArgI64Lit
 fnInStruct

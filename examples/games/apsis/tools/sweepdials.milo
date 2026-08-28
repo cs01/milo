@@ -32,9 +32,18 @@ pub fn main(): i32 {
     var bad = 0
     for m in missions {
         let _ = calibrateMission(bodies, m, nowSeconds())
-        // The scale everything on this map is measured against: how far the
-        // target sits from the body the transfer is drawn around.
-        let scale = relPos(bodies, m.to, m.windowOpen, m.center).len()
+        // The scale everything on this map is measured against: how far out the
+        // transfer itself reaches, which is the FARTHER of its two endpoints and
+        // not the target alone. Measured against the target alone an inbound
+        // transfer is over the threshold before the solver has done anything --
+        // Earth->Mercury departs at 2.6x Mercury's orbit because that is where
+        // Earth is -- so the tool flagged sane inbound arcs as glitches.
+        let rTo = relPos(bodies, m.to, m.windowOpen, m.center).len()
+        let rFrom = relPos(bodies, m.from, m.windowOpen, m.center).len()
+        var scale = rTo
+        if rFrom > scale {
+            scale = rFrom
+        }
         let steps = 240
         let tofSteps = 12
         var worst = 0.0

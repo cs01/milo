@@ -1,0 +1,235 @@
+// The gate on FLYBY's runtime terrain.
+//
+// The game used to ship five places baked into the binary -- 229 MB of
+// orthophotos, a build that failed without them, and all five American because
+// the imagery endpoint the baker used stops at the border. Terrain and imagery
+// now come off keyless global tile services at runtime, and the arithmetic that
+// turns a latitude into a tile is the part with no visual tell: a Web Mercator
+// latitude that is subtly wrong gives a photograph of somewhere, correctly
+// stitched, of the wrong place.
+//
+// Only the pure half is here. A fixture that needs the internet is a fixture
+// that fails on a train, so nothing below opens a socket.
+
+from "../../examples/games/flight/terrain" import {
+    EQUATOR_MPP, TILE_PX,
+    latOfTileY, lonOfTileX, metresPerPixel, terrariumHeight, tileXOf, tileYOf,
+    zoomForMetres
+}
+from "std/math" import {
+    Math
+}
+
+fn claim(name: string, ok: bool, detail: string): bool {
+    if ok {
+        return true
+    }
+    print(name + " FAILED: " + detail)
+    return false
+}
+
+fn near(name: string, v: f64, want: f64, tol: f64): bool {
+    return claim(name, Math.abs(v - want) < tol, v.toString() + " want " + want.toString())
+}
+
+// Round trip: every latitude and longitude has to come back through the
+// projection as itself. This is the assertion that catches a sign, a missing
+// factor of two, or degrees left in radians -- none of which look like anything
+// except a photograph of the wrong place.
+fn roundTrip(): bool {
+    var ok = true
+    var worstLon = 0.0
+    var worstLat = 0.0
+    for z in 0..16 {
+        for i in 0..73 {
+            let lon = 0.0 - 180.0 + (i as f64) * 5.0
+            let back = lonOfTileX(tileXOf(lon, z), z)
+            let d = Math.abs(back - lon)
+            if d > worstLon {
+                worstLon = d
+            }
+        }
+        for i in 0..69 {
+            let lat = 0.0 - 85.0 + (i as f64) * 2.5
+            let back = latOfTileY(tileYOf(lat, z), z)
+            let d = Math.abs(back - lat)
+            if d > worstLat {
+                worstLat = d
+            }
+        }
+    }
+    ok = claim("longitude round trips", worstLon < 1.0e-9, worstLon.toString()) && ok
+    ok = claim("latitude round trips", worstLat < 1.0e-9, worstLat.toString()) && ok
+    return ok
+}
+
+// The corners of the world, and the fact that tile Y runs SOUTH as it increases.
+// Getting that backwards is a map that is upside down, which -- over terrain with
+// no writing on it -- looks like terrain.
+fn orientation(): bool {
+    var ok = true
+    ok = near("zoom 0 is one tile wide", tileXOf(0.0, 0), 0.5, 1.0e-12) && ok
+    ok = near("the antimeridian is x=0", tileXOf(0.0 - 180.0, 0), 0.0, 1.0e-12) && ok
+    ok = near("the equator is halfway down", tileYOf(0.0, 0), 0.5, 1.0e-12) && ok
+
+    ok = claim("north is a SMALLER y", tileYOf(60.0, 8) < tileYOf(0.0 - 60.0, 8), tileYOf(60.0, 8).toString() + " vs " + tileYOf(0.0 - 60.0, 8).toString()) && ok
+    ok = claim("east is a LARGER x", tileXOf(60.0, 8) > tileXOf(0.0 - 60.0, 8), tileXOf(60.0, 8).toString() + " vs " + tileXOf(0.0 - 60.0, 8).toString()) && ok
+
+    // Zoom doubles the grid, which is the whole definition of a zoom level.
+    ok = near("zoom doubles", tileXOf(45.0, 5), tileXOf(45.0, 4) * 2.0, 1.0e-9) && ok
+
+    // Beyond the Mercator square the projection is clamped rather than allowed to
+    // run to infinity. An unclamped pole gives a tile index of a few billion and
+    // a fetch for a tile that does not exist.
+    let n = Math.pow(2.0, 10.0)
+    ok = claim("the north pole is inside the grid", tileYOf(90.0, 10) >= 0.0, tileYOf(90.0, 10).toString()) && ok
+    ok = claim("the south pole is inside the grid", tileYOf(0.0 - 90.0, 10) <= n, tileYOf(0.0 - 90.0, 10).toString()) && ok
+
+    // And a latitude BEYOND the pole -- which is nonsense input, and is what a bad
+    // parse hands you -- clamps to the edge rather than wrapping round to a real
+    // place. Without the clamp on the way in, sin(95 degrees) is sin(85 degrees)
+    // and the projection cheerfully returns a tile a fifth of the way down the
+    // world: a fetch that succeeds, imagery that decodes, and a flight over
+    // somewhere else entirely.
+    ok = near("past the pole clamps to the edge", tileYOf(95.0, 10), 0.0, 1.0e-9) && ok
+    ok = near("past the other pole too", tileYOf(0.0 - 95.0, 10), n, 1.0e-9) && ok
+    return ok
+}
+
+// Mercator stretches with latitude. A zoom that is 30 m a pixel at the equator is
+// 24 m in San Francisco and 15 m in Reykjavik, so choosing a zoom without the
+// latitude in it is choosing a different resolution for every city -- which shows
+// up as one place being blurry and looks like that place's data being poor.
+fn resolution(): bool {
+    var ok = true
+    ok = near("zoom 0 at the equator", metresPerPixel(0.0, 0), EQUATOR_MPP, 1.0e-6) && ok
+    ok = near("every zoom halves it", metresPerPixel(0.0, 10), EQUATOR_MPP / 1024.0, 1.0e-6) && ok
+    // 256 pixels to a tile, so a zoom-0 tile is the equator.
+    ok = near("a zoom 0 tile is the equator", metresPerPixel(0.0, 0) * (TILE_PX as f64), 40075016.686, 1.0) && ok
+
+    let atSF = metresPerPixel(37.77, 12)
+    let atEq = metresPerPixel(0.0, 12)
+    ok = claim("latitude shrinks the pixel", atSF < atEq * 0.85, atSF.toString() + " vs " + atEq.toString()) && ok
+    ok = near("and by exactly the cosine", atSF, atEq * Math.cos(37.77 * 3.141592653589793 / 180.0), 1.0e-6) && ok
+
+    // The zoom chooser picks the closest, and it is monotone: asking for a finer
+    // grid never returns a coarser tile.
+    var prev = 0
+    var monotone = true
+    for i in 1..40 {
+        let want = 200.0 / (i as f64)
+        let z = zoomForMetres(37.77, want, 6, 13)
+        if z < prev {
+            monotone = false
+        }
+        prev = z
+    }
+    ok = claim("a finer grid never picks a coarser zoom", monotone, "") && ok
+    // Asking for exactly a zoom's own resolution must return exactly that zoom.
+    // Monotonicity and the bounds both survive an off-by-one in the search; this
+    // is what pins WHICH level it lands on, and a level out is a factor of two in
+    // ground resolution.
+    var exact = true
+    for z in 7..13 {
+        if zoomForMetres(37.77, metresPerPixel(37.77, z), 6, 13) != z {
+            exact = false
+        }
+    }
+    ok = claim("an exact request returns that zoom", exact, "") && ok
+    ok = claim("the chooser respects its bounds", zoomForMetres(37.77, 0.01, 6, 13) == 13 && zoomForMetres(37.77, 1.0e9, 6, 13) == 6, zoomForMetres(37.77, 0.01, 6, 13).toString()) && ok
+    return ok
+}
+
+// Terrarium packs an elevation in metres across three bytes with a 32768 offset,
+// which is what lets it carry the Dead Sea and the Mariana Trench in unsigned
+// bytes. Dropping the offset puts every coastline 32 km in the air, and scaling
+// it wrong makes the whole world a gentle dome -- neither of which reads as an
+// error, they read as terrain.
+fn terrarium(): bool {
+    var ok = true
+    ok = near("sea level", terrariumHeight(128, 0, 0), 0.0, 1.0e-9) && ok
+    ok = near("one metre", terrariumHeight(128, 1, 0), 1.0, 1.0e-9) && ok
+    ok = near("a fraction of a metre", terrariumHeight(128, 0, 128), 0.5, 1.0e-9) && ok
+    ok = near("below sea level", terrariumHeight(127, 255, 0), 0.0 - 1.0, 1.0e-9) && ok
+    // Everest and the Dead Sea, to the metre, which is the range the encoding
+    // exists for.
+    ok = near("Everest", terrariumHeight(162, 145, 0), 8849.0, 1.0) && ok
+    ok = near("the Dead Sea", terrariumHeight(126, 82, 0), 0.0 - 430.0, 1.0) && ok
+    // Monotone across the whole range, and the ends are the ends.
+    ok = near("the floor", terrariumHeight(0, 0, 0), 0.0 - 32768.0, 1.0e-9) && ok
+    ok = claim("the ceiling is above the floor", terrariumHeight(255, 255, 255) > terrariumHeight(0, 0, 0), "") && ok
+    return ok
+}
+
+// The whole point: a place is a latitude, a longitude and a reach, and the tiles
+// it needs are computable from those three. This walks the same grid `fetchDem`
+// walks and asserts it stays inside the tiles it asked for -- an off-by-one here
+// samples a tile that was never fetched and returns sea level, which draws as a
+// flat square in the middle of a mountain.
+fn gridStaysInsideItsTiles(): bool {
+    var ok = true
+    var lats: Vec<f64> = Vec.new()
+    var lons: Vec<f64> = Vec.new()
+    lats.push(37.77)
+    lons.push(0.0 - 122.42)
+    lats.push(0.0 - 33.87)
+    lons.push(151.21)
+    lats.push(64.14)
+    lons.push(0.0 - 21.94)
+    lats.push(0.0)
+    lons.push(179.9)
+    lats.push(1.35)
+    lons.push(103.82)
+
+    for p in 0..lats.len {
+        let lat = lats[p]
+        let lon = lons[p]
+        let reach = 8000.0
+        let n = 512
+        let step = reach * 2.0 / ((n - 1) as f64)
+        let zoom = zoomForMetres(lat, step, 6, 13)
+        let mPerDegLat = 111320.0
+        let mPerDegLon = mPerDegLat * Math.cos(lat * 3.141592653589793 / 180.0)
+        let latMin = lat - reach / mPerDegLat
+        let latMax = lat + reach / mPerDegLat
+        let lonMin = lon - reach / mPerDegLon
+        let lonMax = lon + reach / mPerDegLon
+        let tx0 = (Math.floor(tileXOf(lonMin, zoom))) as i64
+        let tx1 = (Math.floor(tileXOf(lonMax, zoom))) as i64
+        let ty0 = (Math.floor(tileYOf(latMax, zoom))) as i64
+        let ty1 = (Math.floor(tileYOf(latMin, zoom))) as i64
+        let cols = tx1 - tx0 + 1
+        let rows = ty1 - ty0 + 1
+        ok = claim("the tile span is sane", cols >= 1 && rows >= 1 && cols * rows <= 64, cols.toString() + "x" + rows.toString()) && ok
+
+        var inside = true
+        for j in 0..n {
+            let z = 0.0 - reach + (j as f64) * step
+            let tj = ((Math.floor(tileYOf(lat + z / mPerDegLat, zoom))) as i64) - ty0
+            if tj < 0 || tj >= rows {
+                inside = false
+            }
+            let x = 0.0 - reach + ((n - 1 - j) as f64) * step
+            let ti = ((Math.floor(tileXOf(lon + x / mPerDegLon, zoom))) as i64) - tx0
+            if ti < 0 || ti >= cols {
+                inside = false
+            }
+        }
+        ok = claim("every sample lands in a fetched tile", inside, lat.toString() + "," + lon.toString()) && ok
+    }
+    return ok
+}
+
+fn main() {
+    var ok = true
+    ok = roundTrip() && ok
+    ok = orientation() && ok
+    ok = resolution() && ok
+    ok = terrarium() && ok
+    ok = gridStaysInsideItsTiles() && ok
+    if ok {
+        print("terrain ok")
+    }
+}
+
+// @expect: terrain ok

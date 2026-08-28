@@ -53,6 +53,9 @@ from "./gpupost" import {
 from "./gpuworld" import {
     drawSkyPass, drawStreams, gpuWorldFree, gpuWorldNew, setOrtho, uploadStreams, drawShadowPass, gpuWorldSetClouds
 }
+from "./place" import {
+    parseLatLon, placeAt, placeLoad
+}
 from "./city" import {
     City, cityAttachOrtho, cityEmpty, cityHasSea, cityLoad, demHeights
 }
@@ -80,6 +83,20 @@ pub let H: i64 = 720
 pub let HIDDEN: u32 = 0x8
 
 fn loadPlace(name: &string): City {
+    // "lat,lon" instead of a place name streams the terrain and the photograph
+    // for anywhere on earth. Same code path the game's --at uses.
+    let ll = parseLatLon(name)
+    if ll.ok {
+        match placeAt(name.clone(), ll.lat, ll.lon, 8000.0, true) {
+            Result.Ok(c) => {
+                return c
+            }
+            Result.Err(e) => {
+                print("at: " + e)
+                return cityEmpty()
+            }
+        }
+    }
     let base = "examples/games/flight/cities/" + name
     match cityLoad(base + ".city") {
         Result.Ok(city) => {

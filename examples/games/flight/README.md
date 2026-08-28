@@ -14,6 +14,31 @@ fetching takes minutes the first time. See [cities/README.md](cities/README.md).
 UP/DOWN climb and dive (up dives; `--natural` flips), LEFT/RIGHT bank, Q/E
 rudder, Z/X throttle, SPACE burner, ENTER elsewhere, F fullscreen, ESC quit.
 
+## Anywhere
+
+```bash
+/tmp/flyby --at 35.36,138.73     # Fuji
+/tmp/flyby --at 46.53,7.96       # the Jungfrau
+```
+
+Terrain comes from AWS Terrain Tiles (terrarium PNGs, global, keyless) and the
+photograph from Esri World Imagery, both at runtime, both cached on disk under
+`~/.cache/flyby/tiles`. The first flight over a place pays for it and no flight
+after that does: Fuji takes about 45 seconds cold and 3 seconds warm.
+
+What `--at` does NOT get you is buildings. They are the one layer that cannot be
+streamed: OSM's own vector tiles cap at zoom 14 and carry **no height
+attribute**, and a skyline without heights is not worth rendering. Only Overpass
+exposes `height` and `building:levels`, and Overpass is a bake rather than a
+fetch, which is why `tools/fetchcity.milo` exists and why the five packs are
+still packs. Terrain, coastline and a photograph of anywhere; the skyline of the
+five.
+
+The five keep their baked drapes and so still fly with no network at all. A
+`--city` pack from disk with no `.ortho.png` beside it now fetches one instead of
+falling back to palette colours, so a pack no longer has to ship 40 MB of
+photograph to look like somewhere. `--offline` turns all of it off.
+
 ## Flying it
 
 The model lives in [flight.milo](flight.milo) and is gated by

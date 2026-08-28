@@ -1,0 +1,225 @@
+// Getting a place ready to fly, from whatever is actually available.
+//
+// This layer exists because `city.milo` is a DECODER and must stay one: it reads
+// a pack and answers questions about it, and it does not know what the internet
+// is. Deciding what to do when a pack is missing half of itself is an
+// application question, and this is the application.
+//
+// FLYBY used to ship its places whole: a 40 MB orthophoto per city baked into the
+// binary, five of them, a build that failed outright without them and a fetch
+// script that took minutes the first time. That bought a game that runs offline
+// and it cost 229 MB, a build-time dependency on a network service, and -- because
+// the imagery endpoint the baker speaks to is the USGS National Map, which stops
+// at the American border -- five American places, forever.
+//
+// So the drape is optional now. A pack without one is not an error and not a
+// palette-coloured fallback either: the photograph is fetched at runtime from a
+// global service and cached on disk, so the first flight over a place pays for it
+// and no flight after that does. A pack WITH one still uses it and touches
+// nothing, which is what keeps the shipped five working with no network at all.
+
+from "std/math" import {
+    Math
+}
+from "./city" import {
+    City, cityAttachOrthoRgb, cityEmpty, cityLoad
+}
+from "./terrain" import {
+    fetchDem, fetchDrape
+}
+
+// The drape, in requests of 2048 pixels a side. Two is 4096 px over the square,
+// which is 3.9 m/px over a 16 km place -- the resolution the baked drapes were
+// stitched at, so a runtime one is not a downgrade.
+pub let DRAPE_TILES: i64 = 2
+
+// Load a pack and make up whatever it is missing.
+//
+// Returns the city either way. A place with no photograph draws in its palette
+// colours, which is what it did before any of this existed, and is a worse
+// picture rather than a failure.
+pub fn placeLoad(path: &string, allowNetwork: bool): Result<City, string> {
+    var c = cityLoad(path)?
+    if c.orthoLoaded || !allowNetwork {
+        return Result.Ok(c)
+    }
+    match fetchDrape(c.originLat, c.originLon, c.reach, DRAPE_TILES) {
+        Option.Some(rgb) => {
+            let side = DRAPE_TILES * 2048
+            let _ = cityAttachOrthoRgb(c, rgb, side)
+        }
+        Option.None => {
+        }
+    }
+    return Result.Ok(c)
+}
+
+// A place from nothing but coordinates: no pack, no bake, no build step.
+//
+// Terrain and imagery both come off global tile services, so this works anywhere
+// there is elevation data -- which is everywhere. What it does NOT have is
+// buildings: those are the one layer that cannot be streamed, because OSM's own
+// vector tiles cap at zoom 14 and carry no height attribute, and a skyline
+// without heights is not worth rendering. Only Overpass exposes `height` and
+// `building:levels`, and Overpass is a bake, not a fetch -- which is why
+// tools/fetchcity.milo exists and why the five packs are still packs.
+//
+// So this is the terrain, the coast and the photograph of anywhere, and the
+// skyline of the five. That is the honest split, and it is the same one the
+// web build arrived at.
+pub fn placeAt(name: string, lat: f64, lon: f64, reach: f64, allowNetwork: bool): Result<City, string> {
+    if !allowNetwork {
+        return Result.Err("--at needs the network")
+    }
+    // 512 posts over the square. At a 16 km place that is a 31 m grid, which is
+    // the resolution of the elevation data itself -- finer would be interpolating
+    // and calling it detail.
+    let n = 512
+    let Option.Some(dem) = fetchDem(lat, lon, reach, n) else {
+        return Result.Err("no elevation data for " + lat.toString() + "," + lon.toString())
+    }
+    var c = cityEmpty()
+    c.loaded = true
+    c.name = name
+    c.originLat = lat
+    c.originLon = lon
+    c.reach = reach
+    c.demN = n
+    c.demStep = reach * 2.0 / ((n - 1) as f64)
+    c.demX0 = 0.0 - reach
+    c.demZ0 = 0.0 - reach
+    c.dem = dem
+    // No cover grid: cover is what tells the renderer which quads are urban, and
+    // with no buildings there is nothing urban to tell it about. A one-cell grid
+    // of zero is the empty answer the sampler already handles.
+    c.coverN = 1
+    c.coverStep = reach * 2.0
+    c.coverX0 = 0.0 - reach
+    c.coverZ0 = 0.0 - reach
+    c.cover = Vec.filled(1, 0 as u8)
+
+    // A well-formed EMPTY footprint index, not an absent one.
+    //
+    // `cityEmpty` leaves gridN at 0 with no cell array, which is fine while
+    // `loaded` is false because the building pass is skipped entirely. A place
+    // that is loaded and has no buildings is a state that did not exist before,
+    // and the building pass walked straight into `cellStart[ci]` with ci = -1.
+    // One cell covering the whole square, holding nothing, is the honest answer:
+    // there really are zero buildings here, and the loop that asks gets told so
+    // rather than being special-cased.
+    c.gridN = 1
+    c.gridStep = reach * 2.0
+    c.gridX0 = 0.0 - reach
+    c.gridZ0 = 0.0 - reach
+    c.cellStart = Vec.filled(2, 0)
+    c.cellItems = Vec.new()
+
+    match fetchDrape(lat, lon, reach, DRAPE_TILES) {
+        Option.Some(rgb) => {
+            let side = DRAPE_TILES * 2048
+            let _ = cityAttachOrthoRgb(c, rgb, side)
+        }
+        Option.None => {
+        }
+    }
+    return Result.Ok(c)
+}
+
+// Parse "37.77,-122.42" into a place. Returns not-ok on anything that is not two
+// numbers in range, because a silently-clamped latitude is a flight over the
+// wrong ocean.
+pub struct LatLon {
+    ok: bool,
+    lat: f64,
+    lon: f64,
+}
+
+pub fn parseLatLon(s: &string): LatLon {
+    var comma = 0 - 1
+    for i in 0..s.len {
+        if s[i] == 44 {
+            comma = i
+            break
+        }
+    }
+    if comma <= 0 || comma >= s.len - 1 {
+        return LatLon {
+            ok: false, lat: 0.0, lon: 0.0
+        }
+    }
+    var a = ""
+    for i in 0..comma {
+        a.push(s[i])
+    }
+    var b = ""
+    for i in comma + 1..s.len {
+        b.push(s[i])
+    }
+    let lat = parseF64(a)
+    let lon = parseF64(b)
+    if !lat.ok || !lon.ok {
+        return LatLon {
+            ok: false, lat: 0.0, lon: 0.0
+        }
+    }
+    if lat.v < 0.0 - 85.0 || lat.v > 85.0 || lon.v < 0.0 - 180.0 || lon.v > 180.0 {
+        return LatLon {
+            ok: false, lat: 0.0, lon: 0.0
+        }
+    }
+    return LatLon {
+        ok: true, lat: lat.v, lon: lon.v
+    }
+}
+
+pub struct Parsed {
+    ok: bool,
+    v: f64,
+}
+
+// A decimal number with an optional sign and fraction, and nothing else. Written
+// out rather than taken from std/strconv so that a trailing character is a
+// REJECTION: "37.77x" must not parse as 37.77 and fly somewhere plausible.
+pub fn parseF64(s: &string): Parsed {
+    if s.len == 0 {
+        return Parsed {
+            ok: false, v: 0.0
+        }
+    }
+    var i = 0
+    var sign = 1.0
+    if s[0] == 45 {
+        sign = 0.0 - 1.0
+        i = 1
+    } else {
+        if s[0] == 43 {
+            i = 1
+        }
+    }
+    var whole = 0.0
+    var digits = 0
+    while i < s.len && s[i] >= 48 && s[i] <= 57 {
+        whole = whole * 10.0 + ((s[i] - 48) as f64)
+        digits = digits + 1
+        i = i + 1
+    }
+    var frac = 0.0
+    var scale = 1.0
+    if i < s.len && s[i] == 46 {
+        i = i + 1
+        while i < s.len && s[i] >= 48 && s[i] <= 57 {
+            frac = frac * 10.0 + ((s[i] - 48) as f64)
+            scale = scale * 10.0
+            digits = digits + 1
+            i = i + 1
+        }
+    }
+    if digits == 0 || i != s.len {
+        return Parsed {
+            ok: false, v: 0.0
+        }
+    }
+    return Parsed {
+        ok: true, v: sign * (whole + frac / scale)
+    }
+}

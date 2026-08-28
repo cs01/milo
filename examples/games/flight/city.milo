@@ -334,6 +334,37 @@ fn shiftOf(n: i64): i64 {
 // Decode an aerial photograph and hang it on the city as a mirrored texture.
 // Mirrored because the map reflects at its edge (world3d.foldIn) — the imagery
 // has to fold on the same period as the terrain or they disagree at the seam.
+// Attach a drape that is already decoded: raw RGB, row major, top-down.
+//
+// The same work as cityAttachOrtho without the PNG, because a runtime drape is
+// stitched from several requests and re-encoding the join only to decode it again
+// is a megabyte of work to move bytes between two arrays. Everything after the
+// decode -- the power-of-two check, the byte-backed texture, the no-data fill --
+// is shared, so the two cannot drift on the part that matters.
+pub fn cityAttachOrthoRgb(c: &mut City, rgb: &Vec<u8>, side: i64): Result<i64, string> {
+    let shift = shiftOf(side)
+    if shift < 0 {
+        return Result.Err($"ortho side must be a power of two, got {side}")
+    }
+    if rgb.len < side * side * 3 {
+        return Result.Err($"ortho is short: {rgb.len} bytes for a {side} square")
+    }
+    var t = texNew(side, shift)
+    t.mirror = true
+    t.byteSrc = true
+    t.slot = SLOT_ORTHO
+    t.lut = srgbTable()
+    t.px = Vec.new()
+    t.pxu = Vec.filled(side * side * 3, 0 as u8)
+    for i in 0..side * side * 3 {
+        t.pxu[i] = rgb[i]
+    }
+    fillNoData(c, t, side)
+    c.ortho = t
+    c.orthoLoaded = true
+    return Result.Ok(side)
+}
+
 pub fn cityAttachOrtho(c: &mut City, png: &string): Result<i64, string> {
     let img = Png.decode(png)?
     if img.width != img.height {

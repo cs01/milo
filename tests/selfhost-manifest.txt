@@ -185,6 +185,7 @@ floatRoundTrip
 flybyEphemeris
 flybyFlight
 flybyForecast
+flybyTerrain
 flybyGeometry
 fnArgI64Lit
 fnInStruct

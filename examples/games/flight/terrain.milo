@@ -1,0 +1,443 @@
+// Terrain and imagery, at runtime, for anywhere.
+//
+// FLYBY ships five places and it ships them INSIDE THE BINARY: 229 MB of
+// orthophotos in `cities/`, a build that fails outright without them, and a
+// fetch script that takes minutes the first time. That is five places, forever,
+// and all five of them are American, because the imagery endpoint the baker uses
+// is the USGS National Map and the National Map stops at the border.
+//
+// Everything here is keyless, CORS-open, global, and redistributable -- the same
+// rule the weather chain already keeps. No Google: their terms forbid it.
+//
+//   Elevation   AWS Terrain Tiles (SRTM, NED, and friends), terrarium encoding.
+//               PNG, so std/png decodes it, and global.
+//   Imagery     Esri World Imagery through the same `export` endpoint shape the
+//               baker already speaks to the National Map with. Global.
+//
+// The pure half of this file -- the Web Mercator projection and the terrarium
+// decode -- is gated by tests/fixtures/flybyTerrain.milo. The network half is not,
+// and cannot be: a fixture that needs the internet is a fixture that fails on a
+// train.
+
+from "std/math" import {
+    Math
+}
+from "std/fetch" import {
+    fetch
+}
+from "std/png" import {
+    Png, PngImage
+}
+from "std/fs" import {
+    readFile, writeFile, mkdirAll, pathExists
+}
+from "std/env" import {
+    Env
+}
+
+let PI: f64 = 3.141592653589793
+
+// Metres per pixel at zoom 0 on the equator, which is the whole of Web Mercator's
+// scale in one number: the equator is 40075016.686 m and zoom 0 is one 256-pixel
+// tile.
+pub let EQUATOR_MPP: f64 = 156543.03392804097
+
+pub let TILE_PX: i64 = 256
+
+// ── Web Mercator ──────────────────────────────────────────────────────────────
+//
+// Tile coordinates are FRACTIONAL here. Every one of these takes and returns a
+// continuous position, and the integer tile is `floor` of it -- which is the only
+// form that can also answer "where inside the tile", and sampling a pyramid is
+// nine tenths that question.
+
+pub fn tileXOf(lonDeg: f64, zoom: i64): f64 {
+    let n = Math.pow(2.0, zoom as f64)
+    return (lonDeg + 180.0) / 360.0 * n
+}
+
+pub fn tileYOf(latDeg: f64, zoom: i64): f64 {
+    let n = Math.pow(2.0, zoom as f64)
+    // Clamped to the square Mercator can represent. The projection goes to
+    // infinity at the poles, and an unclamped latitude there produces a tile
+    // index of a few billion and a fetch for a tile that does not exist.
+    let lat = Math.clampF64(latDeg, 0.0 - 85.05112878, 85.05112878) * PI / 180.0
+    let s = Math.sin(lat)
+    let y = (0.5 - Math.log((1.0 + s) / (1.0 - s)) / (4.0 * PI)) * n
+    // And clamped again on the way out. The latitude clamp above is the exact
+    // edge of the Mercator square, so at that edge the arithmetic lands a few
+    // billionths either side of 0 and n -- which is a tile index of -1 after the
+    // floor, and a fetch for a tile that does not exist.
+    return Math.clampF64(y, 0.0, n)
+}
+
+pub fn lonOfTileX(x: f64, zoom: i64): f64 {
+    let n = Math.pow(2.0, zoom as f64)
+    return x / n * 360.0 - 180.0
+}
+
+pub fn latOfTileY(y: f64, zoom: i64): f64 {
+    let n = Math.pow(2.0, zoom as f64)
+    let t = PI * (1.0 - 2.0 * y / n)
+    // The inverse Gudermannian. atan(sinh t), written out because milo has no
+    // sinh: sinh t = (e^t - e^-t) / 2.
+    let e = Math.exp(t)
+    return Math.atan((e - 1.0 / e) * 0.5) * 180.0 / PI
+}
+
+// Ground resolution in metres per pixel. Mercator stretches with latitude, so a
+// zoom that is 30 m at the equator is 24 m in San Francisco and 9 m in Reykjavik,
+// and picking a zoom without this is picking a different resolution per city.
+pub fn metresPerPixel(latDeg: f64, zoom: i64): f64 {
+    let lat = Math.clampF64(latDeg, 0.0 - 85.0, 85.0) * PI / 180.0
+    return EQUATOR_MPP * Math.cos(lat) / Math.pow(2.0, zoom as f64)
+}
+
+// The zoom whose pixels are closest to `wantM` metres on the ground at `latDeg`.
+// Clamped to the range the elevation tiles actually carry.
+pub fn zoomForMetres(latDeg: f64, wantM: f64, loZoom: i64, hiZoom: i64): i64 {
+    var best = loZoom
+    var bestErr = 1.0e18
+    for z in loZoom..hiZoom + 1 {
+        let err = Math.abs(metresPerPixel(latDeg, z) - wantM)
+        if err < bestErr {
+            bestErr = err
+            best = z
+        }
+    }
+    return best
+}
+
+// ── terrarium ─────────────────────────────────────────────────────────────────
+
+// Terrarium encodes an elevation in metres across the three colour channels:
+// height = (R * 256 + G + B / 256) - 32768. The offset is what lets it carry
+// the Dead Sea and the Mariana Trench in unsigned bytes, and dropping it puts
+// every coastline 32 km in the air.
+pub fn terrariumHeight(r: i64, g: i64, b: i64): f64 {
+    return ((r as f64) * 256.0 + (g as f64) + (b as f64) / 256.0) - 32768.0
+}
+
+// ── the tile cache ────────────────────────────────────────────────────────────
+//
+// On disk, under the same directory the rest of the tooling already uses. A
+// terrain tile is immutable -- the elevation of a hillside is not news -- so it is
+// written once and read forever, and a second flight over the same city touches
+// the network only for the weather.
+
+fn cacheDir(): string {
+    match Env.get("FLYBY_CACHE") {
+        Option.Some(v) => {
+            return v
+        }
+        Option.None => {
+        }
+    }
+    match Env.get("HOME") {
+        Option.Some(h) => {
+            return h + "/.cache/flyby/tiles"
+        }
+        Option.None => {
+            return "/tmp/flyby-tiles"
+        }
+    }
+}
+
+fn cachedFetch(url: &string, key: &string): Option<string> {
+    let dir = cacheDir()
+    let path = dir + "/" + key.clone()
+    if pathExists(path) {
+        match readFile(path) {
+            Result.Ok(bytes) => {
+                if bytes.len > 64 {
+                    return Option.Some(bytes)
+                }
+            }
+            Result.Err(_) => {
+            }
+        }
+    }
+    // Three attempts. A single failed request over a public endpoint is noise;
+    // three is an answer.
+    var attempt = 0
+    while attempt < 3 {
+        match fetch(url) {
+            Result.Ok(resp) => {
+                if resp.ok() {
+                    let body = resp.text()
+                    if body.len > 64 {
+                        let _ = mkdirAll(dir, 493)
+                        let _ = writeFile(path, body)
+                        return Option.Some(body)
+                    }
+                }
+            }
+            Result.Err(_) => {
+            }
+        }
+        attempt = attempt + 1
+    }
+    return Option.None
+}
+
+// ── elevation ─────────────────────────────────────────────────────────────────
+
+fn demTileUrl(x: i64, y: i64, z: i64): string {
+    return "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/"
+    + z.toString() + "/" + x.toString() + "/" + y.toString() + ".png"
+}
+
+fn demTileKey(x: i64, y: i64, z: i64): string {
+    return "dem_" + z.toString() + "_" + x.toString() + "_" + y.toString() + ".png"
+}
+
+// One decoded elevation tile, and where it sits.
+pub struct DemTile {
+    x: i64,
+    y: i64,
+    z: i64,
+    ok: bool,
+    img: PngImage,
+}
+
+fn fetchDemTile(x: i64, y: i64, z: i64): DemTile {
+    let n = (Math.pow(2.0, z as f64)) as i64
+    // Wrap in longitude, clamp in latitude: the world repeats east-west and does
+    // not repeat north-south, and asking for a tile off the top is a 404 that
+    // costs three attempts to discover.
+    var tx = x % n
+    if tx < 0 {
+        tx = tx + n
+    }
+    if y < 0 || y >= n {
+        return DemTile {
+            x: tx, y: y, z: z, ok: false,
+            img: PngImage {
+                width: 0, height: 0, channels: 3, pixels: ""
+            }
+        }
+    }
+    match cachedFetch(demTileUrl(tx, y, z), demTileKey(tx, y, z)) {
+        Option.Some(bytes) => {
+            match Png.decode(bytes) {
+                Result.Ok(img) => {
+                    if img.width > 0 && img.height > 0 {
+                        return DemTile {
+                            x: tx, y: y, z: z, ok: true, img: img
+                        }
+                    }
+                }
+                Result.Err(_) => {
+                }
+            }
+        }
+        Option.None => {
+        }
+    }
+    return DemTile {
+        x: tx, y: y, z: z, ok: false,
+        img: PngImage {
+            width: 0, height: 0, channels: 3, pixels: ""
+        }
+    }
+}
+
+// Read a height out of a decoded tile at fractional pixel (px, py). Nearest
+// neighbour: the grid this feeds is already coarser than the tile, so bilinear
+// here would be filtering something that is about to be resampled anyway.
+fn tileHeightAt(t: &DemTile, px: f64, py: f64): f64 {
+    if !t.ok {
+        return 0.0
+    }
+    let w = t.img.width
+    let h = t.img.height
+    var ix = (Math.floor(px)) as i64
+    var iy = (Math.floor(py)) as i64
+    if ix < 0 {
+        ix = 0
+    }
+    if iy < 0 {
+        iy = 0
+    }
+    if ix > w - 1 {
+        ix = w - 1
+    }
+    if iy > h - 1 {
+        iy = h - 1
+    }
+    let c = t.img.channels
+    let o = (iy * w + ix) * c
+    if o + 2 >= t.img.pixels.len {
+        return 0.0
+    }
+    return terrariumHeight(t.img.pixels[o] as i64, t.img.pixels[o + 1] as i64, t.img.pixels[o + 2] as i64)
+}
+
+// A square elevation grid centred on `lat`/`lon`, `n` by `n`, spanning
+// `reach` metres either side. Metres, above sea level, north-up.
+//
+// The grid is in the same layout `City.dem` uses -- row major, +x east, +z north
+// -- so a place built this way is indistinguishable from a baked one to
+// everything downstream.
+pub fn fetchDem(lat: f64, lon: f64, reach: f64, n: i64): Option<Vec<f64>> {
+    if n < 2 {
+        return Option.None
+    }
+    let step = reach * 2.0 / ((n - 1) as f64)
+    // Ask for tiles about as fine as the grid, no finer: a grid step of 30 m has
+    // nothing to gain from 10 m tiles and pays nine times the requests for it.
+    let zoom = zoomForMetres(lat, step, 6, 13)
+    let mPerDegLat = 111320.0
+    let mPerDegLon = mPerDegLat * Math.cos(lat * PI / 180.0)
+
+    // Which tiles the square touches. One decode per tile, held for the whole
+    // grid: the alternative is decoding the same 256-square PNG once per sample
+    // and it is a hundred times slower.
+    let latMin = lat - reach / mPerDegLat
+    let latMax = lat + reach / mPerDegLat
+    let lonMin = lon - reach / mPerDegLon
+    let lonMax = lon + reach / mPerDegLon
+    let tx0 = (Math.floor(tileXOf(lonMin, zoom))) as i64
+    let tx1 = (Math.floor(tileXOf(lonMax, zoom))) as i64
+    // Tile Y runs SOUTH as it increases, so the north edge is the low index.
+    let ty0 = (Math.floor(tileYOf(latMax, zoom))) as i64
+    let ty1 = (Math.floor(tileYOf(latMin, zoom))) as i64
+    let cols = tx1 - tx0 + 1
+    let rows = ty1 - ty0 + 1
+    if cols < 1 || rows < 1 || cols * rows > 64 {
+        return Option.None
+    }
+
+    var tiles: Vec<DemTile> = Vec.new()
+    var any = false
+    for j in 0..rows {
+        for i in 0..cols {
+            let t = fetchDemTile(tx0 + i, ty0 + j, zoom)
+            if t.ok {
+                any = true
+            }
+            tiles.push(t)
+        }
+    }
+    if !any {
+        return Option.None
+    }
+
+    var out: Vec<f64> = Vec.filled(n * n, 0.0)
+    for j in 0..n {
+        // Row 0 is the SOUTH edge, matching City.demZ0 being the minimum z.
+        let z = 0.0 - reach + (j as f64) * step
+        let latHere = lat + z / mPerDegLat
+        let fy = tileYOf(latHere, zoom)
+        let tj = ((Math.floor(fy)) as i64) - ty0
+        let py = (fy - Math.floor(fy)) * (TILE_PX as f64)
+        for i in 0..n {
+            let x = 0.0 - reach + (i as f64) * step
+            let lonHere = lon + x / mPerDegLon
+            let fx = tileXOf(lonHere, zoom)
+            let ti = ((Math.floor(fx)) as i64) - tx0
+            let px = (fx - Math.floor(fx)) * (TILE_PX as f64)
+            if ti < 0 || tj < 0 || ti >= cols || tj >= rows {
+                continue
+            }
+            out[j * n + i] = tileHeightAt(tiles[tj * cols + ti], px, py)
+        }
+    }
+    return Option.Some(out)
+}
+
+// ── imagery ───────────────────────────────────────────────────────────────────
+
+// Esri World Imagery, through the same `export` shape the baker already speaks
+// to the National Map with -- but global. The service caps a single export at
+// 2048 pixels, so a sharper drape is several requests and a seam-free join, and
+// that is what `tiles` is.
+fn drapeUrl(latMin: f64, lonMin: f64, latMax: f64, lonMax: f64, px: i64): string {
+    let bbox = fmt6(lonMin) + "," + fmt6(latMin) + "," + fmt6(lonMax) + "," + fmt6(latMax)
+    return "https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export"
+    + "?bbox=" + bbox + "&bboxSR=4326&imageSR=4326&size=" + px.toString() + ","
+    + px.toString() + "&format=png24&f=image"
+}
+
+// Six decimal places is about a tenth of a metre, which is far below anything
+// this asks for and keeps the URL short enough to be a sane cache key.
+fn fmt6(v: f64): string {
+    let scaled = (Math.round(v * 1000000.0)) as i64
+    var whole = scaled / 1000000
+    var frac = scaled % 1000000
+    var sign = ""
+    if scaled < 0 {
+        sign = "-"
+        whole = 0 - whole
+        frac = 0 - frac
+    }
+    var fs = frac.toString()
+    while fs.len < 6 {
+        fs = "0" + fs
+    }
+    return sign + whole.toString() + "." + fs
+}
+
+pub let DRAPE_TILE_PX: i64 = 2048
+
+// A square photograph of the ground under a place, `tiles` by `tiles` requests
+// of 2048 pixels each, stitched. RGB, row major, top-down, north-up -- the layout
+// `City.ortho` already carries.
+pub fn fetchDrape(lat: f64, lon: f64, reach: f64, tiles: i64): Option<Vec<u8>> {
+    if tiles < 1 || tiles > 4 {
+        return Option.None
+    }
+    let mPerDegLat = 111320.0
+    let mPerDegLon = mPerDegLat * Math.cos(lat * PI / 180.0)
+    let side = tiles * DRAPE_TILE_PX
+    var out: Vec<u8> = Vec.filled(side * side * 3, 0)
+    var got = 0
+    for ty in 0..tiles {
+        for tx in 0..tiles {
+            // North-up: tile row 0 is the NORTH strip, which is the high latitude.
+            let f0 = (ty as f64) / (tiles as f64)
+            let f1 = ((ty + 1) as f64) / (tiles as f64)
+            let g0 = (tx as f64) / (tiles as f64)
+            let g1 = ((tx + 1) as f64) / (tiles as f64)
+            let latHi = lat + reach / mPerDegLat - 2.0 * reach / mPerDegLat * f0
+            let latLo = lat + reach / mPerDegLat - 2.0 * reach / mPerDegLat * f1
+            let lonLo = lon - reach / mPerDegLon + 2.0 * reach / mPerDegLon * g0
+            let lonHi = lon - reach / mPerDegLon + 2.0 * reach / mPerDegLon * g1
+            let url = drapeUrl(latLo, lonLo, latHi, lonHi, DRAPE_TILE_PX)
+            let key = "img_" + fmt6(latLo) + "_" + fmt6(lonLo) + "_" + fmt6(latHi)
+            + "_" + fmt6(lonHi) + ".png"
+            let Option.Some(bytes) = cachedFetch(url, key) else {
+                continue
+            }
+            // A PNG this small over a 2048-square extent is the service's empty
+            // tile, not a photograph. That is how a place outside the imagery's
+            // coverage announces itself: with a 200.
+            if bytes.len < 100000 {
+                continue
+            }
+            let Result.Ok(img) = Png.decode(bytes) else {
+                continue
+            }
+            if img.width != DRAPE_TILE_PX || img.height != DRAPE_TILE_PX {
+                continue
+            }
+            let c = img.channels
+            for row in 0..DRAPE_TILE_PX {
+                let src = row * DRAPE_TILE_PX * c
+                let dst = ((ty * DRAPE_TILE_PX + row) * side + tx * DRAPE_TILE_PX) * 3
+                for col in 0..DRAPE_TILE_PX {
+                    let s = src + col * c
+                    let d = dst + col * 3
+                    out[d] = img.pixels[s]
+                    out[d + 1] = img.pixels[s + 1]
+                    out[d + 2] = img.pixels[s + 2]
+                }
+            }
+            got = got + 1
+        }
+    }
+    if got == 0 {
+        return Option.None
+    }
+    return Option.Some(out)
+}

@@ -49,6 +49,9 @@ from "./world3d" import {
 from "./city" import {
     City, cityLoad, cityParse, cityEmpty, cityAttachOrtho, cityHasSea, demHeights
 }
+from "./place" import {
+    parseLatLon, placeAt, placeLoad
+}
 from "./gpupost" import {
     CoverGrid
 }
@@ -98,6 +101,14 @@ Up dives and down climbs, the way a stick works; --natural flips it.
 Launched with no --place, --city or --procedural, FLYBY opens on a start screen
 that asks where to fly; naming a place on the command line skips it.
 
+--at LAT,LON flies anywhere on earth: the terrain and the photograph stream from
+keyless global tile services and are cached on disk, so the first flight over a
+place pays for it and no flight after that does. What it does not get is
+buildings, which are the one layer that cannot be streamed -- OSM's own vector
+tiles cap at zoom 14 and carry no height attribute, and a skyline without heights
+is not worth rendering. The five built-in places keep their baked skylines and
+their baked photographs, so they still fly with no network at all.
+
 Every place has five landmarks, listed down the right of the screen. A blue
 column of light stands on the one you are looking for; fly over it at any
 height and it is yours, timed and ticked off. Find all five and the next region
@@ -113,6 +124,8 @@ fn parseOpts(): ParsedArgs {
     var p = ArgParser.new("flyby", "a 3D flying game written in Milo")
     p.addString("place", "P", "Which built-in place to fly (default: a different one each launch)", "")
     p.addString("city", "c", "Fly a .city asset from disk instead of a built-in place", "")
+    p.addString("at", "", "Fly anywhere: LAT,LON. Terrain and imagery stream from keyless global tile services; there are no buildings, because a skyline cannot be streamed (see place.milo)", "")
+    p.addBool("offline", "", "Never touch the network: no weather, and no streamed terrain or imagery")
     p.addBool("procedural", "", "Fly the endless generated world instead of a real place")
     p.addBool("pro", "p", "Give back the bank axis on LEFT / RIGHT, and the corridor")
     p.addBool("natural", "n", "UP climbs (default is stick-style: UP dives, DOWN climbs)")
@@ -239,13 +252,32 @@ fn allPlaces(first: i64): Vec<City> {
 // A .city file from disk, or an empty city (the procedural world) if it will
 // not load. Only failure says anything on the terminal — the place's name is on
 // the HUD the moment the window opens, which is where a player is looking.
-fn loadFile(path: &string): City {
-    match cityLoad(path) {
+fn loadFile(path: &string, online: bool): City {
+    match placeLoad(path, online) {
         Result.Ok(city) => {
             return city
         }
         Result.Err(e) => {
             print("could not load city: " + e)
+            return cityEmpty()
+        }
+    }
+}
+
+// Anywhere, from two numbers. See place.placeAt for what this does and does not
+// get you: terrain, coastline and a photograph, and no skyline.
+fn loadAt(spec: &string, online: bool): City {
+    let ll = parseLatLon(spec)
+    if !ll.ok {
+        print("--at wants LAT,LON in degrees, e.g. --at 35.68,139.77")
+        return cityEmpty()
+    }
+    match placeAt(spec.clone(), ll.lat, ll.lon, 8000.0, online) {
+        Result.Ok(city) => {
+            return city
+        }
+        Result.Err(e) => {
+            print("could not build a place there: " + e)
             return cityEmpty()
         }
     }
@@ -258,6 +290,9 @@ fn startIndex(o: &ParsedArgs): i64 {
         return 0 - 1
     }
     if (o.getString("city") ?? "") != "" {
+        return 0 - 1
+    }
+    if (o.getString("at") ?? "") != "" {
         return 0 - 1
     }
     let want = o.getString("place") ?? ""
@@ -278,13 +313,19 @@ fn startIndex(o: &ParsedArgs): i64 {
 // decoding on the key press costs a beat and nothing else.
 fn placesFor(o: &ParsedArgs, idx: i64): Vec<City> {
     var v: Vec<City> = Vec.new()
+    let online = !o.getBool("offline")
     if o.getBool("procedural") {
         v.push(cityEmpty())
         return v
     }
+    let at = o.getString("at") ?? ""
+    if at != "" {
+        v.push(loadAt(at, online))
+        return v
+    }
     let path = o.getString("city") ?? ""
     if path != "" {
-        v.push(loadFile(path))
+        v.push(loadFile(path, online))
         return v
     }
     if idx < 0 {

@@ -33,6 +33,14 @@ export const FOREIGN_MODULE = "std/foreign.milo";
 // std/foreign fixture therefore failed to compile there with "undefined function
 // 'adoptHeap'" while the whole macOS and Linux lane stayed green: the gate was not merely
 // wrong on Windows, it silently removed the feature. Compare on posix separators.
+// Windows hands back `std\arena.milo`, so any rule that recognises a module by its path
+// has to normalise first. `lintArenaNeverFrees` and `lintManualShatterCycle` skip the
+// module that IMPLEMENTS the pattern they warn about; without this they stopped skipping
+// on Windows and warned inside std, where the reader cannot act on it.
+export function inModule(file: string | undefined, module: string): boolean {
+  return !!file && file.replace(/\\/g, "/").includes(module);
+}
+
 export function isForeignModule(file: string | undefined): boolean {
   if (!file) return false;
   const posix = file.replace(/\\/g, "/");
@@ -4081,7 +4089,7 @@ export class TypeChecker {
     if (this.warningConfig.allowed.has("arena-never-frees")) return;
     for (const f of [...program.functions]) {
       if (!f.body) continue;
-      if (f.sourceFile?.includes("std/arena")) continue;
+      if (inModule(f.sourceFile, "std/arena")) continue;
       // name -> declaration span, for locals declared as an Arena
       const locals = new Map<string, Span | undefined>();
       const frees = new Set<string>();
@@ -4146,7 +4154,7 @@ export class TypeChecker {
     for (const f of program.functions) {
       if (!f.body) continue;
       // std/shard implements the cycle; parallelMap IS this pattern.
-      if (f.sourceFile?.includes("std/shard")) continue;
+      if (inModule(f.sourceFile, "std/shard")) continue;
       let shatterSpan: Span | undefined;
       let welds = false;
       const walk = (node: unknown) => {

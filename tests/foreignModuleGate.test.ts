@@ -6,7 +6,7 @@
 // stayed green. Nothing in the fixture lane can see that, because the lane runs on the host's
 // own separator; this unit test is the only thing that does.
 import { test, expect } from "bun:test";
-import { isForeignModule, FOREIGN_MODULE } from "../src/checker";
+import { isForeignModule, inModule, FOREIGN_MODULE } from "../src/checker";
 import { readdirSync, readFileSync } from "fs";
 import { join } from "path";
 
@@ -39,11 +39,20 @@ test("no source file compares the foreign module path by bare suffix", () => {
     const src = readFileSync(join(dir, f), "utf-8");
     // `isForeignModule` is the one place allowed to spell the comparison out.
     for (const [i, line] of src.split("\n").entries()) {
-      if (line.includes("endsWith(FOREIGN_MODULE)") || line.includes(`endsWith("${FOREIGN_MODULE}")`)) {
+      // The same bug class, one rule wider: any module recognised from a raw path.
+      const rawModuleTest = /(?:sourceFile|\.file)\??\.(?:includes|endsWith|startsWith)\("std\//.test(line);
+      if (line.includes("endsWith(FOREIGN_MODULE)") || line.includes(`endsWith("${FOREIGN_MODULE}")`) || rawModuleTest) {
         if (f === "checker.ts" && line.includes("posix.endsWith")) continue;
         offenders.push(`${f}:${i + 1}`);
       }
     }
   }
   expect(offenders).toEqual([]);
+});
+
+test("a module recognised by path normalises the separator", () => {
+  expect(inModule("/Users/x/milo/std/arena.milo", "std/arena")).toBe(true);
+  expect(inModule("D:\\a\\milo\\std\\arena.milo", "std/arena")).toBe(true);
+  expect(inModule("/Users/x/milo/std/json.milo", "std/arena")).toBe(false);
+  expect(inModule(undefined, "std/arena")).toBe(false);
 });

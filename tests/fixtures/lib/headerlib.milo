@@ -39,6 +39,20 @@ pub fn apply(cb: (i32) => i32, v: i32): i32 {
     return cb(v)
 }
 
+// A nullable extern reference. The C spelling is `Point*` and nothing else — one
+// parameter, no tag, no wrapper struct — so the header must declare it exactly as it
+// declares `rect_area`'s raw pointer, and a C caller may pass NULL. What the caller gets
+// for NULL is chosen HERE, in the else block, because only this author knows what this
+// API's error convention is.
+@externalLinkage
+pub fn point_bump(p: ?&mut Point): i32 {
+    let q = p else {
+        return -1
+    }
+    q.x = q.x + 1
+    return q.x
+}
+
 // returns a struct by value → skipped until define-side ABI lowering (stage 6)
 pub fn make_point(x: i32, y: i32): Point {
     return Point {

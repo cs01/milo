@@ -1,0 +1,14 @@
+// @error: '?&mut T' is only legal on a parameter of an 'extern' or '@externalLinkage' function
+// A field is storage, and a nullable extern reference has no storage form: it exists only
+// between the call boundary and the unwrap. Same rule that stops a plain `&mut T` field.
+extern struct Bump {
+    x: i32,
+}
+
+struct Holder {
+    b: ?&mut Bump,
+}
+
+fn main() {
+    print(1)
+}

@@ -53,6 +53,12 @@ describe("header generation", () => {
     expect(header).toContain("int32_t apply(int32_t (*cb)(int32_t), int32_t v);");
   });
 
+  // The ABI claim `?&mut T` makes, checked against the published header rather than
+  // asserted in prose: one pointer parameter, spelled the same as a raw `*Point`.
+  test("nullable extern reference is declared as a plain pointer", () => {
+    expect(header).toContain("int32_t point_bump(Point* p);");
+  });
+
   test("non-C and by-value-struct functions are skipped with a comment", () => {
     expect(header).toContain("/* skipped make_point:");
     expect(header).toContain("/* skipped build:");
@@ -65,6 +71,10 @@ describe("header generation", () => {
 int main(void) {
     Rect r = { { 0, 0 }, 5, 6 };
     printf("%d %.1f %lld\\n", add(3, 4), scale(2.5, 4.0), (long long)rect_area(&r));
+    /* the nullable extern reference, called the way C calls it: a real object, then NULL.
+       If the parameter were anything but a bare pointer this would not compile. */
+    Point p = { 41, 7 };
+    printf("%d %d %d\\n", point_bump(&p), p.x, point_bump(NULL));
     return 0;
 }
 `);
@@ -74,7 +84,7 @@ int main(void) {
     const bin = join(dir, "consumer");
     execSync(`clang -I ${dir} ${consumer} ${libPath} -o ${bin}`, { stdio: ["pipe", "pipe", "pipe"] });
     const out = execSync(bin, { encoding: "utf-8" }).trim();
-    expect(out).toBe("7 10.0 30");
+    expect(out).toBe("7 10.0 30\n42 42 -1");
   });
 
   // `ar r` merges rather than replaces, and each build names its temp object randomly,

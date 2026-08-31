@@ -1,0 +1,23 @@
+// @error: is already unwrapped here — a second '&mut Bump' to the same object would alias the first
+// Two live `&mut` to one object is the aliasing the one rule exists to prevent, and the
+// unwrap is the only place a nullable extern reference could produce a second one. The
+// borrow is scoped, so unwrapping once per arm of an `if` is still fine.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn bumpX(b: ?&mut Bump): i32 {
+    let first = b else {
+        return -1
+    }
+    let second = b else {
+        return -1
+    }
+    first.x = 1
+    return second.x
+}
+
+fn main() {
+    print(1)
+}

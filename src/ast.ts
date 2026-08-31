@@ -8,6 +8,12 @@ export interface MiloType {
   ptrDepth?: number;   // pointer nesting: `**u8` has depth 2. Absent ⇒ isPtr?1:0 (single level)
   isRef: boolean;      // &T
   isRefMut: boolean;   // &mut T
+  // `?&mut T` / `?&T` — a nullable extern reference. Set ALONGSIDE isRef/isRefMut, and
+  // legal only on a parameter of an `extern` / `@externalLinkage` fn: the parser rejects
+  // the spelling everywhere else (see parseType), so nothing downstream has to defend
+  // against one turning up in a field, a local or a type argument. It is a signature
+  // spelling, not a type: `resolve` maps it to `*T`, which is what the ABI already is.
+  isNullableRef?: boolean;
   isArray: boolean;    // [T]
   arraySize: number | null; // [T; N] — null for dynamic
   isFn?: boolean;      // fn(T): R
@@ -144,7 +150,11 @@ export interface MatchExpr { kind: "MatchExpr"; subject: Expr; arms: MatchArm[];
 export interface IfLetStmt { kind: "IfLetStmt"; pattern: Pattern; subject: Expr; thenBody: Stmt[]; elseBody: Stmt[] | null; span?: Span }
 // `let Enum.Variant(b) = value else { ... }` — refutable bind that escapes into
 // the enclosing scope; the else block must diverge (fail-early, bind-forward).
-export interface LetElseStmt { kind: "LetElseStmt"; pattern: Pattern; value: Expr; elseBody: Stmt[]; span?: Span }
+// `let P(b) = v else { … }`, plus the nullable-extern-reference unwrap `let g = p else { … }`.
+// The second form has no enum and no variant to name, so `pattern` is a placeholder
+// wildcard and `bindName` carries the binding instead. Its presence is what distinguishes
+// the two forms; every walker that only visits `value` and `elseBody` needs no change.
+export interface LetElseStmt { kind: "LetElseStmt"; pattern: Pattern; value: Expr; elseBody: Stmt[]; bindName?: string; span?: Span }
 
 export interface UnsafeBlock { kind: "UnsafeBlock"; body: Stmt[]; span?: Span }
 export interface ForInStmt { kind: "ForInStmt"; varName: string; varName2: string | null; iterable: Expr; invariants: Contract[]; body: Stmt[]; span?: Span }

@@ -1,0 +1,25 @@
+// @error: 'b' is a nullable extern reference and must be unwrapped before use
+// `match` is deliberately NOT a second spelling for the unwrap. It would need
+// `Option.Some(p)` / `Option.None` patterns, which is exactly the `Option<&mut T>`
+// mental model the design refuses to build: an enum with a reference payload, rejected
+// as storage everywhere else. `let p = b else { … }` names no enum and no variant, so
+// it is the only spelling, and this diagnostic points at it.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn readX(b: ?&mut Bump): i32 {
+    match b {
+        Option.Some(p) => {
+            return p.x
+        }
+        Option.None => {
+            return -1
+        }
+    }
+}
+
+fn main() {
+    print(1)
+}

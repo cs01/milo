@@ -1,0 +1,18 @@
+// @error: '?&mut T' is only legal on a parameter of an 'extern' or '@externalLinkage' function
+// A closure has no C signature. `@externalLinkage` publishes ONE symbol, and its parameter
+// list is the only place the spelling means anything.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn run(b: ?&mut Bump): i32 {
+    let f = (c: ?&mut Bump): i32 => {
+        return 0
+    }
+    return f(0 as *Bump)
+}
+
+fn main() {
+    print(1)
+}

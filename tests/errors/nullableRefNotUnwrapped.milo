@@ -1,0 +1,16 @@
+// @error: 'b' is a nullable extern reference and must be unwrapped before use
+// The parameter is a maybe-null pointer until the null test runs. Reaching a field
+// through it is the exact bug the spelling exists to make impossible.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn bumpX(b: ?&mut Bump): i32 {
+    b.x = b.x + 1
+    return b.x
+}
+
+fn main() {
+    print(1)
+}

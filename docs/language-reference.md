@@ -2751,6 +2751,88 @@ $ milo emit-obj mathlib.milo -o mathlib.o --emit-header
 $ clang main.c mathlib.o -o demo    # or: clang main.c -L. -lmathlib -o demo
 ```
 
+### Nullable extern references: `?&mut T` and `?&T`
+
+A C function that takes `GifFileType *` may be handed a null pointer, and the C prototype
+does not say so. `?&mut T` is the Milo spelling for exactly that parameter: **the ABI is
+`T *` — one pointer, no tag, no wrapper struct** — and the compiler makes the null test
+impossible to skip.
+
+```milo
+extern struct GifFileType {
+    SWidth: i32,
+    SHeight: i32,
+}
+
+@externalLinkage
+pub fn DGifGetScreenDesc(gif: ?&mut GifFileType): i32 {
+    let g = gif else {
+        return 0            // GIF_ERROR — giflib's convention, chosen here
+    }
+    // g: &mut GifFileType
+    g.SWidth = 640
+    return 1                // GIF_OK
+}
+```
+
+**Where it is legal:** on a parameter of an `extern` or `@externalLinkage` function, and
+nowhere else. Not a return type, not a struct field, not a local, not a `Vec` element, not
+a closure parameter, not a type argument — not even nested inside an otherwise-legal
+extern parameter. It is a spelling for a signature seam, not a type, so there is no
+`?&mut T` value to store anywhere.
+
+**How to unwrap:** `let NAME = param else { … }`. The else block runs when the pointer was
+null, and must diverge (`return` / `break` / `continue`) — otherwise control would reach
+code where the binding does not exist. What the else block *does* is yours: only you know
+whether this C API answers `GIF_ERROR`, `0`, `void`, or sets `errno`. The compiler
+deliberately does not choose for you, which is why there is no null-checking wrapper.
+
+Any other use of the parameter is a compile error:
+
+```milo error
+extern struct GifFileType { SWidth: i32 }
+
+@externalLinkage
+pub fn bad(gif: ?&mut GifFileType): i32 {
+    return gif.SWidth        // COMPILE ERROR: must be unwrapped before use
+}
+```
+
+```milo error
+extern struct GifFileType { SWidth: i32 }
+
+@externalLinkage
+pub fn worse(gif: ?&mut GifFileType): i32 {
+    let held = Option.Some(gif)   // COMPILE ERROR: must be unwrapped before use
+    return 0
+}
+```
+
+That second one is the point of the design. `Option<&mut T>` is an enum with a reference
+payload, which the checker already rejects as storage; a nullable extern reference must
+never become one. It exists only between the call boundary and the unwrap.
+
+**After the unwrap, `g` is an ordinary second-class `&mut T`** and obeys every rule any
+other reference does: it cannot be returned, cannot be stored, cannot outlive the call. A
+`?&T` unwraps to a shared `&T`, which cannot be written through. One thing the unwrap adds:
+a second live unwrap of the same `?&mut T` is rejected, because it would hand the body two
+`&mut T` to one object. The borrow is scoped, so unwrapping once per arm of an `if` is fine.
+
+`@cSig` verifies the spelling against the real header, and it verifies clean, because the
+C type genuinely is `T *`:
+
+```milo
+@cSig("time.h", "time_t time(time_t *)")
+extern fn time(t: ?&mut i64): i64
+```
+
+`milo build-lib` declares it in the generated header the same way — `int32_t
+point_bump(Point* p);` — so a C caller passes `&p` or `NULL` with no shim in between.
+
+Note the two positions of `?` mean different things: a **leading** `?` before `&` is this
+feature, and a **trailing** `?` (`T?`) is `Option<T>` shorthand. See
+[docs/foreign-memory.md](foreign-memory.md) for why the two must not be the same thing.
+
 ### Typed Function Pointers in Extern Decls
 
 Extern functions can declare function-typed parameters. Passing a matching Milo function requires no cast:

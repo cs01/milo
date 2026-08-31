@@ -1,0 +1,17 @@
+// @error: 'b' is a nullable extern reference and must be unwrapped before use
+// `Option<&mut T>` is an enum with a reference payload, which `nestedRef` already rejects
+// as storage. A nullable extern reference must never become one: it is not a value, and
+// the only thing that may be done with it is the unwrap.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn keep(b: ?&mut Bump): i32 {
+    let _maybe = Option.Some(b)
+    return 0
+}
+
+fn main() {
+    print(1)
+}

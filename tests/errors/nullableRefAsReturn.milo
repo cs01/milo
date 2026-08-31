@@ -1,0 +1,15 @@
+// @error: '?&mut T' is only legal on a parameter of an 'extern' or '@externalLinkage' function
+// Parameter position only — the same restriction `&mut T` already has, for the same
+// reason: a returned reference outlives the call whose duration is the C contract.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn find(b: ?&mut Bump): ?&mut Bump {
+    return b
+}
+
+fn main() {
+    print(1)
+}

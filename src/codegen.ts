@@ -2461,6 +2461,8 @@ export class Codegen {
       }
       case "Match":
         return this.genMatch(stmt);
+      case "NullRefUnwrap":
+        return this.genNullRefUnwrap(stmt);
       case "UnsafeBlock": {
         let terminated = false;
         for (const s of stmt.body) {
@@ -3179,6 +3181,37 @@ export class Codegen {
     // when both arms return/diverge, the merge block is unreachable; LLVM still requires a terminator
     if (thenTerminated && elseTerminated) lines.push(`  unreachable`);
     return [lines, thenTerminated && elseTerminated];
+  }
+
+  // `let g = p else { … }` over a `?&mut T` parameter. One `icmp eq ptr … , null` and a
+  // branch: null takes the author's else block (which always diverges — only they know
+  // whether this C API answers GIF_ERROR, void or errno), non-null registers `g` exactly
+  // as the parameter prologue registers a `&mut T`, so every later read/write goes through
+  // the ordinary ref path. No wrapper function, no tag, no Option is built.
+  private genNullRefUnwrap(stmt: HIRStmt & { kind: "NullRefUnwrap" }): [string[], boolean] {
+    const lines: string[] = [];
+    const [ptrLines, ptrVal] = this.genExpr(stmt.ptr);
+    lines.push(...ptrLines);
+    const isNull = this.nextTemp();
+    const nullLabel = this.nextLabel("nullref.null");
+    const okLabel = this.nextLabel("nullref.ok");
+    lines.push(`  ${isNull} = icmp eq ptr ${ptrVal}, null`);
+    lines.push(`  br i1 ${isNull}, label %${nullLabel}, label %${okLabel}`);
+    lines.push(`${nullLabel}:`);
+    let nullTerminated = false;
+    const nullStart = this.droppableLocals.length;
+    for (const st of stmt.elseBody) { const [sl, t] = this.genStmt(st); lines.push(...sl); if (t) { nullTerminated = true; break; } }
+    // The checker requires the block to diverge, so this branch is normally dead; emit it
+    // anyway rather than trusting a rule from another file to keep the IR well-formed.
+    if (!nullTerminated) { this.emitScopeDrops(lines, nullStart); lines.push(`  br label %${okLabel}`); }
+    lines.push(`${okLabel}:`);
+    const addr = `%${stmt.name}.addr`;
+    this.entryAllocas.push(`  ${addr} = alloca ptr`);
+    lines.push(`  store ptr ${ptrVal}, ptr ${addr}`);
+    // `type`/`typeKind` are the POINTEE, with isRef saying the slot holds a pointer to it
+    // — the same registration shape a `&mut T` parameter gets.
+    this.locals.set(stmt.name, { type: this.llvmType(stmt.inner), typeKind: stmt.inner, mutable: stmt.mutable, isRef: true, addr });
+    return [lines, false];
   }
 
   private genWhile(stmt: HIRStmt & { kind: "While" }): [string[], boolean] {

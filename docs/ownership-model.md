@@ -3,7 +3,7 @@ system: ownership-model
 purpose: why Milo has no lifetimes — second-class references as guardrails, and how that compares to Rust
 key-files: src/checker.ts, docs/language-reference.md, docs/design.md
 update-when: reference semantics change (second-class rule, borrow/exclusivity checks, slices/arenas)
-last-verified: 2026-07-22
+last-verified: 2026-08-30 (nullable extern reference added as a parameter-position spelling)
 -->
 
 # Ownership & references — why there are no lifetimes
@@ -23,6 +23,13 @@ fn step(cpu: &mut Cpu, bus: &mut Bus): void { ... }   // fine — params
 struct Holder { r: &i64 }                              // error: refs can't be stored
 fn danger(): &i64 { ... }                              // error: refs can't be returned
 ```
+
+A C boundary gets one extra **spelling** for the same thing, not an extra kind: `?&mut T`
+on a parameter of an `extern` / `@externalLinkage` fn is a reference C is allowed to pass
+as null (the ABI is `T *`). It is unwrapped with `let g = p else { … }` and is an ordinary
+second-class `&mut T` from there, so the rule above is untouched — see
+[foreign-memory.md](foreign-memory.md) §2. It is deliberately NOT `Option<&mut T>`, which
+is an enum with a reference payload and is rejected as storage like any other escape.
 
 That single restriction is why Milo needs no lifetimes. Lifetimes exist, in languages that have them, to *track references that escape* — references returned from functions or stored in structs, whose validity must be proven to outlive their referent. Milo forbids escape outright, so there is nothing to annotate. The borrow checker still runs **inside** each function (it rejects mutating a collection while a loop or slice borrows it, and rejects aliasing a `&mut` and `&` into the same place at a call). "No lifetimes" does **not** mean "no borrow checking" — it means the checking never needs a syntax.
 

@@ -1,0 +1,34 @@
+// @expect: -1
+// @expect: 41
+// @expect: 0
+// Null takes the else block, and the else block is the AUTHOR's: only they know this C
+// API answers -1 rather than 0, void or errno. Proved by three separate facts, not by
+// the absence of a crash — the sentinel came back, the struct was not touched, and a
+// counter the body increments after the unwrap stayed at zero.
+extern struct Bump {
+    x: i32,
+    y: i32,
+}
+
+var touched: i32 = 0
+
+@externalLinkage
+pub fn bumpX(b: ?&mut Bump): i32 {
+    let p = b else {
+        return -1
+    }
+    touched = touched + 1
+    p.x = p.x + 1
+    return p.x
+}
+
+pub fn main(): i32 {
+    var slot = Bump {
+        x: 41, y: 7
+    }
+    let nothing = 0 as *Bump
+    print(bumpX(nothing))
+    print(slot.x)
+    print(touched)
+    return 0
+}

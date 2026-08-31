@@ -1,0 +1,18 @@
+// @error: must diverge (return/break/continue) — it runs when C passed null
+// The else block runs when C passed null, so falling out of it would reach code where
+// the binding does not exist. Same rule the enum `let`-else already enforces.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn bumpX(b: ?&mut Bump): i32 {
+    let p = b else {
+        print("null")
+    }
+    return p.x
+}
+
+fn main() {
+    print(1)
+}

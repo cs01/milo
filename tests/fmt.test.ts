@@ -45,6 +45,11 @@ const cases: Record<string, string> = {
   // before the general space-after-a-comma one. Stable output, so the idempotence
   // corpus could not see it — only a round-trip case can.
   bangAfterComma: `fn main() {\n    let x = true\n    take(x, !x, 1)\n}\n`,
+  // `?&mut T` is the one PREFIX use of `?`; the postfix rule for the propagate operator
+  // and the `T?` shorthand printed it as `b:?&mut Bump`. Stable output, so idempotence
+  // could not see it — a round-trip case is the only thing that can.
+  nullableExternRef: `@externalLinkage\npub fn bumpX(b: ?&mut Bump): i32 {\n    let p = b else {\n        return -1\n    }\n    return p.x\n}\n`,
+  nullableExternRefShared: `extern fn peek(b: ?&Bump): i32\n`,
 };
 
 for (const [name, src] of Object.entries(cases)) {

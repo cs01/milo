@@ -1,0 +1,20 @@
+// @error: cannot assign to immutable variable 'p.x'
+// A `?&T` unwraps to a shared `&T`. After the unwrap it is an ordinary second-class
+// reference and every existing rule applies unchanged — there is no new reference kind
+// here to write a new rule for.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn readX(b: ?&Bump): i32 {
+    let p = b else {
+        return -1
+    }
+    p.x = 3
+    return p.x
+}
+
+fn main() {
+    print(1)
+}

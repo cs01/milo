@@ -875,6 +875,16 @@ pub fn wantSpaceBefore(tokens: &Vec<Token>, i: i64): bool {
     pk == TokKind.Dot || pk == TokKind.ColonColon {
         return false
     }
+    // `?&mut T` — the nullable extern reference. This `?` is a PREFIX, unlike the two
+    // other uses of the token (the postfix `T?` Option shorthand and the propagate
+    // operator), so it must NOT hug what came before it: the rule below would print
+    // `gif:?&mut GifFileType`. The `&` it introduces hugs it instead.
+    if tk == TokKind.Question && i + 1 < tokens.len && tokens[i + 1].kind == TokKind.Amp {
+        return pk == TokKind.Colon || pk == TokKind.Comma
+    }
+    if pk == TokKind.Question && tk == TokKind.Amp {
+        return false
+    }
     // Never space before ) ] , . :: ? : ;
     if tk == TokKind.RParen || tk == TokKind.RBracket ||
     tk == TokKind.Comma || tk == TokKind.Dot ||

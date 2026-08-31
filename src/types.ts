@@ -37,7 +37,7 @@ export const PRIMITIVE_TYPE_NAMES = [
   "bool", "void", "string",
 ] as const;
 
-export function typeFromAst(ty: { name: string; isPtr: boolean; ptrDepth?: number; isRef: boolean; isRefMut: boolean; isArray: boolean; arraySize: number | null; isFn?: boolean; isCFn?: boolean; fnParams?: any[]; fnRet?: any; rangeMin?: number; rangeMax?: number }): TypeKind {
+export function typeFromAst(ty: { name: string; isPtr: boolean; ptrDepth?: number; isRef: boolean; isRefMut: boolean; isNullableRef?: boolean; isArray: boolean; arraySize: number | null; isFn?: boolean; isCFn?: boolean; fnParams?: any[]; fnRet?: any; rangeMin?: number; rangeMax?: number }): TypeKind {
   if (ty.isFn && ty.fnParams && ty.fnRet) {
     const tag = ty.isCFn ? "cfn" as const : "fn" as const;
     const base = { tag, params: ty.fnParams.map(typeFromAst), ret: typeFromAst(ty.fnRet) };
@@ -70,6 +70,11 @@ export function typeFromAst(ty: { name: string; isPtr: boolean; ptrDepth?: numbe
     for (let i = 0; i < depth; i++) result = { tag: "ptr", inner: result };
     return result;
   }
+  // `?&mut T` IS a `T *` — that is the entire ABI claim the spelling makes, so it is one
+  // here too, and headergen/@cSig/codegen need no case of their own. What keeps it from
+  // being an ordinary raw pointer is not the type: it is the binding, which the checker
+  // marks so that every use except the `let … else` unwrap is an error.
+  if (ty.isNullableRef) return { tag: "ptr", inner: result };
   if (ty.isRef) return { tag: "ref", inner: result, mutable: false };
   if (ty.isRefMut) return { tag: "ref", inner: result, mutable: true };
   return result;

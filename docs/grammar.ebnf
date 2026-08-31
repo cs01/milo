@@ -46,8 +46,13 @@ attribute   = "@" [ "!" ] IDENT [ "(" attribute_arg { "," attribute_arg } ")" ] 
 attribute_arg = IDENT | STRING ;
 
 (* ── Types ── *)
-(* A reference type is only legal in parameter position (second-class references). *)
-type        = [ "&" [ "mut" ] ] base_type [ "?" ] ;
+(* A reference type is only legal in parameter position (second-class references).
+   A LEADING "?" makes it a nullable extern reference (`?&mut T` / `?&T`), which is
+   narrower still: it is legal only on a parameter of an `extern` / `@externalLinkage`
+   fn, where it is a spelling for the C type `T *`. Note the two positions of "?" mean
+   different things — a trailing one is `Option<T>` shorthand. *)
+type        = nullable_ref | [ "&" [ "mut" ] ] base_type [ "?" ] ;
+nullable_ref = "?" "&" [ "mut" ] type_name ;
 base_type   = "*" base_type                                  (* raw pointer, unsafe only *)
             | "[" type [ ";" INT ] "]"                       (* array; sized or slice *)
             | "(" [ type { "," type } ] ")" "=>" type        (* function type *)
@@ -96,6 +101,9 @@ contract    = ( "requires" | "ensures" | "invariant" | "decreases" ) expr ;
 block       = "{" { ";" | statement } "}" ;
 statement   = let_decl | var_decl | return_stmt | if_stmt | while_stmt | for_stmt
             | match_stmt | unsafe_block | "break" | "continue" | assign_stmt | expr ;
+(* Two `else` forms: with a pattern it is the enum let-else, and with a bare IDENT it
+   unwraps a nullable extern reference (the else block runs when C passed null). Both
+   require the else block to diverge. A bare IDENT with a type annotation takes no else. *)
 let_decl    = "let" ( IDENT [ ":" type ] | pattern ) "=" expr [ "else" block ] ;
 var_decl    = "var" IDENT [ ":" type ] "=" expr ;
 return_stmt = "return" [ expr ] ;

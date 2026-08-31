@@ -1,0 +1,15 @@
+// @error: '?&mut T' is only legal on a parameter of an 'extern' or '@externalLinkage' function
+// `?&mut T` is a spelling for a C `T *` at a signature seam, not a type. An ordinary Milo
+// fn has no C caller to accept null from, so the nullable spelling would only be a way to
+// smuggle a maybe-reference into the language.
+extern struct Bump {
+    x: i32,
+}
+
+fn plain(b: ?&mut Bump): i32 {
+    return 0
+}
+
+fn main() {
+    print(plain(0 as *Bump))
+}

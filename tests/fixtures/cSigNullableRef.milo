@@ -1,0 +1,35 @@
+// @skip-os: win32
+// this fixture declares POSIX externs (time, uname) that the MSVC CRT does not
+// provide the same way — a test-side portability limit, not a compiler gap.
+
+// @cSig verifies a `?&mut T` parameter against the real header, and it verifies clean
+// because the C type genuinely IS `T *`: the nullable spelling adds no tag and no wrapper.
+// `time` is the case that motivated the design — a C API whose null argument is a
+// documented mode, not an error — and `uname` covers the struct pointee, where the guard
+// compares sizeof(*(struct utsname *)0) against the Milo struct's size.
+@cSig("time.h", "time_t time(time_t *)")
+extern fn time(t: ?&mut i64): i64
+
+@cSig("sys/utsname.h", "int uname(struct utsname *)")
+extern fn uname(buf: ?&mut Utsname): i32
+
+// A prefix of C's `struct utsname` — the pointee guard uses `>=` for a struct, so
+// declaring less than C does is legitimate.
+extern struct Utsname {
+    sysname: [u8; 256],
+}
+
+pub fn main(): i32 {
+    let noSlot = 0 as *i64
+    // @expect: true
+    print(time(noSlot) > 0)
+
+    var u = Utsname {
+        sysname: [0; 256]
+    }
+    unsafe {
+        // @expect: 0
+        print(uname(u.addrOf()))
+    }
+    return 0
+}

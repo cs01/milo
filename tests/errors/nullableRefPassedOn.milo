@@ -1,0 +1,19 @@
+// @error: 'b' is a nullable extern reference and must be unwrapped before use
+// Handing it to another function is a use like any other. The pointer crosses exactly one
+// boundary — the one whose signature declared it — and is unwrapped there or nowhere.
+extern struct Bump {
+    x: i32,
+}
+
+fn takes(_p: *Bump): i32 {
+    return 0
+}
+
+@externalLinkage
+pub fn forward(b: ?&mut Bump): i32 {
+    return takes(b)
+}
+
+fn main() {
+    print(1)
+}

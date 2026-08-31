@@ -1,0 +1,29 @@
+// @expect: 42
+// @expect: 42
+// A `?&mut T` parameter IS a `T *` — one pointer, no tag — and the unwrapped binding is
+// an ordinary `&mut T`, so the write lands in the caller's struct rather than in a copy.
+// The second line is what proves that: it reads the original after the call returns.
+extern struct Bump {
+    x: i32,
+    y: i32,
+}
+
+@externalLinkage
+pub fn bumpX(b: ?&mut Bump): i32 {
+    let p = b else {
+        return -1
+    }
+    p.x = p.x + 1
+    return p.x
+}
+
+pub fn main(): i32 {
+    var slot = Bump {
+        x: 41, y: 7
+    }
+    unsafe {
+        print(bumpX(slot.addrOf()))
+    }
+    print(slot.x)
+    return 0
+}

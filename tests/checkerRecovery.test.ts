@@ -87,3 +87,20 @@ fn main() {
   // A leftover loopDepth would make this `break` legal outside a loop.
   expect(errs.some(e => e.includes("'break' outside of loop"))).toBe(true);
 });
+
+// A parse error INSIDE a string interpolation used to carry the fragment sub-parser's
+// own 1:col, which pointed at the first line of the file and a column past the end of
+// it — the frontend fuzzer's "bad span" bucket. Successful sub-parses were already
+// restamped to the f-string; the throwing path was not.
+test("a parse error inside an interpolation is anchored at the f-string, not at 1:1", () => {
+  const src = "fn main() {\n    let a = 1\n    print($\"x {a >} y\")\n}\n";
+  let span: { line: number; col: number } | undefined;
+  try {
+    new Parser(new Lexer(src).tokenize(), src).parse();
+  } catch (e) {
+    span = (e as { diagnostic: { span?: { line: number; col: number } } }).diagnostic.span;
+  }
+  expect(span?.line).toBe(3);
+  const lineLen = src.split("\n")[span!.line - 1]!.length;
+  expect(span!.col).toBeLessThanOrEqual(lineLen);
+});

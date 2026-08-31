@@ -58,6 +58,23 @@ describe("abi: x86_64 System V IR shape", () => {
   });
 });
 
+// `?&mut T` claims to be exactly `T *`. That claim is invisible to the fixture lane —
+// a wrapper struct, a tag word or a second argument would all still run correctly from
+// Milo — so it is pinned on the IR, for both ABIs.
+describe("abi: nullable extern reference", () => {
+  for (const target of ["linux-x64", "macos-arm64"]) {
+    test(`?&mut T is one bare pointer parameter (${target})`, () => {
+      const ir = emitIR("nullableExternRefMut.milo", target);
+      const define = ir.split("\n").find(l => l.startsWith("define") && l.includes("@bumpX"));
+      expect(define).toBeDefined();
+      // The whole parameter list, not a substring: `(ptr %b)` and nothing else.
+      expect(define).toMatch(/define i32 @bumpX\(ptr %b\)/);
+      // and the null test is a pointer compare against null, not an enum tag load
+      expect(ir).toContain("icmp eq ptr");
+    });
+  }
+});
+
 describe("abi: AArch64 AAPCS64 IR shape", () => {
   test("large struct → sret + PLAIN pointer arg (no byval on arm64)", () => {
     const ir = emitIR("externStructLarge.milo", "macos-arm64");

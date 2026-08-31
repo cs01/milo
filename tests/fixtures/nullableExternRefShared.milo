@@ -1,0 +1,29 @@
+// @expect: 41
+// @expect: -1
+// The shared variant. `?&T` unwraps to a `&T`, which reads through to the caller's
+// struct and cannot write to it — `p.x = 0` inside this body is a compile error
+// (tests/errors/nullableRefSharedWrite.milo), exactly as it is for any other `&T`.
+extern struct Bump {
+    x: i32,
+    y: i32,
+}
+
+@externalLinkage
+pub fn readX(b: ?&Bump): i32 {
+    let p = b else {
+        return -1
+    }
+    return p.x
+}
+
+pub fn main(): i32 {
+    var slot = Bump {
+        x: 41, y: 7
+    }
+    unsafe {
+        print(readX(slot.addrOf()))
+        let nothing = 0 as *Bump
+        print(readX(nothing))
+    }
+    return 0
+}

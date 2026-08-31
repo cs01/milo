@@ -159,6 +159,23 @@ const PRIM_SRC = `fn openPad(): *u8 {
 `;
 const PRIM_URI = "file:///tmp/milo-lsp-prim.milo";
 
+// A `?&mut T` parameter and the binding its `let … else` unwrap produces. The binding
+// escapes into the enclosing scope but comes from no pattern, so the pattern-binding
+// hover path could not see it.
+const NULLREF_SRC = `extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn bumpX(b: ?&mut Bump): i32 {
+    let p = b else {
+        return -1
+    }
+    return p.x
+}
+`;
+const NULLREF_URI = "file:///tmp/milo-lsp-nullref.milo";
+
 // Hover on a global variable, both at its decl and at a reference in a fn.
 const GLOBAL_SRC = `var ptr: *u8 = 0 as *u8
 
@@ -309,7 +326,7 @@ beforeAll(async () => {
   })();
   await req(1, "initialize", { capabilities: {} });
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
-  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC], [LINTS_URI, LINTS_SRC]] as const) {
+  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC], [LINTS_URI, LINTS_SRC], [NULLREF_URI, NULLREF_SRC]] as const) {
     await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "milo", version: 1, text } } });
   }
 });
@@ -333,6 +350,14 @@ test("hover on enum-pattern payload binding shows its type", async () => {
   // `n` used in the arm body `return n.name` (line 7, char 19).
   const inBody = await req(21, "textDocument/hover", { textDocument: { uri: MATCH_URI }, position: { line: 7, character: 19 } });
   expect(inBody?.contents?.value).toContain("Node");
+});
+
+test("hover on a nullable-extern-ref unwrap binding shows the reference type", async () => {
+  // `p` on the `let p = b else {` line, and again where the body reads it.
+  const atBind = await req(60, "textDocument/hover", { textDocument: { uri: NULLREF_URI }, position: { line: 6, character: 8 } });
+  expect(atBind?.contents?.value).toContain("&mut Bump");
+  const inBody = await req(61, "textDocument/hover", { textDocument: { uri: NULLREF_URI }, position: { line: 9, character: 11 } });
+  expect(inBody?.contents?.value).toContain("&mut Bump");
 });
 
 test("hover on builtin Vec type and Vec.new constructor", async () => {

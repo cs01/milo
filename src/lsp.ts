@@ -545,6 +545,13 @@ function findVarHover(
       if (stmt.elseBody) { const r2 = findVarHover(stmt.elseBody, word, exprTypes, bindTypes); if (r2) return r2; }
     }
     if (stmt.kind === "LetElseStmt") {
+      // `let g = p else { … }` over a `?&mut T` parameter binds through `bindName`, not
+      // through a pattern; the checker still records its type against the placeholder
+      // pattern, so the same map answers both forms.
+      if (stmt.bindName === word) {
+        const tk = bindTypes.get(stmt.pattern)?.[0];
+        return `let ${word}: ${tk ? formatTypeName(tk) : "?"}`;
+      }
       const b = patternBindHover(stmt.pattern); if (b) return b;
       const r = findVarHover(stmt.elseBody, word, exprTypes, bindTypes); if (r) return r;
     }
@@ -1186,6 +1193,7 @@ function findVarDecl(stmt: Stmt, name: string): Span | null {
   }
   if (stmt.kind === "LetElseStmt") {
     // The pattern binding escapes into the enclosing scope — its decl site.
+    if (stmt.bindName === name && stmt.span) return stmt.span;
     if (stmt.pattern.kind === "EnumPattern" && stmt.pattern.bindings.includes(name) && stmt.pattern.span) {
       return stmt.pattern.span;
     }

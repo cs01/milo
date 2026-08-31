@@ -183,7 +183,7 @@ export class Parser {
           functions.push(f);
         }
       } else if (this.at(TokenKind.Fn)) {
-        const f = this.parseFn();
+        const f = this.parseFn(!!attrs?.some(a => a.name === "externalLinkage"));
         if (attrs) f.attributes = attrs;
         f.isPub = !!pubTok;
         functions.push(f);
@@ -278,11 +278,39 @@ export class Parser {
 
   // ── Types ──
 
-  private parseType(): MiloType {
+  // `allowNullableRef` is true ONLY at the top level of a parameter type in an `extern` /
+  // `@externalLinkage` fn signature. Every recursive call below leaves it at its default, so
+  // `Vec<?&mut T>`, `(?&mut T) => R`, `[?&mut T; 2]` and a `?&mut T` return type are all
+  // rejected here rather than needing a rule in the checker: the flag cannot reach any
+  // position the ownership model does not already permit a `&mut T` in.
+  private parseType(allowNullableRef = false): MiloType {
     // Bail before the fallback `advance()` below can accept EOF as a type name.
     // Several callers loop until a closing delimiter they will never see in a
     // truncated file, and a parseType that returns without consuming would spin.
     if (this.at(TokenKind.Eof)) this.error("expected a type, but the file ended here", this.peek());
+    // ?&T or ?&mut T — the nullable extern reference. Prefix, unlike the postfix `T?`
+    // (Option sugar) below and the postfix propagate operator in expression position, so
+    // there is no ambiguity with either: no other type may begin with '?'.
+    if (this.at(TokenKind.Question)) {
+      const q = this.advance();
+      if (!this.at(TokenKind.Amp)) {
+        this.error("expected '&' or '&mut' after '?'", q, undefined,
+          "'?&mut T' is the nullable extern reference; an optional value is spelled 'T?' or 'Option<T>'");
+      }
+      const inner = this.parseType();
+      if (!allowNullableRef) {
+        this.error("'?&mut T' is only legal on a parameter of an 'extern' or '@externalLinkage' function", q, undefined,
+          "it is a signature spelling for a C 'T *', not a type: it cannot name a local, a field, a return type, a closure parameter or a type argument");
+      }
+      // Anything but a plain `&T`/`&mut T` has no one-pointer C spelling, which is the
+      // whole content of the feature. A slice is a fat value, a `*T` is already nullable.
+      if (!inner.isRef && !inner.isRefMut) this.error("'?' must be followed by '&T' or '&mut T'", q);
+      if (inner.isArray) this.error("'?&[T]' is not a nullable extern reference: a slice is a fat (ptr, len) value, not one pointer", q);
+      if (inner.isPtr || inner.isFn || inner.typeArgs?.length) {
+        this.error("'?&' takes a plain named type: '?&mut GifFileType'", q);
+      }
+      return { ...inner, isNullableRef: true };
+    }
     // &T or &mut T
     if (this.match(TokenKind.Amp)) {
       const isMut = !!this.match(TokenKind.Mut);
@@ -473,15 +501,15 @@ export class Parser {
 
   // ── Functions ──
 
-  private parseParam(): Param {
+  private parseParam(allowNullableRef = false): Param {
     const nameTok = this.expect(TokenKind.Ident);
     const name = nameTok.value;
     this.expect(TokenKind.Colon);
-    const type = this.parseType();
+    const type = this.parseType(allowNullableRef);
     return { name, type, span: this.span(nameTok) };
   }
 
-  private parseParamList(): { params: Param[]; variadic: boolean } {
+  private parseParamList(allowNullableRef = false): { params: Param[]; variadic: boolean } {
     this.expect(TokenKind.LParen);
     const params: Param[] = [];
     let variadic = false;
@@ -491,7 +519,7 @@ export class Parser {
         variadic = true;
         break;
       }
-      params.push(this.parseParam());
+      params.push(this.parseParam(allowNullableRef));
       this.match(TokenKind.Comma);
     }
     this.expect(TokenKind.RParen);
@@ -508,7 +536,7 @@ export class Parser {
     this.expect(TokenKind.Fn);
     const nameTok = this.expect(TokenKind.Ident);
     const name = nameTok.value;
-    const { params, variadic } = this.parseParamList();
+    const { params, variadic } = this.parseParamList(true);
     const retType = this.parseReturnType();
     return { kind: "Function", name, typeParams: [], params, retType, contracts: [], body: [], isExtern: true, isVariadic: variadic, span: this.span(nameTok) };
   }
@@ -541,12 +569,15 @@ export class Parser {
     return { kind: "StructDecl", name, typeParams: [], fields, isExtern: true, span: this.span(start) };
   }
 
-  private parseFn(): Function {
+  // `externalLinkage` is decided by the caller, which is the only place the decl's
+  // attributes have been read yet: `@externalLinkage` publishes a C symbol, so its
+  // parameters may carry the `?&mut T` spelling that an ordinary Milo fn may not.
+  private parseFn(externalLinkage = false): Function {
     this.expect(TokenKind.Fn);
     const nameTok = this.expect(TokenKind.Ident);
     const name = nameTok.value;
     const typeParams = this.parseTypeParams();
-    const { params, variadic } = this.parseParamList();
+    const { params, variadic } = this.parseParamList(externalLinkage);
     const retType = this.parseReturnType();
     const contracts = this.parseContracts();
     this.expect(TokenKind.LBrace);
@@ -887,6 +918,18 @@ export class Parser {
     this.expect(TokenKind.Eq);
     this.requireBindingValue("let", name, letTok);
     const value = this.parseExpr();
+    // `let g = p else { … }` — the nullable-extern-reference unwrap. No pattern, because
+    // there is no enum: the only thing being matched is "is this pointer null". `else`
+    // cannot continue an expression, so seeing one here is unambiguous. The checker
+    // rejects the form on anything but a `?&mut T` / `?&T` parameter.
+    if (this.at(TokenKind.Else)) {
+      if (type) this.error(`'let ${name} = … else { … }' takes no type annotation — the type comes from the parameter being unwrapped`, letTok);
+      this.advance();
+      this.expect(TokenKind.LBrace);
+      const elseBody = this.parseStmts();
+      this.expect(TokenKind.RBrace);
+      return { kind: "LetElseStmt", pattern: { kind: "WildcardPattern", span: s }, value, elseBody, bindName: name, span: s };
+    }
     return { kind: "LetDecl", name, type, value, span: s };
   }
 
@@ -1815,7 +1858,18 @@ export class Parser {
           i++;
         }
         const tokens = new Lexer(exprStr).tokenize();
-        const expr = new Parser(tokens).parseExpr();
+        // Same restamping problem as the spans below, one step earlier: a sub-parse that
+        // THROWS carries the fragment's own 1:col, which points at the first line of the
+        // file and a column past the end of it. That is a diagnostic the reader cannot
+        // act on and what the frontend fuzzer's bad-span check reports. Re-anchor to the
+        // f-string before it leaves this frame.
+        let expr: Expr;
+        try {
+          expr = new Parser(tokens).parseExpr();
+        } catch (e) {
+          if (!(e instanceof ParseError)) throw e;
+          throw new ParseError({ ...e.diagnostic, span }, this.source, this.filePath);
+        }
         // The sub-parser lexes a bare fragment, so every span in it starts over
         // at 1:1 — any later error on an interpolated expression pointed at the
         // first line of the FILE. Restamp to the f-string's own span. Columns

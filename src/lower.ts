@@ -201,8 +201,12 @@ class LowerCtx {
     return {
       name: p.name,
       type: innerType,
-      isRef: pType.isRef,
-      isRefMut: pType.isRefMut,
+      // A `?&mut T` sets isRefMut too (it IS a mutable reference, once unwrapped), but the
+      // parameter itself is the raw `T *` the ABI passes: flagging it as a ref here would
+      // make the prologue treat the incoming pointer as a pointer-to-pointer and deref it
+      // twice. The reference appears at the unwrap, not at the signature.
+      isRef: pType.isRef && !pType.isNullableRef,
+      isRefMut: pType.isRefMut && !pType.isNullableRef,
     };
   }
 
@@ -353,6 +357,20 @@ class LowerCtx {
         return { kind: "Match", subject: this.lowerExpr(stmt.subject), arms, enumName, subjectIsRef, span: stmt.span };
       }
       case "LetElseStmt": {
+        // `let g = p else { E }` over a `?&mut T` parameter: no enum, no match, just the
+        // null test the C ABI leaves to convention everywhere else.
+        const nullRef = this.c.nullRefUnwraps.get(stmt);
+        if (nullRef && stmt.bindName !== undefined) {
+          return {
+            kind: "NullRefUnwrap",
+            name: stmt.bindName,
+            ptr: this.lowerExpr(stmt.value),
+            inner: nullRef.inner,
+            mutable: nullRef.mutable,
+            elseBody: stmt.elseBody.map(st => this.lowerStmt(st, fnRetType)),
+            span: stmt.span,
+          };
+        }
         // Desugar `let P(b) = v else { E }` into `let b = match v { P(b') => b', _ => E }`.
         // The match-expr's diverging wildcard arm (E always returns) already
         // type-checks and codegens, and the outer Let makes `b` escape into the

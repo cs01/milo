@@ -3,7 +3,7 @@ system: foreign-memory
 purpose: how Milo reaches memory it did not allocate, and why that needs constructors rather than new reference kinds
 key-files: std/foreign.milo, src/checker.ts, src/codegen.ts, docs/ownership-model.md, docs/residue-vs-rust.md
 update-when: a foreign-memory primitive is added/changed, the nullable-extern-ref spelling changes, or the giflib differential gate moves
-last-verified: 2026-08-30 (feature 1 built and gated; features 2 and 3 not yet built)
+last-verified: 2026-08-30 (features 1 and 2 built and gated; feature 3 not yet built)
 -->
 
 # Foreign memory: reaching what Milo did not allocate
@@ -150,7 +150,7 @@ three to be right at once.
 **Not attempted, and worth naming:** nothing here validates alignment, and nothing gives the
 view a brand. Both are as stated in the sections above.
 
-## 2. `?&mut T` — nullable extern reference
+## 2. `?&mut T` — nullable extern reference (**BUILT**)
 
 ```milo
 @externalLinkage fn DGifGetScreenDesc(gif: ?&mut GifFileType): i32 {
@@ -177,6 +177,80 @@ This is a case where the axiom **forces the better design**: the C contract for
 `DGifGetScreenDesc(GifFileType *)` is "valid for the duration of this call," which is the
 definition of a second-class reference. `&'a` over-promises — it can name a lifetime longer than
 the call, and `ffi.rs` then has 28 sites where a human must not do that.
+
+### What the build actually needed
+
+Shipped as a parser spelling plus one checker rule and one HIR node, with fixtures
+`tests/fixtures/nullableExternRef*.milo` and `tests/fixtures/cSigNullableRef.milo`, twelve
+rejections in `tests/errors/nullableRef*.milo` and `letElseNotNullableRef.milo`, an IR-shape
+assertion in `tests/abi.test.ts` and a C consumer in `tests/header.test.ts`. Six things the
+spec above did not anticipate:
+
+**`?` did not collide with the propagate operator, and the reason is worth writing down.**
+The two live in different grammars. `?` is postfix in expression position (`v?`) and postfix
+in type position (`T?` = `Option<T>`); this feature is the only PREFIX use, and no other type
+may begin with `?`. So `parseType` takes it with one arm at the top and no lookahead. The one
+place the collision was real is the formatter, which is token-based and had a single "never
+space before `?`" rule covering both postfix uses; it printed `gif:?&mut GifFileType`.
+
+**The placement rule is enforced in the PARSER, not the checker,** which is the opposite of
+this repo's usual instruction to catch semantics in `checker.ts`. `parseType` takes an
+`allowNullableRef` flag that is true only at the top level of a parameter type in an
+`extern` / `@externalLinkage` signature; every recursive call leaves it false. That makes
+`Vec<?&mut T>`, `(?&mut T) => R`, `[?&mut T; 2]`, a field, a local, a type alias and a return
+type all one error with one message, and — more usefully — it means the flag can never reach
+any later stage in a position the ownership model does not already permit a `&mut T`. There
+is no defensive case for it anywhere in `checker.ts`, `lower.ts`, `codegen.ts`, `csig.ts` or
+`headergen.ts`.
+
+**It is not a new `TypeKind`; it is a `ptr`.** `typeFromAst` maps `?&mut T` to
+`{tag: "ptr", inner: T}`, because that IS the ABI claim the spelling makes. What keeps it
+from being an ordinary raw pointer is not the type but the BINDING: `VarInfo.nullableRef`
+records the reference the unwrap will produce, and `checkIdentExpr` rejects every read of a
+binding that carries it. One gate covers passing it on, storing it, a field access and
+`Option.Some(p)`, because all four reach `checkIdentExpr`. The consequence worth having is
+that `@cSig`'s pointee-width guard and `headergen`'s `T *` both worked with no change:
+`sizeof(*(struct utsname *)0) >= <milo size>` is emitted for a `?&mut Utsname` exactly as it
+is for a `*Utsname`, and `build-lib` declares `int32_t point_bump(Point* p);`.
+
+**`match` was NOT built, deliberately.** The spec offers `let`-else *or* `match` as the
+spellings. A `match` over a nullable extern reference would need `Option.Some(g)` /
+`Option.None` patterns, which is precisely the `Option<&mut T>` mental model the section
+above says must not exist — the user would be writing the enum the design refuses to build.
+`let g = p else { … }` names no enum and no variant, so it is the only spelling, and
+`match gif { … }` gets the ordinary "must be unwrapped" diagnostic pointing at it.
+
+**A second live unwrap of the same `?&mut T` is rejected,** which the spec does not mention
+and which the axiom requires: two `let`s would hand the body two `&mut T` aliasing one
+object. It reuses the existing borrow plumbing (`VarInfo.borrowed` plus `freezes`, released
+by `popScope`), so it is scoped rather than function-wide: unwrapping once in each arm of an
+`if` is accepted. A shared `?&T` has nothing to exclude and is not restricted.
+
+**`let NAME = value else { … }` had to be added to the parser at all.** The existing let-else
+required a pattern (`let Enum.Variant(b) = v else`), disambiguated by the `.` after the first
+identifier, so the bare-identifier form was a syntax error. It is now an `LetElseStmt` with a
+`bindName` and a placeholder wildcard pattern, which is what let every Stmt walker in
+`safety.ts`, `visibility.ts`, `wcet.ts`, `verify.ts` and `mangle.ts` keep working untouched.
+On anything that is not a nullable extern reference it is a checker error that names the
+enum form.
+
+### Gate honesty
+
+Three deliberate breaks, and what each reddened:
+
+| Break | Result |
+|---|---|
+| make the null test never fire (`icmp eq ptr %p, inttoptr (i64 1 to ptr)`), so null takes the non-null path | 2 red: `nullableExternRefNull`, `nullableExternRefShared` |
+| let `parseType` accept `?&` everywhere (`allowNullableRef` ignored) | 5 red: `nullableRefOutsideExtern`, `nullableRefAsReturn`, `nullableRefInStructField`, `nullableRefInClosureParam`, `nullableRefTypeArg` |
+| drop the `checkIdentExpr` rejection | 3 red: `nullableRefNotUnwrapped`, `nullableRefIntoOption`, `nullableRefPassedOn` |
+| make `typeFromAst` map `?&mut T` to a `ref` instead of a `ptr` (the parameter becomes a by-value struct) | 2 red: `tests/abi.test.ts` on both linux-x64 and macos-arm64 — and the whole fixture lane stays GREEN, which is the point of pinning the ABI outside it |
+
+And one thing to be honest about: the fixture lane cannot see the ABI. A wrapper struct, a
+tag word or a second hidden argument would all still run correctly from Milo, because Milo
+compiles both sides. That is why the ABI claim is pinned twice outside it — on the emitted
+IR for both targets (`tests/abi.test.ts`) and by a C program that declares
+`int32_t point_bump(Point*)` itself, links the Milo `.a`, and calls it with `&p` and with
+`NULL` (`tests/header.test.ts`).
 
 ## 3. `adopt` — the inverse of `forget`
 

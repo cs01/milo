@@ -1,0 +1,15 @@
+// @error: '?&mut T' is only legal on a parameter of an 'extern' or '@externalLinkage' function
+// Not even nested inside an otherwise-legal extern parameter: a `Vec<?&mut Bump>` is
+// storage for a maybe-reference, which is the escape the whole design exists to avoid.
+extern struct Bump {
+    x: i32,
+}
+
+@externalLinkage
+pub fn each(items: Vec<?&mut Bump>): i32 {
+    return 0
+}
+
+fn main() {
+    print(1)
+}

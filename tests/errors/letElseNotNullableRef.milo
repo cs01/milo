@@ -1,0 +1,11 @@
+// @error: is not a nullable extern reference, so 'let q = … else { … }' has nothing to unwrap
+// `let NAME = value else { … }` with no pattern is the nullable-extern-reference unwrap
+// and nothing else. Unwrapping an enum names its variant, so the two forms cannot be
+// confused for one another.
+fn main() {
+    let n = 5
+    let q = n else {
+        return
+    }
+    print(q)
+}

@@ -152,6 +152,11 @@ export type HIRStmt =
   | { kind: "ExprStmt"; expr: HIRExpr; span?: Span }
   | { kind: "Match"; subject: HIRExpr; arms: HIRMatchArm[]; enumName: string; subjectIsRef?: boolean; span?: Span }
   | { kind: "UnsafeBlock"; body: HIRStmt[]; span?: Span }
+  // `let g = p else { … }` over a `?&mut T` extern parameter. `ptr` is the incoming
+  // pointer (the parameter's real ABI type), `elseBody` runs when it is null and always
+  // diverges, and `name` binds an ordinary second-class ref to the pointee on the other
+  // path. Not a Match: there is no enum, no tag and no payload to project — one icmp.
+  | { kind: "NullRefUnwrap"; name: string; ptr: HIRExpr; inner: TypeKind; mutable: boolean; elseBody: HIRStmt[]; span?: Span }
   | { kind: "ForRange"; varName: string; varType: TypeKind; start: HIRExpr; end: HIRExpr; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
   | { kind: "ForEach"; varName: string; varName2: string | null; varType: TypeKind; varType2: TypeKind | null; iterable: HIRExpr; iterableKind: "vec" | "string" | "hashmap" | "array"; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }
   | { kind: "ForIterator"; varName: string; varType: TypeKind; iterable: HIRExpr; nextMethod: string; optionEnumName: string; body: HIRStmt[]; invariants?: HIRContract[]; span?: Span }

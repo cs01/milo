@@ -94,6 +94,13 @@ export interface VarInfo {
   borrowed: boolean;
   read: boolean;
   span?: Span;
+  // A `?&mut T` / `?&T` parameter of an extern / @externalLinkage fn. Its `type` is the
+  // `*T` the ABI actually passes; this records the reference the `let … else` unwrap
+  // produces, and its presence is what makes EVERY other use of the binding an error.
+  // The nullable reference is not a value: it exists only long enough to be unwrapped,
+  // which is why nothing here can become an `Option<&mut T>` that `nestedRef` would have
+  // to catch downstream.
+  nullableRef?: { inner: TypeKind; mutable: boolean };
   // A pattern binding that holds a COPY of the payload: bound by value, and the payload
   // type is Copy, so it is a snapshot the enum can't see through. Mutating it through a
   // '&mut self' method compiles and then silently throws the write away (the copy dies at
@@ -225,6 +232,10 @@ export interface CheckResult {
   diagnostics: Diagnostic[];
   exprTypes: Map<Expr, TypeKind>;
   patternBindingTypes: Map<import("./ast").Pattern, TypeKind[]>;
+  // The reference each nullable-extern-reference unwrap (`let g = p else { … }`) binds.
+  // Lowering reads it to emit the null test and the binding; nothing else can derive it,
+  // because the parameter's own type is the `*T` the ABI passes.
+  nullRefUnwraps: Map<import("./ast").LetElseStmt, { inner: TypeKind; mutable: boolean }>;
   autoBorrowed: Map<Expr, { mutable: boolean }>;
   matchSubjectRef: Set<Expr>;
   rewrittenCalls: Map<Expr, string>;
@@ -396,6 +407,7 @@ export class TypeChecker {
   private exprTypes = new Map<Expr, TypeKind>();
   // Per-pattern payload binding types (parallel to pattern.bindings), for hover/LSP.
   private patternBindingTypes = new Map<import("./ast").Pattern, TypeKind[]>();
+  private nullRefUnwraps = new Map<import("./ast").LetElseStmt, { inner: TypeKind; mutable: boolean }>();
   private autoBorrowed = new Map<Expr, { mutable: boolean }>();
   private matchSubjectRef = new Set<Expr>();
   private rewrittenCalls = new Map<Expr, string>();
@@ -1131,6 +1143,7 @@ export class TypeChecker {
         for (let i = 0; i < depth; i++) result = { tag: "ptr", inner: result };
         return result;
       }
+      if (ty.isNullableRef) return { tag: "ptr", inner };
       if (ty.isRef) return { tag: "ref", inner, mutable: false };
       if (ty.isRefMut) return { tag: "ref", inner, mutable: true };
       return inner;
@@ -1873,6 +1886,7 @@ export class TypeChecker {
       diagnostics: this.diagnostics,
       exprTypes: this.exprTypes,
       patternBindingTypes: this.patternBindingTypes,
+      nullRefUnwraps: this.nullRefUnwraps,
       autoBorrowed: this.autoBorrowed,
       matchSubjectRef: this.matchSubjectRef,
       rewrittenCalls: this.rewrittenCalls,
@@ -5201,8 +5215,12 @@ export class TypeChecker {
     this.currentFnRetType = retType;
 
     for (const p of fn.params) {
-      const pType = this.resolve(declaredType(p));
-      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false, span: p.span });
+      const declared = declaredType(p);
+      const pType = this.resolve(declared);
+      const nullableRef = declared.isNullableRef && pType.tag === "ptr"
+        ? { inner: pType.inner, mutable: !!declared.isRefMut } : undefined;
+      this.declare(p.name, { type: pType, mutable: pType.tag === "ref" && pType.mutable, moved: false, borrowed: false, read: false, span: p.span,
+        ...(nullableRef && { nullableRef }) });
     }
 
     // Check contracts in a nested scope so `result` doesn't shadow body locals
@@ -5836,6 +5854,7 @@ export class TypeChecker {
         break;
       }
       case "LetElseStmt": {
+        if (stmt.bindName !== undefined) { this.checkNullRefUnwrap(stmt, stmt.bindName, fnRetType, sp); break; }
         const rawSubjType = this.checkExpr(stmt.value);
         const { subjType, subjBorrows } = this.enumSubjectBorrow(stmt.value, rawSubjType, [stmt.pattern]);
         this.bindElidedPattern(stmt.pattern, subjType);
@@ -7470,6 +7489,19 @@ export class TypeChecker {
         return this.setType(expr, fnType);
       }
       this.error(`undefined variable '${expr.name}'`, sp, this.nameHint(expr.name));
+      return this.setType(expr, { tag: "unknown" });
+    }
+    // A nullable extern reference is not a value. Every way of naming it — passing it on,
+    // storing it, a field access, wrapping it in an `Option` — arrives here, so one gate
+    // covers them all; the `let … else` unwrap is the only reader that does not, because
+    // it never calls checkExpr on its subject.
+    if (info.nullableRef) {
+      // Marked read even though the use is rejected: the name WAS mentioned, and leaving
+      // it unread stacks a bogus "unused variable" warning on top of every one of these.
+      info.read = true;
+      const ref = `&${info.nullableRef.mutable ? "mut " : ""}${typeName(info.nullableRef.inner)}`;
+      this.error(`'${expr.name}' is a nullable extern reference and must be unwrapped before use`, sp,
+        `write 'let x = ${expr.name} else { … }' — the else block runs when C passed null and must diverge; 'x' is then an ordinary '${ref}'`);
       return this.setType(expr, { tag: "unknown" });
     }
     info.read = true;
@@ -10347,6 +10379,55 @@ export class TypeChecker {
         b === "_" || i >= v.fields.length ||
         isCopy(v.fields[i], (n) => this.isAllCopyEnum(n), (n) => this.isAllCopyStruct(n)));
     });
+  }
+
+  // `let g = p else { … }` over a `?&mut T` / `?&T` parameter: the nullable extern
+  // reference's only legal reader.
+  //
+  // The subject is deliberately NOT run through checkExpr. Naming a nullable extern
+  // reference anywhere else is an error (checkIdentExpr), and routing this through the
+  // same path would need an exemption that the next construct to read an Ident would
+  // silently inherit. There is no enum here and no `Option<&mut T>` is ever built: the
+  // parameter is a `*T`, this is the null test, and `g` is an ordinary second-class ref
+  // from here on, subject to every rule any other `&mut T` obeys.
+  private checkNullRefUnwrap(stmt: import("./ast").LetElseStmt, name: string, fnRetType: TypeKind, sp?: Span): void {
+    // ident-ok: a nullable extern reference can only ever BE a parameter binding
+    const info = stmt.value.kind === "Ident" ? this.lookup(stmt.value.name) : null;
+    if (!info?.nullableRef) {
+      const what = stmt.value.kind === "Ident" ? `'${stmt.value.name}'` : "this value";
+      this.error(`${what} is not a nullable extern reference, so 'let ${name} = … else { … }' has nothing to unwrap`, sp,
+        `that form is for a '?&mut T' parameter of an 'extern' / '@externalLinkage' fn. To unwrap an enum, name the variant: 'let Option.Some(${name}) = … else { … }'`);
+      return;
+    }
+    // A second live unwrap of a `?&mut T` would hand the body two `&mut T` to one object,
+    // which is the aliasing the one rule exists to prevent. Scoped, not function-wide: the
+    // borrow is released when the first binding's scope pops, so unwrapping once per arm of
+    // an `if` is fine. A shared `?&T` has nothing to exclude, so it is not restricted.
+    if (info.nullableRef.mutable && info.borrowed) {
+      this.error(`'${(stmt.value as { name: string }).name}' is already unwrapped here — a second '&mut ${typeName(info.nullableRef.inner)}' to the same object would alias the first`, sp,
+        `use the binding you already have, or let the first one's scope end before unwrapping again`);
+      return;
+    }
+    info.read = true;
+    this.setType(stmt.value, info.type);
+    this.nullRefUnwraps.set(stmt, info.nullableRef);
+    // The else block runs when C passed null, so it must diverge — otherwise control
+    // reaches code where the binding does not exist. Checked in its own scope BEFORE the
+    // binding is declared, so the binding is not in scope inside it. Same rule, and the
+    // same reason, as the enum let-else above.
+    this.pushScope();
+    for (const st of stmt.elseBody) this.checkStmt(st, fnRetType);
+    this.popScope();
+    if (!this.bodyAlwaysReturns(stmt.elseBody)) {
+      this.error(`the else block of 'let ${name} = ${stmt.value.kind === "Ident" ? stmt.value.name : "…"} else { … }' must diverge (return/break/continue) — it runs when C passed null`, sp);
+    }
+    const refType: TypeKind = { tag: "ref", inner: info.nullableRef.inner, mutable: info.nullableRef.mutable };
+    // Keyed on the placeholder pattern, which is unique per statement: this is the map the
+    // LSP already reads for a let-else binding's hover, so the unwrap gets one for free.
+    this.patternBindingTypes.set(stmt.pattern, [refType]);
+    if (refType.mutable) info.borrowed = true;
+    this.declare(name, { type: refType, mutable: refType.mutable, moved: false, borrowed: false, read: false, span: sp,
+      ...(refType.mutable && { freezes: [info] }) });
   }
 
   // Borrow-detection for if-let/let-else subjects, mirroring checkMatchLike: a

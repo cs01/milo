@@ -436,31 +436,48 @@ And two things the gates DO see that are worth recording:
   nothing — the view dies at the end of `f`, so there is no window in which two views coexist to
   be confused — but it does not vanish.
 
-## The gate
+## The gate (**BUILT**)
 
 A spec with no falsifier is a wish. The gate for this work is a **differential against C**, the
-same oracle Google used at 30M GIFs, run at a scale one machine can reach.
+same oracle Google used at 30M GIFs, run at a scale one machine can reach. It lives in
+`examples/ffi/giflib/`, which is the port and its harness, and it is one command:
+
+```sh
+sh examples/ffi/giflib/build.sh <outdir> <workdir>   # library, drivers, corpus, both gates
+```
 
 giflib-rs itself ships **no tests and no benches** — 12 `.rs` files, and its CI runs
 `cargo test --locked` against a repo with zero test files. The `c_library_from_rust_signatures_test`
 that `lib.rs:52` names is Google-internal, as are the corpus and the differential fuzzer. So the
-oracle has to be built, not borrowed.
+oracle had to be built, not borrowed:
 
-1. Build C giflib 6.1.3 and the Milo port as two `.so`s exporting the same symbols. `@cLayout`
-   and `@cSig` verify every struct layout and signature against the real `gif_lib.h` at build
-   time — the checked equivalent of what `build.rs` does with `bindgen`.
-2. One C driver, linked twice: `DGifOpenFileName` → `DGifSlurp` → walk `SavedImages` → emit a
-   canonical digest (dimensions, palette, raster bytes, extension blocks, error code).
-3. Diff the digests byte-for-byte over a GIF corpus, seeded and then mutated, fuzzer-style.
-   giflib-rs is available as a third voice where C and Milo disagree.
-4. **Gate honesty check** (the routine that pays off most and is run least): corrupt one entry in
-   the Milo LZW table and confirm the differential goes red. A gate that reports "0 checked" and
-   exits 0 forever is worse than no gate.
+1. The Milo port builds as a C static library exporting giflib's symbols. `@cLayout` and `@cValue`
+   verify every struct layout and header constant against the real `gif_lib.h` at build time, the
+   checked equivalent of what `build.rs` does with `bindgen`, and `build.sh` promotes a SKIPPED
+   guard to a hard failure so an unverified layout cannot look like a verified one.
+2. One C driver, linked twice: `DGifOpenFileName` → `DGifSlurp` → walk `SavedImages` → a canonical
+   digest (dimensions, palettes, raster and extension hashes, error code, close result). Every
+   field of it is a function of the input bytes alone: no addresses, no sizes, no timings.
+3. `gate/corpus.py` generates the corpus rather than checking one in: 21 seeds plus 3000 seeded
+   mutants, byte-identical on a re-run. Digests are diffed byte for byte, and an empty corpus is a
+   RED rather than a green.
+4. **Gate honesty check** (the routine that pays off most and is run least), run and recorded in
+   the port's README: perturbing the background-colour read reddens 2693 of 3021 and exits 1, one
+   entry of the LZW suffix table reddens 128, and an empty corpus directory reddens with nothing
+   compared.
 
-Known-divergence list to encode up front, from giflib-rs's own README — these are deliberate
-improvements over C, so the digest must treat them as expected, not as failures: `GifFile->Error`
-set on invalid dimensions where C leaves it 0; write-failure return codes C ignores; OOM
-behaviour.
+What it found is the argument for building it. The port had been passing an earlier, weaker
+harness while **publishing the decoded document only on a successful `DGifSlurp`**; C decodes
+straight into the caller's `GifFileType`, so a failed slurp still hands back every image that
+decoded. That is 360 of 3021 files. The opposite reading (append the `SavedImage` before decoding,
+as `DGifGetImageDesc` does) is wrong on 1105. Both look right from the C source alone.
+
+Known-divergence list, from giflib-rs's own README — these are deliberate improvements over C, so
+the digest treats the C behaviour as the answer and the port copies it: `GifFile->Error` set on
+invalid dimensions where C leaves it 0; write-failure return codes C ignores; OOM behaviour.
+
+**The number the whole exercise is for: 5 `unsafe` sites, against giflib-rs's ~26 on the same
+decode surface.** All five are in `gif.milo`; the 776-line decoder never names memory at all.
 
 ## See also
 

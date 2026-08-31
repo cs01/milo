@@ -160,10 +160,11 @@ where the obvious implementation, or `giflib-rs`'s, disagrees with the installed
 ## Scope, and what is not here
 
 Decode from a filename, and nothing else: no encoder, no quantizer, no font. `DGifOpen` /
-`DGifOpenFileHandle` are absent because they take a C function pointer to call back
-through, and Milo has no typed extern fn-pointer values yet: kind F in
-[docs/foreign-memory.md](../../../docs/foreign-memory.md), the one census row none of the
-three new primitives reach.
+`DGifOpenFileHandle` are absent because they take a C function pointer to call back through.
+That is kind F in [docs/foreign-memory.md](../../../docs/foreign-memory.md), and it is no
+longer a language gap: an `extern struct` can hold, call and null-test a C function pointer
+now. Wiring the two entry points through it is work this port has not done yet, not a thing
+Milo cannot express.
 
 `tests/examples.test.ts` does not compile this directory: it walks entry points with a
 `main()`, and this is a library. `sh build.sh /tmp/gifout /tmp/gifwork` is what keeps it

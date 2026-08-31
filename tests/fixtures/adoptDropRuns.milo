@@ -1,0 +1,59 @@
+// @expect: made
+// @expect: before
+// @expect: dropped hello
+// @expect: after
+// The adopted value is owned in FULL, not merely typed as owned: its drop runs, at the
+// scope end the move checker picked, and it runs the whole way down.
+//
+// Three things are being asserted at once. The `impl Drop` print proves the user
+// destructor fired on a value the compiler never saw allocated. Its position between
+// "before" and "after" proves the drop is at the end of the block that owns the box,
+// which is where any other `Heap<T>` would drop. And the `label` field is an owned
+// string, so the drop glue that frees the box also frees a buffer one level down: the
+// case an `extern struct` of raw pointers deliberately does NOT get (a raw pointer is
+// not owned, so nothing under it is freed; see docs/foreign-memory.md).
+//
+// That the box itself is freed is not visible from Milo (freeing is not observable, only
+// its absence is. It is gated from outside instead: scripts/leak-check.ts fails if this
+// program exits still holding the allocation, and scripts/asan-sweep.ts fails if the free
+// happens twice or the memory is read after it.
+from "std/foreign" import {
+    adopt
+}
+
+struct Labelled {
+    label: string,
+    n: i64,
+}
+
+impl Drop for Labelled {
+    fn drop(self: &mut Self): void {
+        print("dropped ", self.label)
+    }
+}
+
+pub fn main(): i32 {
+    let h = Heap(Labelled {
+        label: "hello",
+        n: 1,
+    }
+    )
+    print("made")
+    unsafe {
+        let slot = h.addrOf() as *i64
+        let raw = (*slot) as *Labelled
+        forget(h)
+
+        print("before")
+        match adopt(raw) {
+            Option.Some(box) => {
+                let _ = (*box).n
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+        print("after")
+    }
+    return 0
+}

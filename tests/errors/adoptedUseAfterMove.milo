@@ -1,0 +1,33 @@
+// @error: use of moved variable 'box'
+// The adopted box is owned in the ordinary way, which means the ordinary rules apply to
+// it. Nothing about arriving through a raw pointer makes it exempt: moving it out and
+// then reading it is the same error the move checker gives for `Heap(value)`, and that
+// equivalence is the whole claim `adopt` makes.
+from "std/foreign" import {
+    adopt
+}
+from "std/os" import {
+    malloc
+}
+
+fn consume(b: Heap<i64>): i64 {
+    return *b
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(8) as *i64
+        p[0] = 5
+        match adopt(p) {
+            Option.Some(box) => {
+                let a = consume(box)
+                let b = consume(box)
+                print(a, " ", b)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+    }
+    return 0
+}

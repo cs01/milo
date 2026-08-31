@@ -1,0 +1,22 @@
+// @error: calling 'adopt' requires an unsafe block
+// `@unsafe` puts the proof obligation on the caller, and here the obligation is the
+// sharpest one in the module: that this pointer came from a Milo allocation of this
+// type and has not been adopted before. Every operation in the body is individually
+// checkable and `adopt(p)` on a stack address, a C string or a pointer already adopted
+// is still a lie the compiler cannot see.
+from "std/foreign" import {
+    adopt
+}
+from "std/os" import {
+    malloc
+}
+
+pub fn main(): i32 {
+    var p = 0 as *i64
+    unsafe {
+        p = malloc(8) as *i64
+    }
+    let box = adopt(p)
+    print(box.isSome())
+    return 0
+}

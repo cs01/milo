@@ -4,7 +4,7 @@
 import type { Program, Function as AstFn, Stmt, Expr, Pattern } from "./ast";
 import { declaredType, floatNamespaceConst } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
-import { RAW_SLICE_INTRINSICS, FOREIGN_MODULE } from "./checker";
+import { RAW_SLICE_INTRINSICS, ADOPT_INTRINSICS, FOREIGN_MODULE } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
 import { typeFromAst, SLICE_COMBINATORS, ARRAY_COMBINATORS } from "./types";
@@ -700,6 +700,17 @@ class LowerCtx {
             ptr: this.lowerExpr(expr.args[0]),
             len: this.lowerExpr(expr.args[1]),
             elementType: element,
+            type,
+            span: expr.span,
+          };
+        }
+        // Same gate as the checker's (name + the one module), so a call it typed as an
+        // adoption can never lower as an ordinary function call.
+        if (ADOPT_INTRINSICS.has(expr.func) && expr.span?.file?.endsWith(FOREIGN_MODULE)) {
+          return {
+            kind: "Adopt",
+            ptr: this.lowerExpr(expr.args[0]),
+            len: expr.func === "adoptVec" ? this.lowerExpr(expr.args[1]) : undefined,
             type,
             span: expr.span,
           };

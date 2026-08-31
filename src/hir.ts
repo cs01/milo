@@ -80,6 +80,11 @@ export type HIRExpr =
   // Unlike VecSlice there is no source Vec to bound the range against, so nothing is
   // checked here: the caller's `@unsafe` promise is the only guarantee.
   | { kind: "RawSlice"; ptr: HIRExpr; len: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  // Ownership taken back through a raw pointer: `std/foreign`'s adoptHeap/adoptVec, the
+  // inverse of `Forget`. `type` is `heap` or `vec`, and that is the whole difference:
+  // both are the pointer the caller supplied, re-labelled as something with drop glue.
+  // `len` is present only for the vec form.
+  | { kind: "Adopt"; ptr: HIRExpr; len?: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "StringFind"; str: HIRExpr; needle: HIRExpr; from?: HIRExpr; reverse: boolean; optionEnumName: string; type: TypeKind; span?: Span }
   | { kind: "StringClone"; str: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "NumberToString"; value: HIRExpr; valueType: TypeKind; type: TypeKind; span?: Span }

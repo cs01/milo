@@ -1,0 +1,58 @@
+// @expect: none
+// @expect: none
+// @expect: none
+// @expect: freed once
+// Null answers `Option.None` and adopts nothing, which is the only answer that can be
+// right: there is no allocation to own, and a `Heap<T>` holding null would free null at
+// scope exit. The null path is in the return type so it cannot be forgotten, exactly as
+// `withRaw` puts it there.
+//
+// A negative length takes the same path for the same reason `withRaw` folds it in, with
+// one addition: `withRaw` would have produced a view whose length field is nonsense,
+// while `adoptSlice` would produce an OWNED value whose length field is nonsense, and its
+// drop would then free elements that were never there.
+//
+// The buffer behind the rejected negative-length call is still the caller's, and this
+// program frees it exactly once. Nothing adopted it; that is what is being checked.
+from "std/foreign" import {
+    adopt, adoptSlice
+}
+from "std/os" import {
+    malloc, free
+}
+
+fn describeHeap(r: Option<Heap<i64>>): void {
+    match r {
+        Option.Some(b) => {
+            print("some ", *b)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+}
+
+fn describeVec(r: Option<Vec<i64>>): void {
+    match r {
+        Option.Some(v) => {
+            print("some ", v.len)
+        }
+        Option.None => {
+            print("none")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let nullPtr = 0 as *i64
+        describeHeap(adopt(nullPtr))
+        describeVec(adoptSlice(nullPtr, 4))
+
+        let p = malloc(16) as *i64
+        describeVec(adoptSlice(p, -1))
+        free(p as *u8)
+        print("freed once")
+    }
+    return 0
+}

@@ -5181,6 +5181,8 @@ export class Codegen {
         return this.genVecSlice(expr, lines);
       case "RawSlice":
         return this.genRawSlice(expr, lines);
+      case "Adopt":
+        return this.genAdopt(expr, lines);
       case "StringFind":
         return this.genStringFind(expr, lines);
       case "StringClone":
@@ -9301,6 +9303,38 @@ export class Codegen {
     return [lines, s2, "%Vec"];
   }
 
+  // adoptHeap(p) / adoptVec(p, len): take ownership back through a raw pointer.
+  //
+  // There is no conversion to do: a `Heap<T>` IS the malloc'd pointer (genExpr's
+  // `HeapCreate` returns exactly what `malloc` returned), and a `Vec<T>` is that pointer
+  // plus two counts. What the node buys is the TYPE: `emitDropValue`'s `heap` and `vec`
+  // arms free a non-null data pointer, so the value that comes out of here has real drop
+  // glue where the `*T` that went in had none.
+  //
+  // cap = len, and that is the opposite of the `cap = 0` genRawSlice uses, deliberately:
+  // 0 is the marker for "this Vec does not own its buffer", which is the precise claim
+  // adoptVec exists to deny. `emitDropValue` frees on a non-null data pointer without
+  // reading cap, so the free happens either way; cap is what `genVecExtend` reads to
+  // decide whether it may free the source, and an adopted Vec may. It is also the honest
+  // number: `len` elements is the only extent the caller stated, so a push reallocs
+  // rather than writing into storage nobody promised was there.
+  private genAdopt(expr: HIRExpr & { kind: "Adopt" }, lines: string[]): Gen {
+    const [pLines, pVal] = this.genExpr(expr.ptr);
+    lines.push(...pLines);
+    if (expr.type.tag !== "vec") return [lines, pVal, "ptr"];
+    this.hasVecType = true;
+    if (!expr.len) throw new Error("adoptVec: missing length");
+    const [lLines, lVal] = this.genExpr(expr.len);
+    lines.push(...lLines);
+    const s0 = this.nextTemp();
+    lines.push(`  ${s0} = insertvalue %Vec undef, ptr ${pVal}, 0`);
+    const s1 = this.nextTemp();
+    lines.push(`  ${s1} = insertvalue %Vec ${s0}, i64 ${lVal}, 1`);
+    const s2 = this.nextTemp();
+    lines.push(`  ${s2} = insertvalue %Vec ${s1}, i64 ${lVal}, 2`);
+    return [lines, s2, "%Vec"];
+  }
+
   // v.slice(a, b) / v[a..b] — non-owning view: same %Vec rep with adjusted ptr/len
   // and cap=0, so drop glue skips free (the source still owns the buffer).
   private genVecSlice(expr: HIRExpr & { kind: "VecSlice" }, lines: string[]): Gen {
@@ -12231,6 +12265,11 @@ export class Codegen {
     // A nested concat (`a + b + c`) is the same: the inner BinOp's result is owned
     // by nobody once the outer one has read it.
     switch (expr.kind) {
+      // The point of `adopt` is that the result is owned and nothing else will free it,
+      // which is the whole feature, so a discarded one leaks by exactly the amount it
+      // adopted. Note this is the opposite answer from its sibling `RawSlice`, which is a
+      // view and owns nothing.
+      case "Adopt":
       // An enum literal in an auto-borrowed argument position (`f(E.Text(s))`) owns
       // its payload and nothing else ever will: the callee only borrows it, and the
       // temp has no name for scope-drop to find. Without this the payload leaks on

@@ -1,0 +1,17 @@
+// @error: undefined function 'adoptHeap'
+// Minting ownership of an arbitrary address is not a general escape hatch: outside
+// std/foreign.milo the name means nothing. `adopt` adds the null test and the Option
+// wrapping in readable Milo, and it is `@unsafe`; `let b = adoptHeap(p)` here would
+// hand back the same owned box with neither.
+from "std/os" import {
+    malloc
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(8) as *i64
+        let b = adoptHeap(p)
+        print(*b)
+    }
+    return 0
+}

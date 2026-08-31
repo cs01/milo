@@ -1,0 +1,90 @@
+// @expect: len=4 cap=4
+// @expect: 11 22 33 44
+// @expect: sum=110
+// @expect: len=5 last=55
+// @expect: extended=4 7 8
+// @expect: empty len=0
+// `adoptSlice` hands back a real `Vec<T>`, not a view: every element reads back, the
+// length is the one that was asked for, and the value is growable: a `push` past the
+// adopted extent is the operation a slice is denied, and it works here because this Vec
+// owns its buffer.
+//
+// Capacity is `len`, not the 0 that marks a non-owning view, and both halves of that are
+// checked. `capacity()` reads the field directly, which is what a slice has no method
+// for and is why feature 1's cap could not be gated at all. The `extend` is the other
+// half: `genVecExtend` frees its SOURCE buffer only when the source capacity is above
+// zero, so an adopted Vec consumed by `extend` is freed there, and with cap 0 it would
+// silently leak, which scripts/leak-check.ts is what sees.
+//
+// A `len == 0` adoption is still an owned, empty Vec that frees its pointer at scope
+// exit, which is what a zero-length Milo allocation is.
+from "std/foreign" import {
+    adoptSlice
+}
+from "std/os" import {
+    malloc
+}
+
+pub fn main(): i32 {
+    var src: Vec<i64> = []
+    src.push(11)
+    src.push(22)
+    src.push(33)
+    src.push(44)
+
+    unsafe {
+        let data = src.ptr()
+        forget(src)
+        match adoptSlice(data, 4) {
+            Option.Some(v) => {
+                print("len=", v.len, " cap=", v.capacity())
+                var out: string = ""
+                for x in v {
+                    if out.len > 0 {
+                        out.pushStr(" ")
+                    }
+                    out.pushStr(x.toString())
+                }
+                print(out)
+                print("sum=", v.sum())
+
+                var grown = v
+                grown.push(55)
+                print("len=", grown.len, " last=", grown[4])
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+    }
+
+    var tail: Vec<i64> = []
+    tail.push(7)
+    tail.push(8)
+    unsafe {
+        let tailData = tail.ptr()
+        forget(tail)
+        match adoptSlice(tailData, 2) {
+            Option.Some(adopted) => {
+                var dst: Vec<i64> = []
+                dst.push(4)
+                dst.extend(adopted)
+                print("extended=", dst[0], " ", dst[1], " ", dst[2])
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+
+        let zero = malloc(8) as *i64
+        match adoptSlice(zero, 0) {
+            Option.Some(e) => {
+                print("empty len=", e.len)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+    }
+    return 0
+}

@@ -3,7 +3,7 @@ system: foreign-memory
 purpose: how Milo reaches memory it did not allocate, and why that needs constructors rather than new reference kinds
 key-files: std/foreign.milo, src/checker.ts, src/codegen.ts, docs/ownership-model.md, docs/residue-vs-rust.md
 update-when: a foreign-memory primitive is added/changed, the nullable-extern-ref spelling changes, or the giflib differential gate moves
-last-verified: 2026-08-30 (features 1 and 2 built and gated; feature 3 not yet built)
+last-verified: 2026-08-31 (all three features built and gated; the give leg for Heap<T> is the remaining gap)
 -->
 
 # Foreign memory: reaching what Milo did not allocate
@@ -28,6 +28,10 @@ features below add no new reference kind, no lifetime, and no rule. Each is a *c
 | `withRaw` / `withRawMut` | No — `&[T]` / `&mut [T]` already exist ([language-reference](language-reference.md) §Slices, L1484) | a constructor for them from `(ptr, len)` |
 | `?&mut T` | No — `&mut T` params already exist | a nullable *spelling*, legal only in an extern signature |
 | `adopt` | No — `Heap<T>`/`Vec<T>` already exist | the inverse of the shipped `forget` |
+
+All three are built. What remains open for row J is the *give* leg for a whole object. `Vec` has
+`.ptr()`, `Heap<T>` has no such spelling, so handing C a Milo-allocated struct still needs a
+double indirection through `addrOf`. See §3 *What the build actually needed*.
 
 ## Why this is worth building: the census
 
@@ -252,7 +256,7 @@ IR for both targets (`tests/abi.test.ts`) and by a C program that declares
 `int32_t point_bump(Point*)` itself, links the Milo `.a`, and calls it with `&p` and with
 `NULL` (`tests/header.test.ts`).
 
-## 3. `adopt` — the inverse of `forget`
+## 3. `adopt`, the inverse of `forget` (**BUILT**)
 
 ```milo
 @unsafe fn adopt<T>(p: *T): Option<Heap<T>>
@@ -267,10 +271,130 @@ giflib-rs does this **safely** via `Option<Box<GifFileType>>` (`ffi.rs:194`).
 Caller asserts: `p` came from a Milo allocation of the matching type, is unaliased, and has not
 been adopted before. `Option.None` iff null.
 
-Implementation note to settle during the build: Milo's `Heap<T>`/`Vec<T>` allocator must be
-`malloc`-compatible for the give direction to be sound, since C calls `free` on what
-`decoder.rs:531`-shaped code hands out. `std/seal.milo` already declares `malloc`/`free` externs
-directly; confirm rather than assume.
+### The allocator question, settled
+
+**It is plain libc `malloc`/`free`, with nothing in between.** Read out of the emitters, not
+inferred from `std/seal.milo`'s externs:
+
+- `Heap(v)` emits `call ptr @malloc(i64 <sizeof T>)` and stores the value into it, at
+  `src/codegen.ts:5003`, inside the `HeapCreate` arm at 4997. A `Heap<T>` **is** that pointer; there is no header, no
+  refcount, no alignment padding word.
+- Every `Vec` buffer goes through one choke point, `emitAllocBytes` (`src/codegen.ts:8656`, the `malloc` at 8686),
+  which emits `call ptr @malloc(i64 <bytes>)` after an overflow-checked multiply.
+  `tests/allocChokePoint.test.ts` holds it there.
+- Drop glue calls `call void @free(...)` on the raw pointer, unconditionally for a non-null one:
+  the `vec` arm's free at `src/codegen.ts:12500` and the `heap` arm's at `src/codegen.ts:12549`. The
+  `vec` arm does **not** consult capacity before freeing.
+- Nothing in `src/` declares an allocator other than `@malloc`/`@free`/`@realloc`, and the
+  runtime links against the system libc.
+
+Both directions therefore hold, and both were run:
+
+- **Give:** a pointer out of `Heap(v)` or `v.ptr()`, after `forget`, is a valid argument to C's
+  `free()`. Confirmed by a program that does exactly that and exits clean under ASan.
+- **Take:** `forget` → `adopt` round-trips (`tests/fixtures/adoptRoundTrip.milo`), and a
+  C-`malloc`'d pointer is adoptable too, because it is the same allocator, used deliberately in
+  `adoptNull.milo` and `adoptSliceOwned.milo`. The remaining obligation is layout, not
+  provenance: the region must really be a `T` (or `len` of them), which is what the `unsafe` is.
+
+The one asymmetry worth stating: `free` needs the **base** pointer, so `adopt`ing an interior
+pointer is UB even though the type checks. Nothing detects that.
+
+### What the build actually needed
+
+Shipped in `std/foreign.milo` over two compiler intrinsics, with fixtures
+`tests/fixtures/adopt*.milo` and rejections `tests/errors/adopt*.milo`. Five things the spec
+above did not anticipate:
+
+**There is no way to get the box pointer out of a `Heap<T>`, and the spec assumed there was.**
+A `Vec` has `.ptr()`; a `Heap` has nothing. `h as *T` is `cannot cast from Heap<T>`, passing `h`
+to a `*T` parameter is `expected *T, got Heap<T>`, and `h.addrOf()` is `*Heap<T>`, the address
+of the SLOT, not the box. The give leg for a whole object is therefore the double indirection
+the fixtures use:
+
+```milo
+let slot = h.addrOf() as *i64
+let raw = (*slot) as *Point       // the box pointer, one load down
+forget(h)
+```
+
+That works and is exercised, but it is an incantation, not an API. `adopt` is the take leg and
+is complete; **the give leg for `Heap<T>` is a separate small gap** (`Heap.ptr()`, the sibling
+of `Vec.ptr()`), deliberately not built here. Row J is not closed until it exists.
+
+**Neither function needed to be an intrinsic; the ownership claim did.** `adoptHeap(p)` and
+`adoptVec(p, len)` are the compiler's whole contribution (one `Adopt` HIR node and fourteen
+lines of codegen), and the null test, the negative-length test and the `Option` wrapping are
+ordinary Milo where they can be read. Restricted BY FILE to `std/foreign.milo` exactly as
+`rawSlice` is: elsewhere the name is an ordinary undefined function.
+
+**The codegen is a re-labelling, and that is the point.** A `Heap<T>` already IS the malloc'd
+pointer, so the heap arm returns its argument unchanged; the vec arm packs `{ptr, len, len}`.
+What the node buys is the TYPE: `emitDropValue`'s `heap` and `vec` arms give the result real
+drop glue where the `*T` that went in had none.
+
+**`cap = len`, which is the opposite of `withRaw`'s `cap = 0`, and unlike feature 1's it IS
+gated.** 0 is the marker for "does not own its buffer", which is the precise claim `adoptSlice`
+exists to deny. Two things read it: `v.capacity()`, which slices have no method for and which
+`adoptSliceOwned.milo` asserts is 4; and `genVecExtend`, which frees its source buffer only when
+the source capacity is above zero, so `dst.extend(adopted)` with `cap = 0` leaks 80 bytes and
+`scripts/leak-check.ts` says so. Feature 1 could not gate its constant and reported that; this
+one can, so it is gated.
+
+**`Adopt` had to be classified for `tests/ownedTempCoverage.test.ts`,** and the honest answer is
+"owned": discarding one leaks exactly what it adopted. See the gate-honesty table for why that
+choice is not observable.
+
+### The limit `adopt` does not reach: nested raw fields
+
+An `extern struct` with raw pointer fields (`SavedImages: *SavedImage`) has **no drop glue for
+those fields**, because a raw pointer is not owned. So `adopt` returning a `Heap<GifFileType>`
+and dropping it frees the struct itself and **nothing it points at**. That is correct and it is
+what makes the layout an ABI match, but it means `adopt` alone does not recursively free a
+C-shaped object graph: a giflib port needs an explicit teardown that walks `SavedImages`,
+`ExtensionBlocks` and the rest and frees them *before* the adopted box drops.
+
+`tests/fixtures/adoptExternStructFields.milo` makes the limit observable rather than only
+stated: it reads the nested array *after* the adopted box has dropped and then frees it once. If
+the drop had reached the field, that read is a use-after-free and the free is a double free,
+both of which `scripts/asan-sweep.ts` sees.
+
+**Could the limit be a diagnostic instead of prose?** Yes, and it would be cheap: the checker
+already walks struct layouts (`structNeedsDrop`), so `adopt<T>` could warn when `T` is a struct
+with any `ptr`-tagged field: "this struct has raw pointer fields; dropping the adopted value
+frees the struct and not what those fields address". It would be a warning, not an error,
+because that IS the right thing to do for a struct whose pointers are borrowed rather than
+owned, and the compiler cannot tell those apart. Not built; naming the shape so the next person
+does not have to rediscover it.
+
+### Gate honesty
+
+Six deliberate breaks, and what each reddened:
+
+| Break | Result |
+|---|---|
+| `adoptVec` builds the Vec with `cap = 0` (the non-owning marker) | 2 red: `adoptSliceOwned` on the `cap=4` assertion, and `scripts/leak-check.ts` (80 bytes leaked), because `extend` declines to free a source it is told does not own its buffer |
+| drop the null test in `adopt` | 1 red: `adoptNull` |
+| drop the file restriction, so the intrinsics are callable anywhere | 2 red: `adoptHeapOutsideForeign`, `adoptVecOutsideForeign` |
+| drop `@unsafe` from `adopt` | 1 red: `adoptNeedsUnsafe` |
+| `adoptHeap` returns a fresh `malloc`'d COPY, so the pointer handed in is never adopted | fixture lane GREEN and ASan GREEN; `scripts/leak-check.ts` red on 2 of 3 (`adoptDropRuns` 48 bytes, `adoptExternStructFields` 32 bytes). `adoptRoundTrip` stayed clean, which is the -O2 blind spot `tests/leak-clean.txt`'s own header warns about |
+| classify `Adopt` as `NOT_OWNED_TEMP` instead of owned | **nothing red.** Reported rather than papered over |
+
+That last one is this feature's `cap = len`. `Adopt` is only writable inside `std/foreign.milo`,
+and both call sites there feed it straight into `Option.Some(...)`, so it is never a discarded
+temporary and the classification is never consulted. A gate for it would have to be a program
+that discards an adoption, which only the one restricted module can write. The answer in the
+code is the correct one; there is no test that would catch flipping it.
+
+And two things the gates DO see that are worth recording:
+
+- **The double adopt is visible.** `adopt` on the same pointer twice, built with `--sanitize`,
+  reports `heap-use-after-free` and names the `free` that preceded it. The hazard requirement 3
+  warns about is not invisible to the lane; it is just not preventable at compile time.
+- **ASan alone would not have caught the ownership breaks.** Leak detection is off in
+  `asan-sweep.ts` by design (LSan does not exist on darwin/arm64), so "adopt does not actually
+  take the allocation" is a leak, not an ASan finding. `scripts/leak-check.ts` is the gate that
+  answers it, which is why the five fixtures are in `tests/leak-clean.txt`.
 
 ## Not covered by any of the three
 

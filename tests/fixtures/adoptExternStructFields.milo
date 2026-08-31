@@ -1,0 +1,58 @@
+// @expect: images=3
+// @expect: still there: 1 2 3
+// @expect: teardown done
+// What `adopt` does NOT reach, made observable.
+//
+// This is the giflib shape: an extern struct whose payload is a C-visible `(ptr, count)`
+// pair. A raw pointer is not owned, so it gets no drop glue, so dropping the adopted
+// `Heap<GifLike>` frees THE STRUCT and nothing it points at. That is correct: it is
+// what makes the layout an ABI match. But it means `adopt` alone does not recursively
+// free a C-shaped object graph, and a port has to walk the raw fields itself.
+//
+// The proof is the read AFTER the box has dropped: `savedImages` still holds 1 2 3. If
+// dropping the box had freed the array, that read is a use-after-free and the `free`
+// below is a double free, which is what scripts/asan-sweep.ts sees. The explicit
+// teardown is the thing a giflib port would have to write.
+from "std/foreign" import {
+    adopt
+}
+from "std/os" import {
+    malloc, free
+}
+
+struct GifLike {
+    savedImages: *i64,
+    imageCount: i64,
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let images = malloc(24) as *i64
+        images[0] = 1
+        images[1] = 2
+        images[2] = 3
+
+        let h = Heap(GifLike {
+            savedImages: images,
+            imageCount: 3,
+        }
+        )
+        let slot = h.addrOf() as *i64
+        let raw = (*slot) as *GifLike
+        forget(h)
+
+        match adopt(raw) {
+            Option.Some(gif) => {
+                print("images=", (*gif).imageCount)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+
+        print("still there: ", images[0], " ", images[1], " ", images[2])
+        free(images as *u8)
+        print("teardown done")
+    }
+    return 0
+}

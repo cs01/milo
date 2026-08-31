@@ -1,0 +1,60 @@
+// @expect: 7 9
+// @expect: adopted 7 9
+// @expect: 3 30
+// The C-ABI round trip in both directions: a Milo allocation leaves through a raw
+// pointer with `forget` (nothing will free it), C hands the same pointer back, and
+// `adopt` reconstitutes an owned `Heap<T>` whose contents are the ones written before
+// the trip. `adoptSlice` does the same for a run of elements.
+//
+// Getting the box pointer out of a `Heap<T>` is the double-indirection below:
+// `h.addrOf()` is the address of the SLOT holding the pointer, so the pointer itself is
+// one load away. A `Vec` has `.ptr()` for this; a `Heap` has no such spelling yet.
+from "std/foreign" import {
+    adopt, adoptSlice
+}
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+pub fn main(): i32 {
+    let h = Heap(Point {
+        x: 7,
+        y: 9,
+    }
+    )
+    unsafe {
+        let slot = h.addrOf() as *i64
+        let raw = (*slot) as *Point
+        print(raw.x, " ", raw.y)
+        forget(h)
+
+        match adopt(raw) {
+            Option.Some(box) => {
+                print("adopted ", (*box).x, " ", (*box).y)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+    }
+
+    var v: Vec<i64> = []
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    unsafe {
+        let data = v.ptr()
+        forget(v)
+        match adoptSlice(data, 3) {
+            Option.Some(back) => {
+                print(back.len, " ", back[2])
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+    }
+    return 0
+}

@@ -400,6 +400,34 @@ let s = identity("hello")  // T inferred as string
 | `replace(place, value)` | Store `value` into a mutable `place`, returning its old contents. Move-in/move-out — needs no `clone`, works on non-copyable types |
 | `swap(a, b)` | Exchange two mutable places of the same type. Move-only, no `clone` |
 | `forget(x)` | Consume `x` WITHOUT running its drop. For seams where ownership leaves through a raw pointer the checker cannot see — the alternative there is a double free or a leak. Memory-safe (leaking is safe), so it needs no `unsafe`; it is merely usually wrong |
+
+`forget` is the give direction. The take direction is [`std/foreign`](std/foreign.md)'s `adopt(p)` / `adoptSlice(p, len)`, which turn a raw pointer back into an owned `Heap<T>` / `Vec<T>` whose drop frees it. They are not built-ins: they are `@unsafe fn`s in one module, because the assertion they carry (the pointer came from a Milo allocation of this type, nothing aliases it, and it has not been adopted before) is not one the compiler can check, and adopting the same pointer twice is a double free. `forget` needs no `unsafe` because leaking is safe; `adopt` does, because un-leaking is not.
+
+```milo
+from "std/foreign" import { adopt }
+
+struct Thing {
+    n: i64,
+}
+
+// The C-ABI close entry point: C hands back a pointer Milo allocated earlier, and
+// this is where its drop finally runs.
+@externalLinkage
+pub fn closeThing(p: *Thing): i32 {
+    unsafe {
+        match adopt(p) {
+            Option.Some(thing) => {
+                print((*thing).n)
+                return 0            // thing drops here, freeing the allocation
+            }
+            Option.None => {
+                return -1           // p was null; there is nothing to free
+            }
+        }
+    }
+}
+```
+
 | `jsonStringify(val)` | Serialize a flat struct (scalar fields only) to JSON string |
 | `@embedFile(path)` | Embed file contents as string at compile time (see [Compile-Time File Embedding](#compile-time-file-embedding)) |
 | `@targetOs()` | Compile-time OS string (`"darwin"`/`"linux"`/`"windows"`); folds `if` branches (see [Compile-Time Target OS](#compile-time-target-os)) |

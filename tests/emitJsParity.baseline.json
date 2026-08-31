@@ -1,5 +1,10 @@
 {
   "addressOf.milo": "noEmit",
+  "adoptDropRuns.milo": "noEmit",
+  "adoptExternStructFields.milo": "noEmit",
+  "adoptNull.milo": "noEmit",
+  "adoptRoundTrip.milo": "noEmit",
+  "adoptSliceOwned.milo": "noEmit",
   "aesGcmLengthGuards.milo": "noEmit",
   "aliasBehindRef.milo": "noEmit",
   "aliasResultFromConversion.milo": "crash",

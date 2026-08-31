@@ -22,6 +22,10 @@ import { must } from "./must";
 // `src/lower.ts` imports both so the two passes cannot disagree about which calls these
 // names denote.
 export const RAW_SLICE_INTRINSICS: ReadonlySet<string> = new Set(["rawSlice", "rawSliceMut"]);
+// The ownership constructors for foreign memory: the return leg of `forget`. Same file
+// seam and the same reason: an unchecked claim about a pointer's provenance belongs in
+// one reviewed module, not in every caller.
+export const ADOPT_INTRINSICS: ReadonlySet<string> = new Set(["adoptHeap", "adoptVec"]);
 export const FOREIGN_MODULE = "std/foreign.milo";
 
 // One hop from a place to a place inside it. `index` is deliberately opaque —
@@ -7845,6 +7849,39 @@ export class TypeChecker {
       this.requireUnsafe(`'${expr.func}' can only be used in unsafe blocks`, sp);
       const element: TypeKind = pt.tag === "ptr" ? pt.inner : { tag: "unknown" };
       return this.setType(expr, { tag: "ref", inner: { tag: "array", element, size: null }, mutable });
+    }
+    // `adoptHeap(p)` / `adoptVec(p, len)`: the inverse of `forget`. They turn a raw
+    // pointer back into an owned `Heap<T>` / `Vec<T>`, so the value that comes out has
+    // drop glue and the move checker treats it like any other owned value. Nothing about
+    // the pointer is checkable: whether it came from a Milo allocation of this type, is
+    // unaliased, and has not already been adopted is the caller's word, and adopting the
+    // same pointer twice is a double free.
+    //
+    // Restricted to std/foreign.milo BY FILE, exactly as rawSlice is, and for the same
+    // reason: `std/foreign`'s `adopt`/`adoptSlice` add the null test and the `Option`
+    // wrapping in readable Milo, and outside that file the name is an ordinary undefined
+    // function rather than a way to mint ownership of an arbitrary address.
+    if (ADOPT_INTRINSICS.has(expr.func) && sp?.file?.endsWith(FOREIGN_MODULE)) {
+      const wantsLen = expr.func === "adoptVec";
+      const arity = wantsLen ? 2 : 1;
+      if (expr.args.length !== arity) {
+        this.error(`'${expr.func}' takes exactly ${wantsLen ? "two arguments (pointer, length)" : "one argument (pointer)"}`, sp);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      const pt = this.checkExpr(expr.args[0]);
+      if (wantsLen) {
+        const lt = this.checkExpr(expr.args[1]);
+        if (lt.tag !== "int" && lt.tag !== "unknown") {
+          this.error(`'${expr.func}': expected an integer length, got ${typeName(lt)}`, expr.args[1].span);
+        }
+      }
+      if (pt.tag !== "ptr" && pt.tag !== "unknown") {
+        this.error(`'${expr.func}': expected a raw pointer, got ${typeName(pt)}`, expr.args[0].span);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      this.requireUnsafe(`'${expr.func}' can only be used in unsafe blocks`, sp);
+      const inner: TypeKind = pt.tag === "ptr" ? pt.inner : { tag: "unknown" };
+      return this.setType(expr, wantsLen ? { tag: "vec", element: inner } : { tag: "heap", inner });
     }
     // `replace(place, value)` and `swap(a, b)`: memory intrinsics whose bodies cannot be
     // written in safe Milo (they move a value out of a place and refill it). From the

@@ -1,0 +1,16 @@
+// @error: undefined function 'adoptVec'
+// The slice half of the same seam. Both intrinsic names are gated by one file test, so
+// this and adoptHeapOutsideForeign.milo fall together, which is the point of checking
+// both: a gate written per name is a gate that loses a name.
+from "std/os" import {
+    malloc
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(8) as *i64
+        let v = adoptVec(p, 1)
+        print(v.len)
+    }
+    return 0
+}

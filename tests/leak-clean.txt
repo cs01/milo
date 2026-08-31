@@ -15,6 +15,11 @@
 # neither is sound alone. This gate builds at the default -O2, which elides allocations
 # nothing observes; -O0 leaves stale pointers in stack slots, which keeps a leaked block
 # reachable so `leaks` stays quiet. resultMap shows both sides: it leaks at -O2, not at -O0.
+adoptDropRuns
+adoptExternStructFields
+adoptNull
+adoptRoundTrip
+adoptSliceOwned
 addressOf
 aesGcmLengthGuards
 aliasBehindRef

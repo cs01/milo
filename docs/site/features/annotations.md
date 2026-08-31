@@ -29,6 +29,7 @@ list, and `tests/langInfo.test.ts` fails if this table omits an attribute it rep
 | `@pure` | `fn`, method | Asserts the function reads no global or module state; the checker enforces it |
 | `@thread` | `fn`, method | Declares that this function hands a closure to a real OS thread, so the checker holds its captures to `Send` |
 | `@synchronized` | method | Declares that the method provides mutual exclusion, so a global written inside it is not racing |
+| `@unsafe` | `fn` | Calling this function requires an `unsafe` block: it has a precondition the compiler cannot check |
 
 Two of these are **builtins** — they appear where a value does, and evaluate while
 compiling. The rest are **attributes** — they sit above a declaration.

@@ -4,6 +4,7 @@
 import type { Program, Function as AstFn, Stmt, Expr, Pattern } from "./ast";
 import { declaredType, floatNamespaceConst } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
+import { RAW_SLICE_INTRINSICS, FOREIGN_MODULE } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
 import { typeFromAst, SLICE_COMBINATORS, ARRAY_COMBINATORS } from "./types";
@@ -671,6 +672,19 @@ class LowerCtx {
           const zeroType = this.c.sizeOfTypes.get(expr);
           if (!zeroType) throw new Error("zeroed: missing resolved type");
           return { kind: "Zeroed", zeroType, type: zeroType, span: expr.span };
+        }
+        // Gated exactly as the checker gates it (name + the one module), so a call it
+        // typed as a foreign view can never lower as an ordinary function call.
+        if (RAW_SLICE_INTRINSICS.has(expr.func) && expr.span?.file?.endsWith(FOREIGN_MODULE)) {
+          const element = type.tag === "ref" && type.inner.tag === "array" ? type.inner.element : { tag: "unknown" as const };
+          return {
+            kind: "RawSlice",
+            ptr: this.lowerExpr(expr.args[0]),
+            len: this.lowerExpr(expr.args[1]),
+            elementType: element,
+            type,
+            span: expr.span,
+          };
         }
         if (expr.func === "Heap") {
           return { kind: "HeapCreate", value: this.lowerExpr(expr.args[0]), type, span: expr.span };

@@ -76,6 +76,10 @@ function fnName(sig: string): string {
 function leadingDoc(lines: string[], idx: number): { first: string; full: string; internal: boolean } {
   let i = idx - 1;
   const buf: string[] = [];
+  // Attributes sit BETWEEN the doc comment and the declaration (`@unsafe`, `@pure`,
+  // `@wrapping` on their own lines), so walking straight up stops at the first one and
+  // reports a documented function as undocumented.
+  while (i >= 0 && lines[i].trim().startsWith("@")) i--;
   while (i >= 0) {
     const t = lines[i].trim();
     if (t.startsWith("//") && !t.includes("──")) { buf.unshift(t.replace(/^\/\/\s?/, "")); i--; }

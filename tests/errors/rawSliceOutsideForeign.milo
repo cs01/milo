@@ -1,0 +1,14 @@
+// @error: undefined function 'rawSlice'
+// The view constructor is not a general escape hatch: outside std/foreign.milo the
+// name means nothing. withRaw's closure parameter is what bounds the view's life,
+// and `let s = rawSlice(p, n)` here would hand back the same view with no such bound.
+from "std/os" import { malloc }
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(8) as *i64
+        let s = rawSlice(p, 1)
+        print(s.len)
+    }
+    return 0
+}

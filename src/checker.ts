@@ -17,6 +17,13 @@ import { Parser } from "./parser";
 import { basename } from "path";
 import { must } from "./must";
 
+// The view constructors for foreign memory, and the one module allowed to call them.
+// See the intrinsic in `checkCallExpr` for why the seam is a file rather than a keyword;
+// `src/lower.ts` imports both so the two passes cannot disagree about which calls these
+// names denote.
+export const RAW_SLICE_INTRINSICS: ReadonlySet<string> = new Set(["rawSlice", "rawSliceMut"]);
+export const FOREIGN_MODULE = "std/foreign.milo";
+
 // One hop from a place to a place inside it. `index` is deliberately opaque —
 // two index steps may or may not select the same element, and nothing here tries
 // to decide that. `payload` is the inside of an Option/Result reached by `!`/`?`.
@@ -856,6 +863,17 @@ export class TypeChecker {
     }
   }
 
+  // `@unsafe fn`: the callee carries a contract the compiler cannot check, so the
+  // obligation lands on the CALLER. Every other unsafe rule triggers on an operation
+  // (a deref, a pointer cast); this one exists because a function can be built
+  // entirely out of individually checkable operations and still be unsound to call
+  // with the wrong arguments, which is exactly the shape of a foreign-memory view.
+  private requireUnsafeCall(decl: { attributes?: { name: string }[] } | undefined, name: string, span?: Span) {
+    if (!decl?.attributes?.some(a => a.name === "unsafe")) return;
+    this.requireUnsafe(`calling '${name}' requires an unsafe block`, span,
+      `'${name}' is declared '@unsafe': it has a precondition the compiler cannot check, so the caller vouches for it`);
+  }
+
   // compute the output range of an arithmetic operation on two ranged integers
   private propagateRange(lt: TypeKind & { tag: "int" }, rt: TypeKind & { tag: "int" }, op: string): TypeKind | null {
     const lmin = lt.min!, lmax = lt.max!, rmin = rt.min!, rmax = rt.max!;
@@ -1452,11 +1470,17 @@ export class TypeChecker {
     const idx = typeParams.indexOf(ty.name);
     if (idx !== -1) {
       const sub = this.typeKindToMiloType(typeArgs[idx]);
-      // Preserve reference/pointer wrappers from the original: `&T` must become
+      // Preserve reference/pointer/array wrappers from the original: `&T` must become
       // `&P`, not value `P`. Dropping isRef here collapsed the param to by-value,
-      // so a generic fn taking `&T` passed a struct where a ptr was expected.
-      if (ty.isRef || ty.isRefMut || ty.isPtr) {
-        return { ...sub, isRef: ty.isRef, isRefMut: ty.isRefMut, isPtr: ty.isPtr, ptrDepth: ty.ptrDepth };
+      // so a generic fn taking `&T` passed a struct where a ptr was expected. `isArray`
+      // is the same story one wrapper out: `&[T]` became `&P`, which typed a slice
+      // parameter as a single element and made a generic over slices unwritable.
+      if (ty.isRef || ty.isRefMut || ty.isPtr || ty.isArray) {
+        return {
+          ...sub,
+          isRef: ty.isRef, isRefMut: ty.isRefMut, isPtr: ty.isPtr, ptrDepth: ty.ptrDepth,
+          isArray: ty.isArray, arraySize: ty.arraySize,
+        };
       }
       return sub;
     }
@@ -2281,6 +2305,18 @@ export class TypeChecker {
               this.error(`'@thread' takes no arguments`, undefined, `write '@thread fn ${fn.name}(...)'`);
             }
           }
+          // @unsafe moves the proof obligation to the caller: the body may be entirely
+          // checkable and the function still unsound to call with the wrong arguments.
+          // Nothing is verified here (that is the point), so the only check is the shape.
+          else if (attr.name === "unsafe") {
+            if (attr.args.length > 0) {
+              this.error(`'@unsafe' takes no arguments`, undefined, `write '@unsafe fn ${fn.name}(...)'`);
+            }
+            if (fn.isExtern) {
+              this.error(`'@unsafe' on extern fn '${fn.name}': an extern call's unsafety is already decided by its signature`, undefined,
+                `drop '@unsafe'; see the extern rules in docs/language-reference.md`);
+            }
+          }
           else this.error(`'@${attr.name}' is not supported on functions — '${fn.name}'`, undefined,
             `only ${attributesFor("fn").map(a => `'@${a}'`).join(", ")} apply to a fn; it would be silently ignored otherwise`);
         }
@@ -2315,7 +2351,12 @@ export class TypeChecker {
       }
       // fn return types allowed — move closures heap-allocate and are safe to escape
       this.functions.set(fn.name, { params, ret, variadic: fn.isVariadic, isExtern: fn.isExtern });
-      if (fn.contracts && fn.contracts.length > 0) this.fnDecls.set(fn.name, fn);
+      // The call site needs the declaration for contracts and for `@unsafe`; recording it
+      // only for contracts meant an `@unsafe fn` with no `requires` clause was declared
+      // unsafe and called freely.
+      if ((fn.contracts && fn.contracts.length > 0) || fn.attributes?.some(a => a.name === "unsafe")) {
+        this.fnDecls.set(fn.name, fn);
+      }
     }
 
     // Drop-ness has to be known BEFORE derive synthesis, not after registerImpl runs:
@@ -6181,7 +6222,11 @@ export class TypeChecker {
     // A bare type parameter (`T`, no further args) binds directly to the hint. First
     // binding wins; a later conflicting one surfaces as a field/arg type mismatch in the
     // caller's per-field re-check, so we don't need to diagnose it here.
-    if (typeParams.includes(retType.name) && !retType.typeArgs?.length) {
+    // An array/pointer wrapper means the parameter names the ELEMENT, not the whole
+    // hint: `[T]` against a `Vec<i64>` binds T to i64. Same rule as the direct-match
+    // arm of generic call inference; the arms below do the unwrapping.
+    const wrapped = retType.isArray || retType.isPtr || (retType.ptrDepth ?? 0) > 0;
+    if (typeParams.includes(retType.name) && !retType.typeArgs?.length && !wrapped) {
       if (!typeMap.has(retType.name)) typeMap.set(retType.name, hint);
       return;
     }
@@ -6204,9 +6249,18 @@ export class TypeChecker {
       this.inferTypeParamsFromHint(retType.typeArgs[0], hint.element, typeParams, typeMap);
       return;
     }
-    if (retType.isArray && hint.tag === "array") {
+    // A `[T]` / `&[T]` parameter also accepts a Vec (that is what auto-borrow hands it,
+    // and the two share a representation), so both element positions unify here.
+    if (retType.isArray && (hint.tag === "array" || hint.tag === "vec")) {
       // the element MiloType is the decl stripped of its array-ness
       this.inferTypeParamsFromHint({ ...retType, isArray: false, arraySize: null }, hint.element, typeParams, typeMap);
+      return;
+    }
+    if ((retType.ptrDepth ?? (retType.isPtr ? 1 : 0)) > 0 && hint.tag === "ptr") {
+      const depth = retType.ptrDepth ?? 1;
+      let inner: TypeKind = hint;
+      for (let d = 0; d < depth && inner.tag === "ptr"; d++) inner = inner.inner;
+      this.inferTypeParamsFromHint({ ...retType, isPtr: false, ptrDepth: 0 }, inner, typeParams, typeMap);
       return;
     }
     // Nested generic struct: `Arena<T>` field vs a concrete `Arena_i32` hint — recurse on
@@ -7730,6 +7784,36 @@ export class TypeChecker {
       this.sizeOfTypes.set(expr, resolved);
       return this.setType(expr, resolved);
     }
+    // `rawSlice(p, len)` / `rawSliceMut(p, len)` mint a non-owning `&[T]` / `&mut [T]`
+    // over memory Milo did not allocate. Every other slice is carved out of storage the
+    // compiler can see (a Vec, an array, a Sealed), so its extent is known; this one is
+    // the caller's word. It is the single construction the language cannot express, and
+    // the reason `std/foreign` needs compiler help at all.
+    //
+    // Restricted to std/foreign.milo BY FILE, so the unchecked aliasing assertion lives in
+    // exactly one reviewed place. Elsewhere the name is an ordinary undefined function.
+    // The restriction is what keeps this from being a general escape hatch: `withRaw`'s
+    // closure parameter is what bounds the view's life, and a `let s = rawSlice(p, n)` in
+    // user code would hand back the same view with no such bound.
+    if (RAW_SLICE_INTRINSICS.has(expr.func) && sp?.file?.endsWith(FOREIGN_MODULE)) {
+      const mutable = expr.func === "rawSliceMut";
+      if (expr.args.length !== 2) {
+        this.error(`'${expr.func}' takes exactly two arguments (pointer, length)`, sp);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      const pt = this.checkExpr(expr.args[0]);
+      const lt = this.checkExpr(expr.args[1]);
+      if (pt.tag !== "ptr" && pt.tag !== "unknown") {
+        this.error(`'${expr.func}': expected a raw pointer, got ${typeName(pt)}`, expr.args[0].span);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      if (lt.tag !== "int" && lt.tag !== "unknown") {
+        this.error(`'${expr.func}': expected an integer length, got ${typeName(lt)}`, expr.args[1].span);
+      }
+      this.requireUnsafe(`'${expr.func}' can only be used in unsafe blocks`, sp);
+      const element: TypeKind = pt.tag === "ptr" ? pt.inner : { tag: "unknown" };
+      return this.setType(expr, { tag: "ref", inner: { tag: "array", element, size: null }, mutable });
+    }
     // `replace(place, value)` and `swap(a, b)`: memory intrinsics whose bodies cannot be
     // written in safe Milo (they move a value out of a place and refill it). From the
     // caller's view the move rules are ordinary — a `&mut` borrow of the place(s) plus a
@@ -7843,22 +7927,32 @@ export class TypeChecker {
       for (let i = 0; i < argTypes.length; i++) {
         const paramTy = declaredType(genericFn.decl.params[i]);
         const argIsLiteral = expr.args[i].kind === "IntLit" || expr.args[i].kind === "CharLit" || expr.args[i].kind === "FloatLit";
-        // Direct match: param type IS a type param (e.g. val: T)
-        if (genericFn.typeParams.includes(paramTy.name)) {
+        // Direct match: param type IS a type param (e.g. val: T). A POINTER or ARRAY
+        // wrapper at the use site is not one: `p: *T` fed a `*i64` names i64, and
+        // `v: &[T]` fed a Vec names its element. Both used to bind T to the whole
+        // argument type, so `fn firstAt<T>(p: *T): T` reported "expected *i64, got i64"
+        // from inside its own body, against a type the program never wrote. `&T` stays a
+        // direct match: auto-borrow means the argument arrives as the pointee already.
+        const ptrDepth = paramTy.ptrDepth ?? (paramTy.isPtr ? 1 : 0);
+        let directArg: TypeKind | null = paramTy.isArray ? null : argTypes[i];
+        for (let d = 0; d < ptrDepth && directArg; d++) {
+          directArg = directArg.tag === "ptr" ? directArg.inner : null;
+        }
+        if (genericFn.typeParams.includes(paramTy.name) && directArg) {
           const existing = typeMap.get(paramTy.name);
-          if (existing && !typeEq(existing, argTypes[i])) {
+          if (existing && !typeEq(existing, directArg)) {
             // numeric literal coercion: flex the literal to match the existing inference
             if (argIsLiteral && existing.tag === argTypes[i].tag) {
               this.exprTypes.set(expr.args[i], existing);
               argTypes[i] = existing;
-            } else if (literalInferred.has(paramTy.name) && existing.tag === argTypes[i].tag) {
-              typeMap.set(paramTy.name, argTypes[i]);
+            } else if (literalInferred.has(paramTy.name) && existing.tag === directArg.tag) {
+              typeMap.set(paramTy.name, directArg);
               literalInferred.delete(paramTy.name);
             } else {
               this.error(`conflicting inference for type parameter '${paramTy.name}'`, sp);
             }
           } else if (!existing) {
-            typeMap.set(paramTy.name, argTypes[i]);
+            typeMap.set(paramTy.name, directArg);
             if (argIsLiteral) literalInferred.add(paramTy.name);
           }
         }
@@ -7905,11 +7999,14 @@ export class TypeChecker {
             if (!mt || !tk) return;
             let t = tk;
             if ((mt.isRef || mt.isRefMut) && t.tag === "ref") t = t.inner;
-            if (genericFn.typeParams.includes(mt.name)) {
+            // Same wrapper rule as everywhere else: `(&[T]) => R` names T as the slice's
+            // ELEMENT. Binding the whole `[i64]` here only ever went unnoticed because
+            // an earlier argument had usually pinned T already.
+            if (genericFn.typeParams.includes(mt.name) && !mt.isArray && !mt.isPtr) {
               if (!typeMap.has(mt.name)) typeMap.set(mt.name, t);
               return;
             }
-            if (mt.typeArgs) this.inferTypeParamsFromHint(mt, t, genericFn.typeParams, typeMap);
+            if (mt.typeArgs || mt.isArray || mt.isPtr) this.inferTypeParamsFromHint(mt, t, genericFn.typeParams, typeMap);
           };
           if (paramTy.fnParams) {
             for (let k = 0; k < paramTy.fnParams.length && k < argFn.params.length; k++) {
@@ -7958,6 +8055,7 @@ export class TypeChecker {
       }
       // check requires contracts at call site (generic fn)
       if (genericFn.decl) this.checkCallSiteContracts(genericFn.decl, expr.args, sp);
+      this.requireUnsafeCall(genericFn.decl, expr.func, sp);
 
       return this.setType(expr, must(this.functions, mangled, "functions").ret);
     }
@@ -8218,6 +8316,7 @@ export class TypeChecker {
     // check requires contracts at call site
     const fnDecl = this.fnDecls.get(expr.func);
     if (fnDecl) this.checkCallSiteContracts(fnDecl, expr.args, sp);
+    this.requireUnsafeCall(fnDecl, expr.func, sp);
 
     return this.setType(expr, sig.ret);
   }

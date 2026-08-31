@@ -614,13 +614,17 @@ export class Parser {
     // them is a mistake, not insignificant spacing, so reject it up front.
     const nameTok = this.peek();
     const expectedCol = at.col + (inner ? 2 : 1); // '@name' vs '@!name'
-    if (nameTok.kind === TokenKind.Ident && (nameTok.line !== at.line || nameTok.col !== expectedCol)) {
+    // Attribute names live in their own namespace, so a keyword may name one: `@unsafe`
+    // is the natural spelling for "calling this needs an unsafe block", and `unsafe`
+    // lexes as a keyword rather than an Ident, so it would otherwise be unspellable.
+    const isNameTok = nameTok.kind === TokenKind.Ident || nameTok.kind === TokenKind.Unsafe;
+    if (isNameTok && (nameTok.line !== at.line || nameTok.col !== expectedCol)) {
       this.error(
         `no whitespace allowed between '${inner ? "@!" : "@"}' and attribute name — write '${inner ? "@!" : "@"}${nameTok.value}'`,
         nameTok, undefined, `attributes bind tightly: '@derive(...)', not '@ derive(...)'`,
       );
     }
-    const name = this.expect(TokenKind.Ident).value;
+    const name = this.at(TokenKind.Unsafe) ? this.advance().value : this.expect(TokenKind.Ident).value;
     const args: string[] = [];
     const argKinds: ("ident" | "string")[] = [];
     if (this.match(TokenKind.LParen)) {

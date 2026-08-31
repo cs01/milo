@@ -1,0 +1,80 @@
+// std/foreign: read and write memory Milo did not allocate, without giving up the
+// one rule.
+//
+// Every other safety mechanism in this language works by BEING the allocator. `seal`
+// consumes a buffer and offers no mutating method; `Arena.freeze` consumes an arena and
+// removes `free`; `shatter` consumes a Vec and hands out disjoint owned windows. At a C
+// boundary all three preconditions are false at once: C allocated the memory, C will free
+// it, C may write it after you return. So a program crossing that seam falls back to raw
+// pointers and loses every guarantee at exactly the place it needs one.
+//
+// What is missing there is small: a `&[T]` over `(ptr, len)`. The slice type already
+// exists and is already checked. Nothing here adds a reference kind, a lifetime, or a
+// rule. These are constructors for a type the language shipped with.
+//
+//     unsafe {
+//         let n = withRaw(buf, count, (bytes: &[u8]): i64 => bytes.len)
+//         // bytes does not exist out here, and cannot be made to
+//     }
+//
+// Why a closure and not `fn view(p: *T, len: i64): &[T]`: returning a reference is what
+// the axiom forbids (docs/ownership-model.md), and it forbids it for a reason that binds
+// here more than anywhere, because the compiler has no idea how long the C allocation
+// lives, so a returned view is a promise nobody can keep. A closure parameter is a
+// second-class reference in the only position the rule allows, and the view provably
+// dies with the call. This is the shipped `arenaWith` shape (std/arena.milo) aimed at
+// foreign memory instead of an arena, which is why it needs no new rule.
+//
+// What the caller asserts by writing `unsafe`, and it is the whole content of the word
+// here: `p` addresses `len` initialized, correctly aligned `T`, and nothing else writes
+// them while `f` runs. Neither Milo nor Rust proves that: `slice::from_raw_parts_mut`
+// carries the identical unchecked no-alias clause. Both languages record it in the
+// contract of one reviewed primitive, which is what this file is.
+//
+// The view never owns the memory, and that is enforced by how it is built rather than by
+// this paragraph. It carries capacity 0, the representation every non-owning slice in the
+// language already uses; a value typed `&[T]` gets no drop glue at all; and the read-only
+// method set for slices has no `push`, `insert`, `extend` or `reserve`, so nothing can
+// reach a path that reallocates. Free the buffer yourself afterwards: that is correct and
+// is not a double free. See docs/foreign-memory.md.
+
+// Call `f` with a read-only view of `len` elements at `p`, and return what it returns.
+//
+// Returns `Option.None` WITHOUT calling `f` when `p` is null, or when `len` is negative.
+// The null path is in the return type so it cannot be forgotten; a variant returning a
+// bare `R` would push the test back to convention, which is the thing being fixed. A
+// negative length is folded into the same answer deliberately: the alternative is a view
+// whose length field is nonsense, and every later bounds check would read as satisfied.
+//
+// `len == 0` with a non-null `p` is not an error: `f` runs with an empty slice.
+@unsafe
+pub fn withRaw<T, R>(p: *T, len: i64, f: (&[T]) => R): Option<R> {
+    if len < 0 {
+        return Option.None
+    }
+    unsafe {
+        if p as i64 == 0 {
+            return Option.None
+        }
+        return Option.Some(f(rawSlice(p, len)))
+    }
+}
+
+// `withRaw` with a mutable view: writes through the slice land in the original memory.
+//
+// Same contract, same null and negative-length answers. Note what this does NOT cover: a
+// C `(ptr, count)` pair whose owner reallocates or frees on append is not a view of
+// anything stable, and no view primitive in any language makes that safe. Keep those on
+// `realloc`/`free` inside `unsafe`.
+@unsafe
+pub fn withRawMut<T, R>(p: *T, len: i64, f: (&mut [T]) => R): Option<R> {
+    if len < 0 {
+        return Option.None
+    }
+    unsafe {
+        if p as i64 == 0 {
+            return Option.None
+        }
+        return Option.Some(f(rawSliceMut(p, len)))
+    }
+}

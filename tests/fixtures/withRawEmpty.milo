@@ -1,0 +1,28 @@
+// @expect: ran
+// @expect: 0
+// @expect: true
+// len == 0 over a non-null pointer is defined, not an error: the closure runs and
+// sees an empty slice. Distinguishing it from the null case is the whole reason the
+// answer is an Option rather than a length.
+from "std/foreign" import {
+    withRaw
+}
+from "std/os" import {
+    malloc, free
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(8) as *i64
+        let n = withRaw(p, 0, (xs: &[i64]): i64 => {
+            print("ran")
+            return xs.len
+        }
+        )
+        print(n!)
+        let empty = withRaw(p, 0, (xs: &[i64]): bool => xs.isEmpty())
+        print(empty!)
+        free(p as *u8)
+    }
+    return 0
+}

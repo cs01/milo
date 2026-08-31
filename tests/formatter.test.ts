@@ -241,6 +241,24 @@ test("method-chain continuation lines indent one level past the statement", () =
   expect(format(out)).toBe(out); // fixed point
 });
 
+// `unsafe` is a keyword, so `@unsafe` does not arrive as an Ident the way every other
+// attribute name does. The formatter is a SEPARATE implementation (examples/cli-tools/
+// fmt.milo has its own lexer), so a compiler that accepts the spelling proves nothing
+// about the tool that rewrites every file in the repo.
+test("@unsafe survives formatting like any other attribute", () => {
+  const src = `@unsafe
+pub fn peek(p: *i64): i64 {
+    unsafe {
+        return p[0]
+    }
+}
+`;
+  const out = format(src);
+  expect(out).toContain("@unsafe");
+  expect(out).toBe(src);
+  expect(format(out)).toBe(out); // fixed point
+});
+
 // Property test over the whole repo: formatting must never change the token
 // stream (whitespace-only, apart from dropping cosmetic ';'), and must be a fixed
 // point. This is what makes a format-on-commit hook safe. ';' is excluded from the

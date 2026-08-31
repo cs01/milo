@@ -372,7 +372,10 @@ _Undocumented._
 fn Once.run(self: &Once, f: () => void): void
 ```
 
-_Undocumented._
+Run `f` if nobody has yet, otherwise block until whoever did is finished.
+Returns only once the initializer has completed exactly once, process-wide.
+@synchronized: `f` is a critical section. The embedded mutex serializes it and the
+atomic state word publishes its writes, so globals mutated in here are not racing.
 
 ### `WaitGroup.add`
 

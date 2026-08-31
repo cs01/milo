@@ -89,6 +89,15 @@ export const ATTRIBUTES: AttrInfo[] = [
       "to declare itself.",
   },
   {
+    name: "unsafe",
+    targets: ["fn"],
+    doc:
+      "Calling this function requires an `unsafe` block. For a routine whose contract the " +
+      "compiler cannot check (`std/foreign`'s view constructors assert that a raw pointer " +
+      "really addresses `len` initialized elements), where every operation in the body is " +
+      "individually checkable and so no other rule would ever ask the CALLER to opt in.",
+  },
+  {
     name: "externalLinkage",
     targets: ["fn"],
     doc: "Give this function external C linkage so a dlopen'd library can resolve it.",

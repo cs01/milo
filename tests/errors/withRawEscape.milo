@@ -1,0 +1,15 @@
+// @error: cannot return a reference stored inside 'Option'
+// The view may not outlive the closure. Smuggling it out through R (the closure's
+// own return type) is the escape nestedRef already rejects for a freeze, and it
+// rejects it here for the same reason: Option<&[T]> is storage holding a reference.
+from "std/foreign" import { withRaw }
+from "std/os" import { malloc }
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(8) as *i64
+        let escaped = withRaw(p, 1, (xs: &[i64]): Option<&[i64]> => Option.Some(xs))
+        print(1)
+    }
+    return 0
+}

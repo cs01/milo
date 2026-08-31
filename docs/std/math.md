@@ -32,7 +32,9 @@ _Undocumented._
 fn Math.acos(x: f64): f64
 ```
 
-_Undocumented._
+Clamped before the call. Round-off in a dot product routinely lands a
+cosine at 1.0000000000000002, and libm's acos returns NaN there rather
+than 0 — a NaN that then propagates silently through an angle calculation.
 
 ### `Math.asin`
 
@@ -144,7 +146,8 @@ _Undocumented._
 fn Math.isNan(x: f64): bool
 ```
 
-_Undocumented._
+NaN is the only value not equal to itself, so this is the one reliable test — `x == f64.NAN`
+is always false (the compiler lints that mistake).
 
 ### `Math.log`
 

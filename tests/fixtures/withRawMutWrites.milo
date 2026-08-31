@@ -1,0 +1,33 @@
+// @expect: 7
+// @expect: 5 6 7
+// The proof that the slice is a VIEW and not a copy: the closure writes through
+// &mut [T], and the writes are read back through the raw pointer AFTER it returns.
+// A copying implementation passes every other test in this directory and fails this one.
+from "std/foreign" import {
+    withRawMut
+}
+from "std/os" import {
+    malloc, free
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(24) as *i64
+        p[0] = 0
+        p[1] = 0
+        p[2] = 0
+
+        let last = withRawMut(p, 3, (xs: &mut [i64]): i64 => {
+            xs[0] = 5
+            xs[1] = 6
+            xs[2] = 7
+            return xs[2]
+        }
+        )
+        print(last!)
+        print(p[0], " ", p[1], " ", p[2])
+
+        free(p as *u8)
+    }
+    return 0
+}

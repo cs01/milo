@@ -1,0 +1,31 @@
+// @expect: 40
+// @expect: 40
+// @expect: 40
+// @expect: freed once
+// The view must not own the memory. It is built with capacity 0, the same marker
+// every non-owning slice in the language carries, so no drop, growth or extend path
+// will free it. Three views are taken and discarded before the ONE free that the
+// program owns; if any of them freed the buffer, the next read is a use-after-free
+// and the explicit free is a double free. Both are what scripts/asan-sweep.ts catches.
+from "std/foreign" import {
+    withRaw, withRawMut
+}
+from "std/os" import {
+    malloc, free
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(16) as *i64
+        p[0] = 40
+        p[1] = 2
+
+        print(withRaw(p, 2, (xs: &[i64]): i64 => xs[0])!)
+        print(withRawMut(p, 2, (xs: &mut [i64]): i64 => xs[0])!)
+        print(withRaw(p, 2, (xs: &[i64]): i64 => xs[0])!)
+
+        free(p as *u8)
+        print("freed once")
+    }
+    return 0
+}

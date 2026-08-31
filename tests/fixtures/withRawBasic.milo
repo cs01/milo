@@ -1,0 +1,33 @@
+// @expect: 3
+// @expect: 10 20 30
+// @expect: 60
+// A view over memory malloc'd outside Milo: withRaw hands the closure a real &[T]
+// covering the C buffer, so length, indexing and combinators all read the C bytes.
+from "std/foreign" import {
+    withRaw
+}
+from "std/os" import {
+    malloc, free
+}
+
+pub fn main(): i32 {
+    unsafe {
+        let p = malloc(24) as *i64
+        p[0] = 10
+        p[1] = 20
+        p[2] = 30
+
+        let n = withRaw(p, 3, (xs: &[i64]): i64 => xs.len)
+        print(n!)
+        let _ = withRaw(p, 3, (xs: &[i64]): i64 => {
+            print(xs[0], " ", xs[1], " ", xs[2])
+            return 0
+        }
+        )
+        let total = withRaw(p, 3, (xs: &[i64]): i64 => xs.sum())
+        print(total!)
+
+        free(p as *u8)
+    }
+    return 0
+}

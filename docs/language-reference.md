@@ -2459,6 +2459,27 @@ unsafe {
 
 Exception: `0 as *T` (null pointer literal) does not require `unsafe`.
 
+#### `@unsafe fn`: an obligation the caller carries
+
+Every rule above triggers on an *operation*. A function can be built entirely from
+operations the compiler checks and still be unsound to call with the wrong arguments:
+`std/foreign`'s `withRaw(p, len, f)` does nothing but a null test and a slice construction,
+and the length is the caller's word. `@unsafe` on the declaration puts the obligation where
+the knowledge is:
+
+```milo skip
+@unsafe
+pub fn withRaw<T, R>(p: *T, len: i64, f: (&[T]) => R): Option<R> { ... }
+
+unsafe {
+    let n = withRaw(buf, count, (bytes: &[u8]): i64 => bytes.len)
+}
+```
+
+Calling one outside an `unsafe` block is an error. Nothing about the body is checked
+differently. The attribute is a claim about the *contract*, so it is never inferred and
+never applies to an `extern fn`, whose unsafety is already decided by its signature.
+
 ### string.cstr()
 
 Returns the string's `*u8` data pointer without `unsafe`. The string remains alive in the caller's scope, so the pointer is valid.

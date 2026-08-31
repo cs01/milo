@@ -27,7 +27,7 @@ export const NOT_OWNED_TEMP: readonly string[] = [
   "Forget", "HashMapClear", "HashMapContains", "HashMapInsert", "HashMapLen",
 "HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident",
   "IntLit", "InterfaceCoerce", "IsCheck", "MemSwap", "OffsetOf",
-  "OptionOp", "PtrDeref", "RangeCheck", "SaturatingArith", "SizeOf", "StringCstr",
+  "OptionOp", "PtrDeref", "RangeCheck", "RawSlice", "SaturatingArith", "SizeOf", "StringCstr",
   "StringFind", "StringLen", "StringLit", "StringPush", "StringPushStr", "StringSlice",
   "UnaryOp", "VecAll", "VecAny", "VecCapacity", "VecContains", "VecEach",
   "VecEnumerate", "VecExtend", "VecIndexOf", "VecInsert", "VecIsEmpty",
@@ -5146,6 +5146,8 @@ export class Codegen {
         return this.genStringSlice(expr, lines);
       case "VecSlice":
         return this.genVecSlice(expr, lines);
+      case "RawSlice":
+        return this.genRawSlice(expr, lines);
       case "StringFind":
         return this.genStringFind(expr, lines);
       case "StringClone":
@@ -6048,8 +6050,14 @@ export class Codegen {
     // Closure params carry the full type (top-level fns split it into inner + isRef),
     // and the prologue below spills every ref param as a pointer. `&string` lowers to
     // %String by value in return position, so ask for the pointer explicitly here.
+    // `&[T]`/`&mut [T]` needs the same override: llvmType maps it to %Vec (the shape a
+    // slice EXPRESSION produces), but a slice parameter is passed the way every other
+    // reference parameter is (as the address of the %Vec), so a closure declaring one
+    // used to define `%Vec %s` while the prologue and the call site both spoke `ptr`.
+    // Nothing caught it: an indirect call has no callee signature to disagree with.
     const closureParamTy = (t: TypeKind) =>
-      t.tag === "ref" && t.inner.tag === "string" ? "ptr" : this.llvmType(t);
+      t.tag === "ref" && (t.inner.tag === "string" || (t.inner.tag === "array" && t.inner.size === null))
+        ? "ptr" : this.llvmType(t);
     const closureParams = [`ptr %env`, ...expr.params.map(p => `${closureParamTy(p.type)} %${p.name}`)].join(", ");
     closureBody.push(`define ${retTy} @${closureName}(${closureParams}) {`);
     closureBody.push("entry.bb:");
@@ -6292,12 +6300,20 @@ export class Codegen {
     const clTempMark = this.argTempDrops.length;
     const argVals: { val: string; type: string }[] = [{ val: envPtr, type: "ptr" }];
     const refPtrs: { ptr: string; mut: boolean }[] = [];
-    for (const arg of expr.args) {
-      if (arg.passByRef) {
+    // A `&[T]` parameter is address-passed (see closureParamTy). An already-borrowed
+    // slice arrives as a `ptr` from genExpr, but a slice TEMPORARY (`f(v[0..2])`, a
+    // freshly minted foreign view) is a %Vec value, so materialise it and pass its
+    // address: the same thing genCall does one layer up for a direct call.
+    const calleeParams = expr.callee.type.tag === "fn" ? expr.callee.type.params : [];
+    for (let i = 0; i < expr.args.length; i++) {
+      const arg = expr.args[i];
+      const pt = calleeParams[i];
+      const wantsSliceAddr = pt?.tag === "ref" && pt.inner.tag === "array" && pt.inner.size === null;
+      if (arg.passByRef || wantsSliceAddr) {
         const [al, aPtr] = this.genLValueForArg(arg.expr);
         lines.push(...al);
         argVals.push({ val: aPtr, type: "ptr" });
-        refPtrs.push({ ptr: aPtr, mut: arg.refMut });
+        if (arg.passByRef) refPtrs.push({ ptr: aPtr, mut: arg.refMut });
       } else {
         const [al, av, at] = this.genExpr(arg.expr);
         lines.push(...al);
@@ -9220,6 +9236,36 @@ export class Codegen {
     lines.push(`  ${s2} = insertvalue %String ${s1}, i64 0, 2`);
 
     return [lines, s2, "%String"];
+  }
+
+  // rawSlice(p, len) builds a %Vec view over foreign memory, cap=0, exactly as
+  // genVecSlice builds every other non-owning view.
+  //
+  // What actually keeps the C buffer safe, in the order it matters (checked against the
+  // emitters, not assumed): `needsDrop` is false for `array`, so a value typed `&[T]`
+  // gets no drop glue AT ALL; and SLICE_COMBINATORS denies it `push`/`insert`/`extend`/
+  // `reserve`, so it can never reach emitVecEnsureCapacity, which frees the old buffer on
+  // non-null and would not have consulted cap. cap=0 is what genVecExtend reads, and it
+  // is the one place a cap of `len` would have freed this buffer: `v.extend(view)` frees
+  // its source when srcCap > 0. Today the checker rejects that call before codegen sees
+  // it, so cap is not observable from Milo, which is precisely why it must be right here
+  // rather than defended by a test that cannot exist yet.
+  //
+  // Nothing about the pointer is checked: there is no source buffer to bound it against,
+  // which is why the only callers are `std/foreign`'s two `@unsafe` constructors.
+  private genRawSlice(expr: HIRExpr & { kind: "RawSlice" }, lines: string[]): Gen {
+    this.hasVecType = true;
+    const [pLines, pVal] = this.genExpr(expr.ptr);
+    lines.push(...pLines);
+    const [lLines, lVal] = this.genExpr(expr.len);
+    lines.push(...lLines);
+    const s0 = this.nextTemp();
+    lines.push(`  ${s0} = insertvalue %Vec undef, ptr ${pVal}, 0`);
+    const s1 = this.nextTemp();
+    lines.push(`  ${s1} = insertvalue %Vec ${s0}, i64 ${lVal}, 1`);
+    const s2 = this.nextTemp();
+    lines.push(`  ${s2} = insertvalue %Vec ${s1}, i64 0, 2`);
+    return [lines, s2, "%Vec"];
   }
 
   // v.slice(a, b) / v[a..b] — non-owning view: same %Vec rep with adjusted ptr/len

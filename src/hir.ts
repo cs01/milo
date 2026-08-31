@@ -76,6 +76,10 @@ export type HIRExpr =
   | { kind: "StringSubstr"; str: HIRExpr; start: HIRExpr; end: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "StringSlice"; str: HIRExpr; start: HIRExpr; end: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "VecSlice"; vec: HIRExpr; start: HIRExpr; end: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
+  // A slice view over memory Milo did not allocate: `std/foreign`'s rawSlice/rawSliceMut.
+  // Unlike VecSlice there is no source Vec to bound the range against, so nothing is
+  // checked here: the caller's `@unsafe` promise is the only guarantee.
+  | { kind: "RawSlice"; ptr: HIRExpr; len: HIRExpr; elementType: TypeKind; type: TypeKind; span?: Span }
   | { kind: "StringFind"; str: HIRExpr; needle: HIRExpr; from?: HIRExpr; reverse: boolean; optionEnumName: string; type: TypeKind; span?: Span }
   | { kind: "StringClone"; str: HIRExpr; type: TypeKind; span?: Span }
   | { kind: "NumberToString"; value: HIRExpr; valueType: TypeKind; type: TypeKind; span?: Span }

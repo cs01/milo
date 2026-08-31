@@ -1,0 +1,16 @@
+// @error: calling 'withRaw' requires an unsafe block
+// The '@unsafe' attribute puts the proof obligation on the caller. Without it
+// withRaw(v.ptr(), 1000000, f) would be safe-looking Milo: every operation in the
+// body is individually checkable and the length is still a lie.
+from "std/foreign" import { withRaw }
+from "std/os" import { malloc }
+
+pub fn main(): i32 {
+    var p = 0 as *i64
+    unsafe {
+        p = malloc(8) as *i64
+    }
+    let n = withRaw(p, 1, (xs: &[i64]): i64 => xs.len)
+    print(n!)
+    return 0
+}

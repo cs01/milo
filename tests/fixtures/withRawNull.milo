@@ -1,0 +1,51 @@
+// @expect: none
+// @expect: calls=0
+// @expect: none
+// A null pointer answers Option.None and the closure NEVER RUNS, proved by a
+// captured counter that stays 0, not by the absence of a crash. A negative length
+// takes the same path: the alternative is a slice whose len field is nonsense.
+from "std/foreign" import {
+    withRaw
+}
+from "std/os" import {
+    malloc, free
+}
+
+pub fn main(): i32 {
+    unsafe {
+        var calls = 0
+        let nullPtr = 0 as *i64
+
+        let r = withRaw(nullPtr, 4, (xs: &[i64]): i64 => {
+            calls = calls + 1
+            return xs.len
+        }
+        )
+        match r {
+            Option.Some(v) => {
+                print("some ", v)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+        print("calls=", calls)
+
+        let p = malloc(8) as *i64
+        let neg = withRaw(p, -1, (xs: &[i64]): i64 => {
+            calls = calls + 1
+            return xs.len
+        }
+        )
+        match neg {
+            Option.Some(v) => {
+                print("some ", v)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+        free(p as *u8)
+    }
+    return 0
+}

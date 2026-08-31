@@ -158,6 +158,12 @@ pushing several Promise.blocking handles into Promise.all.
 @thread: `f` crosses to a real OS thread — captures must be Send, and the checker
 rejects unsynchronized mutable globals reached from its body.
 
+`f`'s captures are released BEFORE the result is sent, so once `await()` hands back
+a value every destructor the closure owned has already run. Without that the
+environment lived until the worker's frame was torn down, which is after the send,
+and a caller could hold a result while a lock, an fd or a reader handle the closure
+captured was still alive. See runOnce.
+
 ### `Promise.channel`
 
 ```milo

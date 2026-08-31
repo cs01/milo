@@ -428,6 +428,7 @@ processPipe
 promiseBasic
 promiseBlocking
 promiseBlockingAll
+promiseCaptureDropOrder
 promiseConstructor
 promiseRace
 propagateGenericRet

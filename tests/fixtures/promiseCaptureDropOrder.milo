@@ -1,0 +1,49 @@
+// @expect: worker done
+// @expect: capture dropped
+// @expect: await returned 7
+// A blocking Promise publishes its result over a channel, and the worker closure holds
+// whatever it captured. If the capture is released only when the worker's frame is torn
+// down, that happens AFTER the send, so a caller that looks at something the closure held
+// - a Shared holder count, an open fd, a lock - can still see it alive after await()
+// returned. sealShared asserted exactly such a count and went red on CI-linux for this
+// reason while 280 local runs stayed green.
+//
+// The ordering below is the guarantee: every capture is gone before await() hands back a
+// result. The 200ms in the destructor is what makes the assertion a GATE rather than a
+// coin flip: with the release before the send, await() cannot return until the sleep is
+// over, so the order holds on any platform; with the release left to frame teardown, the
+// send has already happened and the main thread prints while the worker is still inside
+// the destructor. Without the sleep the two orderings differ by microseconds and macOS
+// happened to produce the right one either way, which would have made this fixture pass
+// against the very bug it exists to catch.
+from "std/runtime" import {
+    Promise
+}
+from "std/time" import {
+    sleepMs
+}
+
+struct Capture {
+    id: i64,
+}
+
+impl Drop for Capture {
+    fn drop(self: &mut Self): void {
+        sleepMs(200)
+        print("capture dropped")
+    }
+}
+
+pub fn main(): i32 {
+    let held = Capture {
+        id: 7,
+    }
+    let p = Promise<i64>.blocking(move(): i64 => {
+        print("worker done")
+        return held.id
+    }
+    )
+    let got = p.await()!
+    print("await returned " + got.toString())
+    return 0
+}

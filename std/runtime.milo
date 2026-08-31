@@ -631,6 +631,19 @@ unsafe
 impl Sync for Promise<T> {
 }
 
+// Call `f` and let its captures go before returning.
+//
+// The hop through a by-value parameter is what does it: passing an owning closure moves
+// it, and the environment is released once the call cannot still be using it, which is
+// BEFORE the caller's next statement. Inline (`let result = f()` in the worker body) the
+// environment instead lives until the worker's own frame is torn down, which happens
+// AFTER the result has been sent, so a caller that observed something the closure held
+// (a Shared holder count, an open fd, a lock) could still see it alive after await()
+// returned. tests/fixtures/promiseCaptureDropOrder.milo pins the ordering.
+fn runOnce<T>(f: move () => T): T {
+    return f()
+}
+
 impl Promise<T> {
     fn _fromChannel(ch: Channel<T>): Promise<T> {
         return Promise {
@@ -661,7 +674,7 @@ impl Promise<T> {
         let ch = Channel<T>.new(1)!
         let chSend = ch.clone() // worker's owning handle
         Task.spawn(move(): void => {
-            let result: T = f()
+            let result: T = runOnce(f)
             chSend.send(result)!
         }
         )
@@ -678,12 +691,18 @@ impl Promise<T> {
     // pushing several Promise.blocking handles into Promise.all.
     // @thread: `f` crosses to a real OS thread — captures must be Send, and the checker
     // rejects unsynchronized mutable globals reached from its body.
+    //
+    // `f`'s captures are released BEFORE the result is sent, so once `await()` hands back
+    // a value every destructor the closure owned has already run. Without that the
+    // environment lived until the worker's frame was torn down, which is after the send,
+    // and a caller could hold a result while a lock, an fd or a reader handle the closure
+    // captured was still alive. See runOnce.
     @thread
     fn blocking(f: move () => T): Promise<T> {
         let ch = Channel<T>.new(1)!
         let chSend = ch.clone() // worker thread's owning handle
         spawnOsThreadDetached(move(): void => {
-            let result: T = f()
+            let result: T = runOnce(f)
             chSend.send(result)!
         }
         )

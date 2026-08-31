@@ -138,9 +138,35 @@ The allocator underneath is plain libc `malloc`/`free` (`Heap(v)` is one `malloc
 
 ### What it does not reach
 
-An `extern struct` whose fields are raw pointers owns none of them. A raw pointer has no drop glue, so dropping an adopted `Heap<T>` frees **the struct and nothing it points at**. That is correct: it is what makes the layout an ABI match. But a C-shaped object graph still needs an explicit teardown that walks the raw fields and frees them before the adopted box drops.
+An `extern struct` whose fields are raw pointers owns none of them. A raw pointer has no drop glue, so dropping an adopted `Heap<T>` frees **the struct and nothing it points at**. That is correct: it is what makes the layout an ABI match. But a C-shaped object graph still needs an explicit teardown that walks the raw fields and frees them before the adopted box drops. The compiler warns at the call site when it can see the shape (`adopt-raw-fields`, naming the fields); it is a warning rather than an error because pointer fields that are *borrowed* are the normal case, and nothing distinguishes those from owned ones.
 
-There is also no clean way yet to get the pointer *out* of a `Heap<T>` for the give direction: `Vec` has `.ptr()`, `Heap` has no equivalent, and `h.addrOf()` is the address of the slot rather than the box.
+### The give direction
+
+`h.ptr()` is the `Heap<T>` sibling of `v.ptr()`: the box pointer, which is the allocation itself rather than the slot holding it, and safe to call for the same reason (the `Heap` stays live in the caller). Pair it with `forget` to hand a Milo-allocated object to C, and with `adopt` to take it back.
+
+```milo
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+extern fn free(p: *u8): void
+
+fn giveAway(): void {
+    let h = Heap(Point {
+        x: 1,
+        y: 2,
+    }
+    )
+    unsafe {
+        let raw = h.ptr()   // *Point: the allocation, not the slot holding it
+        forget(h)           // Milo's ownership ends here
+        free(raw as *u8)    // ...and C's begins
+    }
+}
+```
+
+Two cases it declines. A `T` with its own `ptr` method keeps that method, because a `Heap<T>` receiver resolves to `T`'s methods and the builtin must not silently retarget an existing call. And `Heap<SomeInterface>` has no `ptr()` at all: an interface box is a pair of allocation and vtable, so no single raw pointer stands for it.
 
 ## API
 
@@ -150,6 +176,7 @@ There is also no clean way yet to get the pointer *out* of a `Heap<T>` for the g
 | `withRawMut<T, R>(p: *T, len: i64, f: (&mut [T]) => R): Option<R>` | The same, with a mutable view; writes land in the original memory |
 | `adopt<T>(p: *T): Option<Heap<T>>` | Take ownership of a Milo allocation back through a raw pointer; the result's drop frees it |
 | `adoptSlice<T>(p: *T, len: i64): Option<Vec<T>>` | The same for `len` contiguous elements, handing back an owned `Vec<T>` |
+| `h.ptr(): *T` (compiler builtin) | A `Heap<T>`'s box pointer: the give leg, and the inverse direction of `adopt` |
 
 ## See also
 

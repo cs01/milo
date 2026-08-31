@@ -3,7 +3,7 @@ system: c-ffi
 purpose: declaring, linking, and verifying C interfaces from Milo — extern fn/struct, @link, and the @cSig/@cLayout/@cValue build-time guards
 key-files: src/checker.ts (checkCSig/checkCLayout/checkCValue), src/codegen.ts (cDeclGuards/cSigGuard), src/csig.ts, src/main.ts (verifyCDecls)
 update-when: an FFI annotation changes what it accepts or what it verifies
-last-verified: 2026-08-02
+last-verified: 2026-08-31
 -->
 
 # C FFI
@@ -292,6 +292,64 @@ fn main(): i32 {
     return 0
 }
 ```
+
+## Memory Milo did not allocate
+
+At a C boundary Milo owns nothing: C allocated the memory, C will free it, and C may write it
+after you return. `std/foreign` is the three constructors that let a program keep its guarantees
+across that seam without adding a reference kind, a lifetime, or a rule. See
+[std/foreign](/stdlib/foreign) for the full contracts.
+
+```milo
+from "std/foreign" import { withRaw, withRawMut, adopt, adoptSlice }
+```
+
+- **`withRaw(p, len, f)` / `withRawMut`** call `f` with a real `&[T]` / `&mut [T]` over
+  `(ptr, len)`. The view is a second-class reference in parameter position, so it provably dies
+  with the call and cannot be stored or returned. `Option.None` without calling `f` when `p` is
+  null, so the null path is in the type rather than in a convention.
+- **`?&mut T`** is a nullable extern reference: legal only in an `extern` / `@externalLinkage`
+  signature, ABI exactly `T*`, unwrapped with `let`-else. It is what lets an exported entry point
+  take a pointer a C caller may leave null without the body ever seeing a pointer.
+- **`adopt(p)` / `adoptSlice(p, len)`** take ownership back through a raw pointer, the inverse of
+  `forget`: the `Heap<T>` / `Vec<T>` that comes out drops, and that drop frees the allocation.
+  Milo allocates with plain libc `malloc`, so the round trip is symmetric in both directions.
+
+The give leg is `h.ptr()`, the `Heap<T>` sibling of `v.ptr()`:
+
+```milo
+from "std/foreign" import { adopt }
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+pub fn main(): i32 {
+    let h = Heap(Point {
+        x: 1,
+        y: 2,
+    }
+    )
+    unsafe {
+        let raw = h.ptr()      // *Point, the allocation itself
+        forget(h)              // Milo's ownership ends here
+        match adopt(raw) {     // ...and comes back
+            Option.Some(box) => {
+                print((*box).x)
+            }
+            Option.None => {
+                print("null")
+            }
+        }
+    }
+    return 0
+}
+```
+
+`adopt` frees the struct and not what its raw pointer fields address, because a raw pointer owns
+nothing and gets no drop glue. The compiler says so at the call site (`adopt-raw-fields`) rather
+than leaving it to the reader.
 
 ## Calling Milo from C
 

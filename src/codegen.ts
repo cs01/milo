@@ -25,7 +25,7 @@ export const NOT_OWNED_TEMP: readonly string[] = [
   "ArrayLen", "ArrayRepeat", "BitIntrinsic", "BoolLit", "CFnCall", "Cast",
   "CharLit", "CheckedArith", "Closure", "EnumTryFrom", "FieldAccess", "FloatLit",
   "Forget", "HashMapClear", "HashMapContains", "HashMapInsert", "HashMapLen",
-"HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "Ident",
+"HashMapNew", "HashMapRemove", "HeapCreate", "HeapDeref", "HeapPtr", "Ident",
   "IntLit", "InterfaceCoerce", "IsCheck", "MemSwap", "OffsetOf",
   "OptionOp", "PtrDeref", "RangeCheck", "RawSlice", "SaturatingArith", "SizeOf", "StringCstr",
   "StringFind", "StringLen", "StringLit", "StringPush", "StringPushStr", "StringSlice",
@@ -4934,6 +4934,14 @@ export class Codegen {
         const dataPtr = this.nextTemp();
         lines.push(`  ${dataPtr} = extractvalue %String ${ov}, 0`);
         return [lines, dataPtr, "ptr"];
+      }
+      case "HeapPtr": {
+        // A `Heap<T>` IS the malloc'd pointer, so the give leg is a re-labelling: no
+        // load, no extractvalue. What changes is the type — the result is a `*T` the
+        // caller may hand to C, and (after `forget`) to C's `free`.
+        const [ol, ov] = this.genExpr(expr.object);
+        lines.push(...ol);
+        return [lines, ov, "ptr"];
       }
       case "VecPtr": {
         // v.ptr(): the Vec's backing data pointer (field 0 of {ptr,len,cap}).

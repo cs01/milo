@@ -44,6 +44,7 @@ const RECEIVER_DECL: Record<BuiltinReceiver, string> = {
   string: `var r: string = "ab"`,
   vec: `var r: Vec<i64> = Vec.new()`,
   hashmap: `var r: HashMap<string, i64> = HashMap.new()`,
+  heap: `var r: Heap<i64> = Heap(1)`,
   option: `var r: Option<i64> = Option.Some(1)`,
   result: `var r: Result<i64, string> = Result.Ok(1)`,
   int: `var r: i64 = 1`,
@@ -225,6 +226,8 @@ test("every probeable signature's return type matches what the checker infers", 
   // nothing checks. Shrinking it is good; growing it must be a deliberate edit.
   expect(skipped.sort()).toEqual([
     "any.addrOf",
+    // Like vec.ptr: a raw-pointer return has no literal to compare against.
+    "heap.ptr",
     "option.andThen", "option.map", "option.orElse", "option.unwrapOrElse",
     "result.andThen", "result.map", "result.mapErr", "result.orElse", "result.unwrapOrElse",
     "string.codePoints", "string.cstr", "string.lines", "string.splitView",

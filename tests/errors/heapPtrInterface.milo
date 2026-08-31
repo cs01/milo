@@ -1,0 +1,23 @@
+// @error: 'ptr' is not available on Heap<Shape>
+// A `Heap<dyn I>` is two words, a box and a vtable, so no single raw pointer stands for
+// it: handing C the box alone would strand the half that does the dispatch. The give leg
+// exists for a `Heap<T>` whose value IS the allocation, which is every non-interface T.
+interface Shape {
+    fn area(self: &Self): i64
+}
+
+struct Square {
+    side: i64,
+}
+
+impl Square {
+    fn area(self: &Self): i64 {
+        return self.side * self.side
+    }
+}
+
+pub fn main(): i32 {
+    let s: Heap<Shape> = Heap(Square { side: 3 })
+    let _p = s.ptr()
+    return 0
+}

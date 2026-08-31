@@ -1,0 +1,23 @@
+// @expect: user ptr 42
+// `Heap<T>` resolves methods on T, so a user type with its own `ptr` method keeps it:
+// the builtin give leg only answers when T has no such method. Without the guard, adding
+// `Heap.ptr()` would have silently retargeted every existing `h.ptr()` call in the wild
+// from the user's method to the box pointer.
+struct Node {
+    id: i64,
+}
+
+impl Node {
+    fn ptr(self: &Node): i64 {
+        return self.id
+    }
+}
+
+pub fn main(): i32 {
+    let h = Heap(Node {
+        id: 42,
+    }
+    )
+    print("user ptr ", h.ptr())
+    return 0
+}

@@ -21,7 +21,7 @@ export interface BuiltinMember {
 
 export type BuiltinReceiver =
   | "string" | "vec" | "hashmap" | "option" | "result"
-  | "int" | "float" | "bool" | "any";
+  | "heap" | "int" | "float" | "bool" | "any";
 
 export const BUILTIN_MEMBERS: Record<BuiltinReceiver, BuiltinMember[]> = {
   // Callable on any receiver at all, so they belong to no single table.
@@ -106,6 +106,12 @@ export const BUILTIN_MEMBERS: Record<BuiltinReceiver, BuiltinMember[]> = {
     { name: "max", sig: "(): Option<T>" },
     { name: "ptr", sig: "(): *T", note: "backing data pointer; the Vec stays live in the caller" },
     { name: "clone", sig: "(): Vec<T>" },
+  ],
+
+  // A `Heap<T>` resolves everything else on T, so this table is only what the box itself
+  // answers.
+  heap: [
+    { name: "ptr", sig: "(): *T", note: "the box pointer; the Heap stays live in the caller, and a user 'ptr' method on T wins" },
   ],
 
   hashmap: [

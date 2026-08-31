@@ -6,9 +6,10 @@
 // `adopt` reconstitutes an owned `Heap<T>` whose contents are the ones written before
 // the trip. `adoptSlice` does the same for a run of elements.
 //
-// Getting the box pointer out of a `Heap<T>` is the double-indirection below:
-// `h.addrOf()` is the address of the SLOT holding the pointer, so the pointer itself is
-// one load away. A `Vec` has `.ptr()` for this; a `Heap` has no such spelling yet.
+// The box pointer comes out of a `Heap<T>` with `h.ptr()`, the sibling of `v.ptr()`.
+// This fixture keeps the older double indirection through `h.addrOf()` — the address of
+// the SLOT holding the pointer, one load above the pointer itself — because both spellings
+// must keep working and `heapPtrGive.milo` proves they are the same address.
 from "std/foreign" import {
     adopt, adoptSlice
 }

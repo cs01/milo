@@ -554,6 +554,27 @@ export class TypeChecker {
     this.warningConfig = config;
   }
 
+  // `adopt<T>`/`adoptSlice<T>` on a struct whose fields are raw pointers frees the struct
+  // and NOTHING it addresses: a raw pointer is not owned, so it gets no drop glue. That is
+  // correct — it is what makes the layout an ABI match — but it is the one thing about
+  // `adopt` a reader is likely to assume otherwise, and it is exactly the shape a C-derived
+  // `extern struct` has. A warning rather than an error, because borrowed pointer fields
+  // are the normal case and the compiler cannot tell those from owned ones.
+  private warnAdoptRawFields(fnName: string, declSpan: Span | undefined, typeArgs: TypeKind[], sp?: Span) {
+    if (fnName !== "adopt" && fnName !== "adoptSlice") return;
+    if (!declSpan?.file?.endsWith(FOREIGN_MODULE)) return;
+    const t = typeArgs[0];
+    if (t?.tag !== "struct") return;
+    const raw = (this.structs.get(t.name)?.fields ?? []).filter(f => f.type.tag === "ptr");
+    if (raw.length === 0) return;
+    this.warn("adopt-raw-fields",
+      `'${fnName}<${typeName(t)}>': dropping the adopted value frees the ${typeName(t)} itself and not what its raw pointer field(s) address`,
+      sp,
+      `${raw.map(f => `'${t.name}.${f.name}'`).join(", ")} ${raw.length === 1
+        ? "is a raw pointer: it owns nothing and has no drop glue, so free what it addresses before the adopted value drops"
+        : "are raw pointers: they own nothing and have no drop glue, so free what they address before the adopted value drops"}, or '--allow=adopt-raw-fields' if they are borrowed`);
+  }
+
   private error(msg: string, span?: Span, hint?: string) {
     this.diagnostics.push({ severity: "error", span, message: msg, hint });
   }
@@ -8098,6 +8119,7 @@ export class TypeChecker {
       }
 
       const typeArgs = genericFn.typeParams.map(p => must(typeMap, p, "type map"));
+      this.warnAdoptRawFields(expr.func, genericFn.decl.span, typeArgs, sp);
       const mangled = this.monomorphizeFn(expr.func, typeArgs, sp);
       this.rewrittenCalls.set(expr, mangled);
 
@@ -9064,6 +9086,24 @@ export class TypeChecker {
     if (objType.tag === "vec" && expr.method === "ptr") {
       if (expr.args.length !== 0) { this.error(`'ptr' takes no arguments`, sp); }
       return this.setType(expr, { tag: "ptr", inner: objType.element });
+    }
+    // h.ptr(): *T — the box pointer of a `Heap<T>`, the give leg `adopt` is the take
+    // leg of. Safe for the same reason `v.ptr()` is: the `Heap` stays live in the caller
+    // and this only reads the pointer it already is. Without it, handing C a Milo-owned
+    // object needed `h.addrOf()` and a load through it — the address of the SLOT, not of
+    // the box. A user `impl` method named `ptr` on T wins, since a `Heap<T>` receiver
+    // otherwise resolves to T's methods.
+    if (objType.tag === "heap" && expr.method === "ptr"
+        && !this.resolveMethod(typeName(objType.inner), "ptr")) {
+      if (expr.args.length !== 0) { this.error(`'ptr' takes no arguments`, sp); }
+      if (objType.inner.tag === "interface") {
+        // A `Heap<dyn I>` is {box, vtable}; there is no single pointer that is the value,
+        // and free-ing the box alone would strand the dispatch half of it.
+        this.error(`'ptr' is not available on Heap<${typeName(objType.inner)}>`, sp,
+          `an interface box carries a vtable alongside the allocation, so no single raw pointer represents it`);
+        return this.setType(expr, { tag: "unknown" });
+      }
+      return this.setType(expr, { tag: "ptr", inner: objType.inner });
     }
     // Option combinators — isSome/isNone/unwrapOr. Gated on baseName so a user
     // enum's own impl method of the same name still resolves normally below.

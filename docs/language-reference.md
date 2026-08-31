@@ -2519,7 +2519,7 @@ extern fn strlen(s: *u8): i64
 let len = strlen(ptr)              // safe — *u8 arg matches *u8 param
 ```
 
-### Raw pointers: `v.ptr()` and `x.addrOf()`
+### Raw pointers: `v.ptr()`, `h.ptr()` and `x.addrOf()`
 
 `&` is a borrow marker: it appears only in a **type** (`&T` = a borrowed
 parameter), never in an expression. To take a raw pointer, use a method, split by
@@ -2532,6 +2532,22 @@ what it points at:
   extern fn write(fd: i32, p: *u8, n: i64): i64
   unsafe { write(1, buf.ptr(), 3) }
   ```
+- **`h.ptr(): *T`** — a `Heap<T>`'s box pointer: the allocation itself, not the
+  slot holding it. Safe to call for the same reason `v.ptr()` is, and the give leg
+  that [`adopt`](std/foreign.md) is the take leg of. A `Heap<T>` whose `T` has its
+  own `ptr` method keeps that method; `Heap<SomeInterface>` has no `ptr()` at all,
+  because an interface box is a pair (allocation, vtable) and no single raw pointer
+  stands for it.
+  ```milo
+  from "std/foreign" import { adopt }
+  struct Point { x: i64, y: i64 }
+  let h = Heap(Point { x: 1, y: 2 })
+  unsafe {
+      let raw = h.ptr()              // *Point — hand this to C
+      forget(h)                      // Milo's ownership ends here
+      let _back = adopt(raw)         // ...and comes back with adopt
+  }
+  ```
 - **`x.addrOf(): *T`** — the address of any lvalue (a variable, field, or index).
   Requires `unsafe`; `addrOf` is a reserved method name.
   ```milo
@@ -2541,7 +2557,8 @@ what it points at:
   ```
 
 For a `Vec`, `v.ptr()` is the data buffer's address; `v.addrOf()` is the `Vec`
-header's address. A fixed array `[T; N]` coerces to `*T` at an FFI call — pass it
+header's address. The same split holds for a `Heap<T>`: `h.ptr()` is the box,
+`h.addrOf()` is the slot that points at it. A fixed array `[T; N]` coerces to `*T` at an FFI call — pass it
 bare. A pointer to an absolute address is `<int> as *T` (in `unsafe`).
 
 ### Opaque Foreign Types

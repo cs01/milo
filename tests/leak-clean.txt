@@ -290,6 +290,8 @@ hashmapStringKey
 hashmapStructKey
 hashmapTombstoneReuse
 heapBasic
+heapPtrGive
+heapPtrUserMethodWins
 heapRecursive
 hello
 hexConformance

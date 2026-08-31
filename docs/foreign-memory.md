@@ -3,7 +3,7 @@ system: foreign-memory
 purpose: how Milo reaches memory it did not allocate, and why that needs constructors rather than new reference kinds
 key-files: std/foreign.milo, src/checker.ts, src/codegen.ts, docs/ownership-model.md, docs/residue-vs-rust.md
 update-when: a foreign-memory primitive is added/changed, the nullable-extern-ref spelling changes, or the giflib differential gate moves
-last-verified: 2026-08-31 (all three features built and gated; the give leg for Heap<T> is the remaining gap)
+last-verified: 2026-08-31 (all three features built and gated; Heap.ptr() closes the give leg, so row J is complete)
 -->
 
 # Foreign memory: reaching what Milo did not allocate
@@ -29,9 +29,10 @@ features below add no new reference kind, no lifetime, and no rule. Each is a *c
 | `?&mut T` | No — `&mut T` params already exist | a nullable *spelling*, legal only in an extern signature |
 | `adopt` | No — `Heap<T>`/`Vec<T>` already exist | the inverse of the shipped `forget` |
 
-All three are built. What remains open for row J is the *give* leg for a whole object. `Vec` has
-`.ptr()`, `Heap<T>` has no such spelling, so handing C a Milo-allocated struct still needs a
-double indirection through `addrOf`. See §3 *What the build actually needed*.
+All three are built, and so is the *give* leg row J needs on the other side: `Heap<T>.ptr()`,
+the sibling of `Vec.ptr()`, hands out the box pointer so a Milo-allocated object goes to C
+without the double indirection through `addrOf` the first cut of `adopt` had to use. Row J is
+closed. See §3 *What the build actually needed*.
 
 ## Why this is worth building: the census
 
@@ -306,8 +307,8 @@ Shipped in `std/foreign.milo` over two compiler intrinsics, with fixtures
 `tests/fixtures/adopt*.milo` and rejections `tests/errors/adopt*.milo`. Five things the spec
 above did not anticipate:
 
-**There is no way to get the box pointer out of a `Heap<T>`, and the spec assumed there was.**
-A `Vec` has `.ptr()`; a `Heap` has nothing. `h as *T` is `cannot cast from Heap<T>`, passing `h`
+**There was no way to get the box pointer out of a `Heap<T>`, and the spec assumed there was.**
+A `Vec` had `.ptr()`; a `Heap` had nothing. `h as *T` is `cannot cast from Heap<T>`, passing `h`
 to a `*T` parameter is `expected *T, got Heap<T>`, and `h.addrOf()` is `*Heap<T>`, the address
 of the SLOT, not the box. The give leg for a whole object is therefore the double indirection
 the fixtures use:
@@ -318,9 +319,24 @@ let raw = (*slot) as *Point       // the box pointer, one load down
 forget(h)
 ```
 
-That works and is exercised, but it is an incantation, not an API. `adopt` is the take leg and
-is complete; **the give leg for `Heap<T>` is a separate small gap** (`Heap.ptr()`, the sibling
-of `Vec.ptr()`), deliberately not built here. Row J is not closed until it exists.
+That works and `adoptRoundTrip.milo` still exercises it, but it is an incantation, not an API.
+**`Heap<T>.ptr()` is now that API** and closes row J. It is a re-labelling in codegen — a
+`Heap<T>` already IS the malloc'd pointer, so the node returns its operand and changes only the
+type — and it is safe to call for the reason `v.ptr()` is: the box stays live in the caller.
+
+Two things the guard has to get right, both gated:
+
+- **A user `ptr` method on `T` wins.** A `Heap<T>` receiver otherwise resolves to `T`'s methods,
+  so an unguarded builtin would silently retarget every existing `h.ptr()` call from the user's
+  method to the box pointer. `tests/fixtures/heapPtrUserMethodWins.milo`.
+- **`Heap<SomeInterface>` has no `ptr()`.** An interface box is `{allocation, vtable}`; no single
+  raw pointer stands for it, and handing C the allocation alone strands the dispatch half.
+  `tests/errors/heapPtrInterface.milo`.
+
+`tests/fixtures/heapPtrGive.milo` asserts the new spelling and the old `addrOf` load produce the
+same address, then gives the pointer away for real: `forget` and libc `free`, which is the
+symmetry claim §"The allocator question, settled" makes, checked by `scripts/asan-sweep.ts`
+rather than asserted.
 
 **Neither function needed to be an intrinsic; the ownership claim did.** `adoptHeap(p)` and
 `adoptVec(p, len)` are the compiler's whole contribution (one `Adopt` HIR node and fourteen
@@ -359,13 +375,15 @@ stated: it reads the nested array *after* the adopted box has dropped and then f
 the drop had reached the field, that read is a use-after-free and the free is a double free,
 both of which `scripts/asan-sweep.ts` sees.
 
-**Could the limit be a diagnostic instead of prose?** Yes, and it would be cheap: the checker
-already walks struct layouts (`structNeedsDrop`), so `adopt<T>` could warn when `T` is a struct
-with any `ptr`-tagged field: "this struct has raw pointer fields; dropping the adopted value
-frees the struct and not what those fields address". It would be a warning, not an error,
-because that IS the right thing to do for a struct whose pointers are borrowed rather than
-owned, and the compiler cannot tell those apart. Not built; naming the shape so the next person
-does not have to rediscover it.
+**The limit is a diagnostic, not only prose.** `adopt<T>` / `adoptSlice<T>` on a struct with
+any raw pointer field warns at the call site (`adopt-raw-fields`), naming the fields:
+"dropping the adopted value frees the `GifLike` itself and not what its raw pointer field(s)
+address". A warning rather than an error, because that IS the right thing to do for a struct
+whose pointers are borrowed rather than owned, and the compiler cannot tell those apart —
+`--allow=adopt-raw-fields` for the borrowed case. Gated by `tests/adoptRawFieldsLint.test.ts`
+in both directions (it fires on `adoptExternStructFields.milo`, and stays quiet on
+`adoptRoundTrip.milo`, whose `Point` owns nothing raw), and the fire direction was confirmed
+by making the lint return early, which reddens both.
 
 ### Gate honesty
 

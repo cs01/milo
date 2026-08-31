@@ -1370,6 +1370,7 @@ function builtinMethodsForType(
   if (tk.tag === "string") return forReceiver("string");
   if (tk.tag === "vec" || tk.tag === "array") return forReceiver("vec");
   if (tk.tag === "hashmap") return forReceiver("hashmap");
+  if (tk.tag === "heap") return forReceiver("heap");
   if (tk.tag === "int") return forReceiver("int");
   if (tk.tag === "float") return forReceiver("float");
   if (tk.tag === "bool") return forReceiver("bool");

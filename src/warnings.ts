@@ -22,6 +22,7 @@ export const WARNINGS: WarningInfo[] = [
   { name: "index-clone" },
   { name: "large-stack-array", offByDefault: true },
   { name: "manual-option-default" },
+  { name: "adopt-raw-fields" },
   { name: "arena-never-frees" },
   { name: "manual-shatter-cycle" },
   { name: "missing-interpolation" },

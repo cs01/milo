@@ -1013,6 +1013,9 @@ class LowerCtx {
         if (objType?.tag === "vec" && expr.method === "ptr") {
           return { kind: "VecPtr", object: this.lowerExpr(expr.object), type, span: expr.span };
         }
+        if (objType?.tag === "heap" && expr.method === "ptr" && !this.c.heapMethodReceivers.has(expr)) {
+          return { kind: "HeapPtr", object: this.lowerExpr(expr.object), type, span: expr.span };
+        }
         if ((objType?.tag === "int" || objType?.tag === "float") && expr.method === "toString") {
           return { kind: "NumberToString", value: this.lowerExpr(expr.object), valueType: objType, type, span: expr.span };
         }

@@ -1,0 +1,63 @@
+// @expect: same slot 1
+// @expect: 7 9
+// @expect: adopted 7 9
+// @expect: 4 done
+// The give leg for a whole object: `h.ptr()` is the box pointer of a `Heap<T>`, the
+// sibling of `v.ptr()` and the inverse of `adopt`. Before it existed, handing C a
+// Milo-allocated struct meant `h.addrOf()` (the address of the SLOT holding the box
+// pointer) and a load through it — an incantation, not an API. The first line proves the
+// two are the same address, so the old spelling was right and this one is readable.
+//
+// The pointer is then given away for real: `forget` ends Milo's ownership and libc's
+// `free` releases the allocation, which is the claim `Heap(v)` -> `malloc` makes. Running
+// this under `scripts/asan-sweep.ts` is what checks it rather than asserts it.
+from "std/foreign" import {
+    adopt
+}
+
+extern fn free(p: *u8): void
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+pub fn main(): i32 {
+    let h = Heap(Point {
+        x: 7,
+        y: 9,
+    }
+    )
+    unsafe {
+        let slot = h.addrOf() as *i64
+        let viaSlot = (*slot) as i64
+        let raw = h.ptr()
+        print("same slot ", (raw as i64 == viaSlot) as i32)
+        print(raw.x, " ", raw.y)
+        forget(h)
+
+        match adopt(raw) {
+            Option.Some(box) => {
+                print("adopted ", (*box).x, " ", (*box).y)
+            }
+            Option.None => {
+                print("none")
+            }
+        }
+    }
+
+    // The other direction, with C doing the freeing: Milo allocates, `forget` releases
+    // the claim, and `free` takes the same base pointer the drop glue would have.
+    let g = Heap(Point {
+        x: 4,
+        y: 5,
+    }
+    )
+    unsafe {
+        let raw = g.ptr()
+        print(raw.x, " done")
+        forget(g)
+        free(raw as *u8)
+    }
+    return 0
+}

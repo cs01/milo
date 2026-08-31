@@ -643,3 +643,12 @@ zipRead
 zstdCompress
 zstdFrame
 zstdRoundtrip
+withRawBasic
+withRawEmpty
+withRawMutWrites
+withRawNoFree
+withRawNull
+nullableExternRefMut
+nullableExternRefNull
+nullableExternRefShared
+cSigNullableRef

@@ -416,10 +416,15 @@ And two things the gates DO see that are worth recording:
 
 ## Not covered by any of the three
 
-- **Kind F — C function pointers.** Milo can call through a raw fn pointer today, but untyped:
-  `Task.spawnRaw(fnPtr: *u8, …)` with the address obtained by `memcpy`
-  (`std/runtime.milo:443-463`). giflib needs to *store* `InputFunc`/`OutputFunc` in a C struct and
-  call them. Typed extern fn-pointer values are a separate feature. 8 sites.
+- **Kind F — C function pointers.** Milo already passes one INTO C: an `extern fn` may declare a
+  function-typed parameter and a bare Milo function is accepted for it with no cast
+  (`qsort(base, n, size, cmpI32)`), because codegen coerces a Milo fn value to the bare code
+  pointer at an extern call. What is missing is the other half giflib needs: an `extern struct`
+  cannot HOLD one. `extern struct Ops { read: (*u8, i32) => i32 }` is rejected with "type
+  '(*u8, i32) => i32' is not C-representable", because a Milo fn value is `{code, env}` and a C
+  struct field must be the thin code pointer alone. So `InputFunc`/`OutputFunc` stored in a C
+  struct and called back through it is still out of reach, and with it `DGifOpen` /
+  `DGifOpenFileHandle`. 8 sites.
 - **Kind G — fd adoption.** A pure trust assertion. `unsafe` in Rust too. Not a gap.
 - **Reentrancy.** giflib calls back into C while Milo holds a view over C memory; that callback
   may free or realloc it. `decoder.rs:98` takes `self as *mut GifFileType` while `&mut self` is

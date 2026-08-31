@@ -1,7 +1,7 @@
 <!-- doc-meta
 system: foreign-memory
 purpose: how Milo reaches memory it did not allocate, and why that needs constructors rather than new reference kinds
-key-files: std/foreign.milo, src/checker.ts, src/codegen.ts, docs/ownership-model.md, docs/residue-vs-rust.md
+key-files: std/foreign.milo, src/checker.ts, src/codegen.ts, src/headergen.ts, examples/ffi/giflib/, docs/ownership-model.md, docs/residue-vs-rust.md
 update-when: a foreign-memory primitive is added/changed, the nullable-extern-ref spelling changes, or the giflib differential gate moves
 last-verified: 2026-08-31 (all four features built and gated; fn-pointer fields close row F, Heap.ptr() closes row J)
 -->

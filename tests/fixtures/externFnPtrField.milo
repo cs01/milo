@@ -1,0 +1,59 @@
+// A C function-pointer FIELD in an extern struct: the ops-table shape every C library
+// hands out. The field holds ONE word (the code pointer), not Milo's { code, environment }
+// pair, so the layout matches C and the call passes no hidden argument.
+//
+// The three things a field like this admits are all here: fill it with a top-level fn,
+// call through it, copy it to another field of the same type. Everything else is a
+// tests/errors/externFnPtr*.milo rejection.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+    write: (*u8, i32) => i32,
+}
+
+fn bump(_p: *u8, n: i32): i32 {
+    return n + 1
+}
+
+fn double(_p: *u8, n: i32): i32 {
+    return n * 2
+}
+
+pub fn main() {
+    let ops = Ops {
+        read: bump,
+        write: double,
+    }
+    unsafe {
+        // @expect: 42
+        print(ops.read(0 as *u8, 41))
+        // @expect: 42
+        print(ops.write(0 as *u8, 21))
+    }
+
+    // One pointer per field, and nothing else: the whole table is two words.
+    // @expect: true
+    print(sizeOf<Ops>() == 16)
+    // @expect: true
+    print(offsetOf<Ops>("write") == 8)
+
+    // A pointer copy from another field of the same type — the second accepted store.
+    var copy = Ops {
+        read: double,
+        write: double,
+    }
+    copy.read = ops.read
+    unsafe {
+        // @expect: 8
+        print(copy.read(0 as *u8, 7))
+    }
+
+    // C hands out null function pointers routinely (an optional callback in a table),
+    // so testing for one is the other legal use of the field.
+    // @expect: false
+    print(isNull(ops.read))
+    unsafe {
+        let empty = zeroed<Ops>()
+        // @expect: true
+        print(isNull(empty.read))
+    }
+}

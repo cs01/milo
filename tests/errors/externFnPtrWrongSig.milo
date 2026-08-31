@@ -1,0 +1,17 @@
+// @error: has signature extern (*u8, i64) => i32, expected extern (*u8, i32) => i32
+// A C function pointer is the one place where a near-miss signature is not caught by the
+// callee: the call site is the declaration. So the match has to be exact here.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn wide(_p: *u8, n: i64): i32 {
+    return (n + 1) as i32
+}
+
+fn main() {
+    let ops = Ops {
+        read: wide,
+    }
+    print(1)
+}

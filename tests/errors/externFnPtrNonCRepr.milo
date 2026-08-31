@@ -1,0 +1,11 @@
+// @error: is not C-representable
+// The field is a C spelling, so its own parameters and return have to cross the ABI too.
+// A Milo `string` is a three-word owned buffer and has no C counterpart, in a callback
+// signature exactly as in a plain field.
+extern struct Ops {
+    name: (string) => i32,
+}
+
+fn main() {
+    print(1)
+}

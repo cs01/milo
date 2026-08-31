@@ -293,6 +293,43 @@ fn main(): i32 {
 }
 ```
 
+### As an extern struct field
+
+The same spelling inside an `extern struct` means a **thin C function pointer**: one word, the
+code pointer alone. A Milo fn value is a `{ code, environment }` pair, and only the code half has
+a C representation, so the field is laid out and passed exactly as C's
+`int32_t (*read)(uint8_t*, int32_t)` is. `milo build-lib` publishes it with that spelling.
+
+```milo
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn readCount(_p: *u8, n: i32): i32 {
+    return n
+}
+
+fn main() {
+    let ops = Ops {
+        read: readCount,
+    }
+    unsafe {
+        print(ops.read(0 as *u8, 41))
+    }
+}
+```
+
+What may be stored in such a field is exactly two things: a **top-level function** whose
+signature matches, and **another field of the same type** (a pointer copy). A closure is
+rejected, because the environment would be lost on the way in and the C call would then read
+garbage out of the argument register.
+
+What may be done with one is also exactly two things: **call it**, which needs `unsafe` for the
+reason calling it from C is unchecked (it may be null, and its real signature is the caller's
+word), and **`isNull(s.field)`**, since a C ops table routinely leaves an optional callback null.
+Binding it to a local, passing it on, returning it or putting it in a `Vec` are errors: all four
+would need a thin pointer to become a fat one, which means inventing an environment.
+
 ## Memory Milo did not allocate
 
 At a C boundary Milo owns nothing: C allocated the memory, C will free it, and C may write it

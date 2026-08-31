@@ -722,6 +722,18 @@ class LowerCtx {
         if (expr.func === "forget" && !this.c.functions.has("forget")) {
           return { kind: "Forget", value: this.lowerExpr(expr.args[0]), type: { tag: "void" }, span: expr.span };
         }
+        // `isNull(s.f)` is a plain null compare on the thin code pointer. It lowers to
+        // the same shape the language already uses for a raw pointer (`p as i64 == 0`);
+        // the builtin exists only so the field read itself never has to be a value.
+        if (expr.func === "isNull" && !this.c.functions.has("isNull")) {
+          const i64: TypeKind = { tag: "int", bits: 64, signed: true };
+          return {
+            kind: "BinOp", op: "==",
+            left: { kind: "Cast", operand: this.lowerExpr(expr.args[0]), targetType: i64, type: i64, span: expr.span },
+            right: { kind: "IntLit", value: 0n, type: i64, span: expr.span },
+            type: { tag: "bool" }, span: expr.span,
+          };
+        }
         if (expr.func === "replace" && !this.c.functions.has("replace")) {
           return { kind: "MemReplace", place: this.lowerExpr(expr.args[0]), value: this.lowerExpr(expr.args[1]), type, span: expr.span };
         }
@@ -1407,6 +1419,22 @@ class LowerCtx {
             };
           });
           return { kind: "Call", func: resolved, args, type, variadic: false, span: expr.span };
+        }
+        // C function-pointer field call: `s.read(a, b)` → an indirect call through the
+        // one word the field holds, with NO environment argument. Same shape as a
+        // dlsym'd `cfn`, which is why it reuses CFnCall rather than ClosureCall.
+        if (this.c.cfnFieldCalls.has(expr)) {
+          const callee: HIRExpr = {
+            kind: "FieldAccess",
+            object: this.lowerExpr(expr.object),
+            field: expr.method,
+            type: { tag: "cfn" as const, params: [], ret: type },
+          };
+          const args: HIRArg[] = expr.args.map(a => {
+            const borrowed = this.c.autoBorrowed.get(a);
+            return { expr: this.lowerExpr(a), passByRef: !!borrowed, refMut: borrowed?.mutable ?? false };
+          });
+          return { kind: "CFnCall", callee, args, type, span: expr.span };
         }
         // fn-typed struct field call: h.apply(args) → ClosureCall(FieldAccess(h, "apply"), args)
         if (this.c.fnFieldCalls.has(expr)) {

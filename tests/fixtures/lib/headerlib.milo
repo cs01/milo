@@ -53,6 +53,27 @@ pub fn point_bump(p: ?&mut Point): i32 {
     return q.x
 }
 
+// A C function-pointer field: one thin code pointer, spelled `int32_t (*read)(uint8_t*,
+// int32_t)` in the generated header. The C consumer builds one of these from its OWN
+// declaration of the struct and a C function, so Milo's layout claim is checked against
+// a real C compiler rather than against another copy of Milo.
+pub extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+// The callback direction: C fills the table, calls in here, and this calls back out
+// through the field. A null slot is a real case in every C ops table, which is why
+// isNull exists.
+@externalLinkage
+pub fn ops_apply(ops: *Ops, v: i32): i32 {
+    unsafe {
+        if isNull(ops.read) {
+            return -1
+        }
+        return ops.read(0 as *u8, v)
+    }
+}
+
 // returns a struct by value → skipped until define-side ABI lowering (stage 6)
 pub fn make_point(x: i32, y: i32): Point {
     return Point {

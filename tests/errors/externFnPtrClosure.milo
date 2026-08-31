@@ -1,0 +1,15 @@
+// @error: only a top-level 'fn' can be stored in a C function-pointer field
+// A closure value is a { code, environment } pair and the field holds only the code
+// half. Storing one would drop the environment on the floor, and the C caller would
+// then invoke the code with whatever happened to be in the argument register.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn main() {
+    let bias = 7
+    let ops = Ops {
+        read: (_p: *u8, n: i32): i32 => n + bias,
+    }
+    print(1)
+}

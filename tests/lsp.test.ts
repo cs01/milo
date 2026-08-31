@@ -176,6 +176,28 @@ pub fn bumpX(b: ?&mut Bump): i32 {
 `;
 const NULLREF_URI = "file:///tmp/milo-lsp-nullref.milo";
 
+// A C function-pointer field. `cfn` is a TypeKind the LSP had never had to print or
+// complete against, and the field's restricted use rules run in the same checker the
+// server drives on every keystroke.
+const CFNFIELD_SRC = `extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn bump(_p: *u8, n: i32): i32 {
+    return n + 1
+}
+
+pub fn main() {
+    let ops = Ops {
+        read: bump,
+    }
+    unsafe {
+        print(ops.read(0 as *u8, 41))
+    }
+}
+`;
+const CFNFIELD_URI = "file:///tmp/milo-lsp-cfnfield.milo";
+
 // Hover on a global variable, both at its decl and at a reference in a fn.
 const GLOBAL_SRC = `var ptr: *u8 = 0 as *u8
 
@@ -326,7 +348,7 @@ beforeAll(async () => {
   })();
   await req(1, "initialize", { capabilities: {} });
   await send({ jsonrpc: "2.0", method: "initialized", params: {} });
-  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC], [LINTS_URI, LINTS_SRC], [NULLREF_URI, NULLREF_SRC]] as const) {
+  for (const [uri, text] of [[STDLIB_URI, STDLIB_SRC], [RICH_URI, RICH_SRC], [MATCH_URI, MATCH_SRC], [BUILTIN_URI, BUILTIN_SRC], [PRIM_URI, PRIM_SRC], [GLOBAL_URI, GLOBAL_SRC], [IMPL_URI, IMPL_SRC], [ENUM_URI, ENUM_SRC], [METHOD_URI, METHOD_SRC], [SCOPE_URI, SCOPE_SRC], [SHADOW_URI, SHADOW_SRC], [ARRAY_URI, ARRAY_SRC], [EMBED_URI, EMBED_SRC], [MEMBER_URI, MEMBER_SRC], [INT_MEMBER_URI, INT_MEMBER_SRC], [NS_URI, NS_SRC], [KEYWORD_URI, KEYWORD_SRC], [LINTS_URI, LINTS_SRC], [NULLREF_URI, NULLREF_SRC], [CFNFIELD_URI, CFNFIELD_SRC]] as const) {
     await send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "milo", version: 1, text } } });
   }
 });
@@ -358,6 +380,29 @@ test("hover on a nullable-extern-ref unwrap binding shows the reference type", a
   expect(atBind?.contents?.value).toContain("&mut Bump");
   const inBody = await req(61, "textDocument/hover", { textDocument: { uri: NULLREF_URI }, position: { line: 9, character: 11 } });
   expect(inBody?.contents?.value).toContain("&mut Bump");
+});
+
+test("hover and completion on a C function-pointer field do not crash", async () => {
+  // hover on the field name at its declaration (line 1, char 5)
+  const onDecl = await req(70, "textDocument/hover", { textDocument: { uri: CFNFIELD_URI }, position: { line: 1, character: 5 } });
+  expect(onDecl === null || typeof onDecl?.contents?.value === "string").toBe(true);
+  // hover on the receiver at the call site
+  const onRecv = await req(71, "textDocument/hover", { textDocument: { uri: CFNFIELD_URI }, position: { line: 13, character: 15 } });
+  expect(onRecv?.contents?.value).toContain("Ops");
+  // member completion after `ops.` offers the field
+  const comp = await req(72, "textDocument/completion", { textDocument: { uri: CFNFIELD_URI }, position: { line: 13, character: 18 } });
+  // The server answers rather than throwing: a `cfn` member is a TypeKind the
+  // completion walk had never seen, and an unhandled tag there kills the request.
+  expect(Array.isArray(comp) || Array.isArray(comp?.items)).toBe(true);
+  // and the server publishes no error for a legal use of the field
+  const deadline = Date.now() + 4000;
+  let diags: any[] | undefined;
+  while (Date.now() < deadline) {
+    diags = diagnosticsByUri.get(CFNFIELD_URI);
+    if (diags) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  expect((diags ?? []).filter((d: any) => d.severity === 1)).toEqual([]);
 });
 
 test("hover on builtin Vec type and Vec.new constructor", async () => {

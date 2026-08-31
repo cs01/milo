@@ -1,0 +1,21 @@
+// @error: 'Ops.read' is a C function pointer and cannot be used as a value
+// Returning it is the same escape as binding it: outside the field there is nowhere for
+// a one-word callee to live that does not promise the two-word calling convention.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn bump(_p: *u8, n: i32): i32 {
+    return n + 1
+}
+
+fn pick(ops: &Ops): (*u8, i32) => i32 {
+    return ops.read
+}
+
+fn main() {
+    let ops = Ops {
+        read: bump,
+    }
+    print(1)
+}

@@ -918,6 +918,14 @@ export class Codegen {
   // struct literals build field-by-field in place. Any shape not handled falls
   // back to the plain genExpr+store path — correct, just slower to compile.
   private genStoreInto(lines: string[], destPtr: string, ty: string, expr: HIRExpr): void {
+    // A C function-pointer field is one word, and a bare Milo function name is that
+    // word: emit `@name` rather than genExpr's { code, env } pair, the same coercion
+    // genCall already does for an extern fn's fn-typed parameter. The checker has
+    // already refused every value that would need the env half.
+    if (ty === "ptr" && expr.kind === "Ident" && expr.type.tag === "fn" && this.fnSigs.has(expr.name)) {
+      lines.push(`  store ptr @${expr.name}, ptr ${destPtr}`);
+      return;
+    }
     if (this.isBigAgg(ty)) {
       if (expr.kind === "Call" && this.sretFns.has(expr.func)) {
         const [cl] = this.genExpr(expr, destPtr);
@@ -6921,7 +6929,9 @@ export class Codegen {
     const tmp = this.nextTemp();
     const fromFloat = fromKind.tag === "float";
     const toFloat = toKind.tag === "float";
-    if (fromKind.tag === "ptr" && (toKind.tag === "int" || toKind.tag === "bool")) {
+    // `cfn` is a bare code pointer, so it converts to an integer the same way a data
+    // pointer does. This is the path `isNull(s.field)` lowers to.
+    if ((fromKind.tag === "ptr" || fromKind.tag === "cfn") && (toKind.tag === "int" || toKind.tag === "bool")) {
       lines.push(`  ${tmp} = ptrtoint ${fromTy} ${ov} to ${toTy}`);
     } else if ((fromKind.tag === "int" || fromKind.tag === "bool") && toKind.tag === "ptr") {
       // Pointers are 64-bit; inttoptr from a narrower int (e.g. `0 as *u8` where

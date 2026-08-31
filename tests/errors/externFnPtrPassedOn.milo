@@ -1,0 +1,22 @@
+// @error: 'Ops.read' is a C function pointer and cannot be used as a value
+// Handing the field to a Milo parameter typed `(A, B) => R` would hand a fat-pointer
+// callee half a value: the parameter's calling convention prepends an environment
+// argument the C function never declared.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn bump(_p: *u8, n: i32): i32 {
+    return n + 1
+}
+
+fn apply(f: (*u8, i32) => i32, n: i32): i32 {
+    return f(0 as *u8, n)
+}
+
+fn main() {
+    let ops = Ops {
+        read: bump,
+    }
+    print(apply(ops.read, 41))
+}

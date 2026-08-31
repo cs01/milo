@@ -1,0 +1,18 @@
+// @error: calling a C function pointer requires 'unsafe' block
+// The pointer may be null, may have been written by C after the struct was built, and
+// carries no proof its signature is the declared one. That is what `unsafe` marks —
+// exactly the situation calling the same thing from C is in.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn bump(_p: *u8, n: i32): i32 {
+    return n + 1
+}
+
+fn main() {
+    let ops = Ops {
+        read: bump,
+    }
+    print(ops.read(0 as *u8, 41))
+}

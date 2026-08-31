@@ -50,6 +50,9 @@ const cases: Record<string, string> = {
   // could not see it — a round-trip case is the only thing that can.
   nullableExternRef: `@externalLinkage\npub fn bumpX(b: ?&mut Bump): i32 {\n    let p = b else {\n        return -1\n    }\n    return p.x\n}\n`,
   nullableExternRefShared: `extern fn peek(b: ?&Bump): i32\n`,
+  // A C function-pointer field: the fn-type arrow and a `*T` parameter inside a struct
+  // body, which no other case puts there.
+  externFnPtrField: `extern struct Ops {\n    read: (*u8, i32) => i32,\n    close: () => void,\n}\n`,
 };
 
 for (const [name, src] of Object.entries(cases)) {

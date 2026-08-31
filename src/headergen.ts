@@ -29,12 +29,25 @@ function cType(t: TypeKind): string | null {
   }
 }
 
+// C spelling of a function-pointer declarator, shared by a param and by an extern
+// struct's fn-pointer field — the same one word means the same thing in both places.
+function cFnPtr(t: { params: TypeKind[]; ret: TypeKind }, name: string): string | null {
+  const ret = cType(t.ret);
+  if (!ret) return null;
+  const ps = t.params.map(p => cType(p));
+  if (ps.some(p => p === null)) return null;
+  return `${ret} (*${name})(${ps.length ? ps.join(", ") : "void"})`;
+}
+
 // C spelling of a struct field (arrays keep their extent here, unlike params).
 function cField(t: TypeKind, name: string): string | null {
   if (t.tag === "array" && t.size !== null) {
     const el = cType(t.element);
     return el ? `${el} ${name}[${t.size}]` : null;
   }
+  // An extern struct's `(A, B) => R` field: one thin code pointer, which is what the
+  // checker already rewrote it to.
+  if (t.tag === "cfn") return cFnPtr(t, name);
   const c = cType(t);
   return c ? `${c} ${name}` : null;
 }
@@ -45,13 +58,7 @@ function cParam(t: TypeKind, name: string): string | null {
     const el = cType(t.element);
     return el ? `${el}* ${name}` : null;
   }
-  if (t.tag === "fn") {
-    const ret = cType(t.ret);
-    if (!ret) return null;
-    const ps = t.params.map(p => cType(p));
-    if (ps.some(p => p === null)) return null;
-    return `${ret} (*${name})(${ps.length ? ps.join(", ") : "void"})`;
-  }
+  if (t.tag === "fn" || t.tag === "cfn") return cFnPtr(t, name);
   const c = cType(t);
   return c ? `${c} ${name}` : null;
 }

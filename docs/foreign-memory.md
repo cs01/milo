@@ -3,7 +3,7 @@ system: foreign-memory
 purpose: how Milo reaches memory it did not allocate, and why that needs constructors rather than new reference kinds
 key-files: std/foreign.milo, src/checker.ts, src/codegen.ts, docs/ownership-model.md, docs/residue-vs-rust.md
 update-when: a foreign-memory primitive is added/changed, the nullable-extern-ref spelling changes, or the giflib differential gate moves
-last-verified: 2026-08-31 (all three features built and gated; Heap.ptr() closes the give leg, so row J is complete)
+last-verified: 2026-08-31 (all four features built and gated; fn-pointer fields close row F, Heap.ptr() closes row J)
 -->
 
 # Foreign memory: reaching what Milo did not allocate
@@ -19,7 +19,7 @@ its precondition falsified at once. So today a Milo program crossing that bounda
 the way back to raw pointers, and every guarantee the five rewrite probes established
 ([rewrite-findings-html5ever](rewrite-findings-html5ever.md)) evaporates at the seam.
 
-**That is the gap this document specifies. It is not a gap in the ownership model.** The three
+**That is the gap this document specifies. It is not a gap in the ownership model.** The
 features below add no new reference kind, no lifetime, and no rule. Each is a *constructor* or a
 *spelling* for a type that already exists:
 
@@ -28,6 +28,7 @@ features below add no new reference kind, no lifetime, and no rule. Each is a *c
 | `withRaw` / `withRawMut` | No — `&[T]` / `&mut [T]` already exist ([language-reference](language-reference.md) §Slices, L1484) | a constructor for them from `(ptr, len)` |
 | `?&mut T` | No — `&mut T` params already exist | a nullable *spelling*, legal only in an extern signature |
 | `adopt` | No — `Heap<T>`/`Vec<T>` already exist | the inverse of the shipped `forget` |
+| fn-pointer field | No — `cfn` (`extern (A) => R`) already exists | what `(A, B) => R` MEANS in an `extern struct` |
 
 All three are built, and so is the *give* leg row J needs on the other side: `Heap<T>.ptr()`,
 the sibling of `Vec.ptr()`, hands out the box pointer so a Milo-allocated object goes to C
@@ -47,7 +48,7 @@ live in `src/ffi.rs`, `src/c_types.rs` and one line of `src/decoder.rs`.
 | C. caller `(ptr,len)` arg → shared slice | 12 | `ffi.rs:473` | `withRaw` |
 | D. caller `(ptr,len)` arg → mut slice | 5 | `ffi.rs:286` | `withRawMut` |
 | E. nullable incoming struct pointer, mutated | **0 unsafe sites, 39 safe fns** | `ffi.rs:214` | **`?&mut T`** |
-| F. C fn-pointer transmute/store/call | 8 | `c_types.rs:427` | nothing yet — see *Not covered* |
+| F. C fn-pointer transmute/store/call | 8 | `c_types.rs:427` | **fn-pointer fields in `extern struct`** |
 | G. fd adoption | 7 | `ffi.rs:79` | nothing; inherently a trust assertion in Rust too |
 | H. `unsafe impl Send` | 1 | `c_types.rs:400` | n/a — Milo's move-only tasks have no `Send` |
 | I. owned buffer out through a raw field | 3 | `decoder.rs:531` | shipped: `.ptr()` + `forget` |
@@ -414,17 +415,90 @@ And two things the gates DO see that are worth recording:
   take the allocation" is a leak, not an ASan finding. `scripts/leak-check.ts` is the gate that
   answers it, which is why the five fixtures are in `tests/leak-clean.txt`.
 
-## Not covered by any of the three
+## 4. C function-pointer fields in `extern struct` (**BUILT**)
 
-- **Kind F — C function pointers.** Milo already passes one INTO C: an `extern fn` may declare a
-  function-typed parameter and a bare Milo function is accepted for it with no cast
-  (`qsort(base, n, size, cmpI32)`), because codegen coerces a Milo fn value to the bare code
-  pointer at an extern call. What is missing is the other half giflib needs: an `extern struct`
-  cannot HOLD one. `extern struct Ops { read: (*u8, i32) => i32 }` is rejected with "type
-  '(*u8, i32) => i32' is not C-representable", because a Milo fn value is `{code, env}` and a C
-  struct field must be the thin code pointer alone. So `InputFunc`/`OutputFunc` stored in a C
-  struct and called back through it is still out of reach, and with it `DGifOpen` /
-  `DGifOpenFileHandle`. 8 sites.
+```milo
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+```
+
+The spelling is the one the language already has; what is new is its meaning **inside an
+extern struct**, where `(A, B) => R` is the thin C function pointer and nothing else. One
+word. `sizeOf`, `offsetOf`, the `@cLayout` guard TU and `milo build-lib`'s header all agree
+with C, and the call is a plain indirect `call R %fp(A, B)` with no environment argument.
+
+Two values may be stored: a **top-level `fn`** whose signature matches exactly, and **another
+field of the same type** (a pointer copy). Two things may be done with one: **call it**, which
+requires `unsafe` for the reason calling it from C is unchecked, and **`isNull(s.field)`**,
+because a C ops table routinely leaves an optional callback null. Everything else is an error
+that names those two uses.
+
+### What the build actually needed
+
+**`cfn` already existed, and that is most of the implementation.** `extern (A) => R` — the type
+a `dlsym` result is cast to — is already a bare code pointer that already lowers to `ptr` and
+already has an indirect-call HIR node (`CFnCall`). So the feature is one rewrite at struct
+registration: inside an `extern struct`, a `fn` field type becomes a `cfn` field type. Layout,
+the `_Static_assert(offsetof(...))` guard, ABI classification and headergen then need no
+context-sensitive special case of their own, because they all read the field's `TypeKind`.
+A `move (A) => R` field deliberately does NOT get rewritten — it owns a heap environment, so it
+falls through to the ordinary not-C-representable error.
+
+**The use restriction is fail-closed by construction, not by enumeration.** Every read of a
+`cfn` field is recorded when it is checked, and only two contexts delete their entry: a store
+into another `cfn` field, and `isNull`. Whatever survives to the end of the program is
+reported. Enumerating the illegal contexts instead (`Vec` element, return, argument, …) would
+have left the next context anyone invents silently handing a one-word callee to code that
+prepends an environment argument.
+
+**`isNull` had to be added, and it is narrow on purpose.** The language's null idiom is
+`p as i64 == 0`, which is a *read* of the value and so is exactly what this field may not do.
+`isNull` takes a `cfn` and nothing else; on a raw pointer it says so and points at the cast
+form. It is a builtin only when the program declares no `isNull` of its own, the same gate
+`forget` / `replace` / `swap` use.
+
+**A `*Ops` receiver had to be admitted for the call.** C hands over `Ops *`, not a value, so
+`ops.read(...)` on a raw pointer is the normal shape here. It is admitted for `cfn` fields
+only: opening raw pointers to Milo fn fields as well would be a new auto-deref rule rather
+than this feature.
+
+**`Cast` had to learn `cfn` to integer.** `isNull` lowers to the same `ptrtoint`/compare the
+raw-pointer idiom does, and the cast arm tested `tag === "ptr"` alone, so it fell through to
+`trunc` and produced invalid IR.
+
+### Gate honesty
+
+Eight deliberate breaks, and what each reddened:
+
+| Break | Result |
+|---|---|
+| `llvmType` returns `{ ptr, ptr }` for a `cfn`, so the field is fat | 2 red in `tests/abi.test.ts` (both targets, on the exact `%Ops = type { ptr, ptr }` line); `tests/header.test.ts` fails wholesale, because `build-lib` on its fixture no longer produces valid IR; 2 red fixtures (`externFnPtrField` on `sizeOf<Ops>() == 16`, `externFnPtrFieldCLayout` on the real `zlib.h` offsets) |
+| drop the closure rejection in `checkCFnStore` | 1 red: `externFnPtrClosure` |
+| drop the `unsafe` requirement on the call | 1 red: `externFnPtrCallNeedsUnsafe` |
+| drop `reportStrandedCFnReads`, the fail-closed use rule | 4 red: `externFnPtrAsValue`, `externFnPtrPassedOn`, `externFnPtrInVec`, `externFnPtrReturned` |
+| thin a `move (A, B) => R` field too, instead of refusing it | 1 red: `externFnPtrMoveField` |
+| `isCReprFnSig` returns true unconditionally, so any callback signature is accepted | 1 red: `externFnPtrNonCRepr` |
+| skip the exact-signature match on the stored function | 1 red: `externFnPtrWrongSig` |
+| headergen prints the field as `void*` instead of a declarator | 1 red: `tests/header.test.ts`'s C-spelling assertion |
+
+The fixture lane alone cannot see the ABI: Milo compiles both sides, so a fat field and a call
+that prepends the environment would run and print the right answer. That is why the claim is
+pinned three more times outside it — on the emitted IR for `linux-x64` and `macos-arm64`
+(`tests/abi.test.ts`), against a real C header with fn-pointer fields in the middle of the
+struct (`@cLayout("z_stream", "zlib.h")` in `tests/fixtures/externFnPtrFieldCLayout.milo`, so
+a fat field would push every later offset out by eight bytes), and by a C program that
+declares the ops table itself and calls in (`tests/header.test.ts`).
+
+## Not covered by any of them
+
+- **Kind F — C function pointers. Now covered; see §4.** What it reaches: a field declared,
+  laid out and `@cLayout`-checked as one C function pointer, filled with a Milo function,
+  called through, and tested for null. That is `InputFunc`/`OutputFunc` in `GifFileType`, and
+  with it `DGifOpen` / `DGifOpenFileHandle`. What it does NOT reach: the thin-to-fat
+  conversion. The pointer cannot leave the field as a value, so a C callback cannot be bound
+  to a local, stored in a `Vec`, returned, or handed to a Milo `(A, B) => R` parameter, and a
+  closure cannot be stored in one at all. Those are refusals, not silent half-conversions.
 - **Kind G — fd adoption.** A pure trust assertion. `unsafe` in Rust too. Not a gap.
 - **Reentrancy.** giflib calls back into C while Milo holds a view over C memory; that callback
   may free or realloc it. `decoder.rs:98` takes `self as *mut GifFileType` while `&mut self` is

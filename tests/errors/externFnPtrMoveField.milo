@@ -1,0 +1,11 @@
+// @error: is not C-representable
+// A `move` closure type owns a heap environment, which is the one thing a C field
+// cannot hold — so it is NOT thinned into a code pointer, it is refused. The plain
+// `(A, B) => R` spelling is the one that means "C function pointer" here.
+extern struct Ops {
+    read: move (*u8, i32) => i32,
+}
+
+fn main() {
+    print(1)
+}

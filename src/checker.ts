@@ -278,6 +278,7 @@ export interface CheckResult {
   heapMethodReceivers: Set<Expr>;
   resolvedOperators: Map<Expr, string>;
   fnFieldCalls: Set<Expr>;
+  cfnFieldCalls: Set<Expr>;
   propagateConversions: Map<Expr, { targetEnumName: string; wrapVariant: string; wrapTag: number }>;
   rangeCheckedExprs: Map<Expr, { min: number; max: number; typeName: string }>;
   sizeOfTypes: Map<Expr, TypeKind>;
@@ -496,6 +497,15 @@ export class TypeChecker {
   private iterDelegates = new Map<Stmt, string>();
   private resolvedOperators = new Map<Expr, string>();
   private fnFieldCalls = new Set<Expr>();
+  // `s.f(...)` where `f` is a C function-pointer field: an indirect call with no
+  // environment argument, distinct from the fat-closure ClosureCall lower path.
+  private cfnFieldCalls = new Set<Expr>();
+  // Every READ of a C function-pointer field, recorded when it is checked and deleted
+  // again by the two contexts that may consume one (a store into another such field,
+  // and `isNull`). Whatever is left when the program is checked is a use the design
+  // does not cover, so the rule fails closed: a context nobody thought about errors
+  // rather than silently handing a thin pointer to code that expects a fat one.
+  private strandedCFnReads = new Map<Expr, { struct: string; field: string; span?: Span }>();
   private propagateConversions = new Map<Expr, { targetEnumName: string; wrapVariant: string; wrapTag: number }>();
   private interfaces = new Map<string, InterfaceInfo>();
   private interfaceCoercions = new Map<Expr, { fromType: string; ifaceName: string }>();
@@ -1917,6 +1927,7 @@ export class TypeChecker {
     // and an escaped throw means the file shows no diagnostics at all.
     try {
       this.checkProgram(program);
+      this.reportStrandedCFnReads();
     } catch (e) {
       if (!(e instanceof CheckAbort)) throw e;
     }
@@ -1949,6 +1960,7 @@ export class TypeChecker {
       heapMethodReceivers: this.heapMethodReceivers,
       resolvedOperators: this.resolvedOperators,
       fnFieldCalls: this.fnFieldCalls,
+      cfnFieldCalls: this.cfnFieldCalls,
       propagateConversions: this.propagateConversions,
       rangeCheckedExprs: this.rangeCheckedExprs,
       sizeOfTypes: this.sizeOfTypes,
@@ -2081,7 +2093,7 @@ export class TypeChecker {
     for (const s of program.structs) {
       if (s.typeParams.length === 0) {
         const fields = s.fields.map(f => ({
-          name: f.name, type: this.resolve(f.type),
+          name: f.name, type: this.thinFnField(s.isExtern, this.resolve(f.type)),
           ...(f.attributes?.some(a => a.name === "cOpaque") ? { cOpaque: true } : {}),
           ...(f.attributes?.some(a => a.name === "iter") ? { iterDelegate: true } : {}),
         }));
@@ -2122,7 +2134,7 @@ export class TypeChecker {
       for (const f of info.fields) {
         if (!this.isValidExternStructField(f.type)) {
           this.error(`extern struct '${s.name}' field '${f.name}': type '${typeName(f.type)}' is not C-representable`, undefined,
-            `extern-struct fields must be scalars, pointers, nested extern structs, or fixed arrays of those`);
+            `extern-struct fields must be scalars, pointers, C function pointers ('(A, B) => R'), nested extern structs, or fixed arrays of those`);
         }
       }
     }
@@ -3714,7 +3726,7 @@ export class TypeChecker {
             if (iface) {
               fail(`'${who}' is @pure but calls '${e.method}' through the interface '${iface.ifaceName}'`, e.span,
                 `dynamic dispatch hides which body runs, and purity is not part of an interface method's signature`);
-            } else if (this.fnFieldCalls.has(e)) {
+            } else if (this.fnFieldCalls.has(e) || this.cfnFieldCalls.has(e)) {
               fail(`'${who}' is @pure but calls the fn-typed field '${e.method}'`, e.span,
                 `purity is not part of a fn type, so the compiler cannot see what this call does`);
             } else {
@@ -4493,8 +4505,68 @@ export class TypeChecker {
       case "int": case "float": case "bool": case "ptr": return true;
       case "array": return ty.size !== null && this.isValidExternStructField(ty.element);
       case "struct": { const info = this.structs.get(ty.name); return !!info && !!info.isExtern; }
+      case "cfn": return this.isCReprFnSig(ty);
       default: return false;
     }
+  }
+
+  // Inside an `extern struct`, `(A, B) => R` names the C spelling: one thin code
+  // pointer, not the `{ code, environment }` pair a Milo fn value carries. `cfn` is
+  // already exactly that type (it lowers to a bare `ptr`), so the rewrite happens
+  // once here and layout, the @cLayout guard TU, headergen and the call site all see
+  // the right thing with no context-sensitive special case of their own. A `move`
+  // closure type keeps its `fn` tag deliberately: it owns a heap environment, which
+  // is the one thing a C field cannot hold, so it falls through to the
+  // not-C-representable error instead of being silently thinned.
+  private thinFnField(isExtern: boolean | undefined, t: TypeKind): TypeKind {
+    if (!isExtern || t.tag !== "fn" || t.owning) return t;
+    return { tag: "cfn", params: t.params, ret: t.ret };
+  }
+
+  // What may be stored in a C function-pointer field, and the whole reason the set is
+  // this small: the field is one word, so a value that is not already one word has to
+  // lose half of itself on the way in. A top-level `fn` name is the code pointer with
+  // nothing attached; another such field is a pointer copy. Everything else carries an
+  // environment C has nowhere to put.
+  //
+  // Returns true when it has handled the value (accepted or reported); false to let the
+  // caller raise its ordinary type-mismatch error.
+  private checkCFnStore(value: Expr, expected: TypeKind & { tag: "cfn" }, valType: TypeKind, where: string, sp?: Span): boolean {
+    if (valType.tag === "cfn") {
+      if (typeEq(expected, valType)) { this.strandedCFnReads.delete(value); return true; }
+      return false;
+    }
+    if (valType.tag !== "fn") return false;
+    // ident-ok: the accepted form IS a bare top-level function name; anything else is
+    // a value with an environment and is rejected below.
+    if (value.kind === "Ident" && this.functions.has(value.name) && this.lookup(value.name) === null) {
+      const thin: TypeKind = { tag: "cfn", params: valType.params, ret: valType.ret };
+      if (typeEq(expected, thin)) return true;
+      this.error(`${where}: '${value.name}' has signature ${typeName(thin)}, expected ${typeName(expected)}`, sp);
+      return true;
+    }
+    this.error(`${where}: only a top-level 'fn' can be stored in a C function-pointer field`, sp,
+      `a closure value is a { code, environment } pair and this field holds only the code pointer, so the environment would be lost and the C call would read garbage — name a top-level function instead`);
+    return true;
+  }
+
+  // Fail-closed report for every C function-pointer field read that no legal context
+  // consumed. See `strandedCFnReads`.
+  private reportStrandedCFnReads(): void {
+    for (const [, info] of this.strandedCFnReads) {
+      this.error(`'${info.struct}.${info.field}' is a C function pointer and cannot be used as a value`, info.span,
+        `there are two things to do with one: call it ('s.${info.field}(...)', inside 'unsafe'), or test it with 'isNull(s.${info.field})'`);
+    }
+    this.strandedCFnReads.clear();
+  }
+
+  // A C function pointer's own parameters and return have to cross the ABI too. A
+  // nested fn type is excluded: inside a signature there is no field declaration to
+  // thin it, so it would be Milo's fat pair again and the C caller would disagree
+  // about the argument count.
+  private isCReprFnSig(ty: { params: TypeKind[]; ret: TypeKind }): boolean {
+    const ok = (t: TypeKind) => t.tag !== "fn" && t.tag !== "cfn" && this.isValidExternStructField(t);
+    return ty.params.every(ok) && (ty.ret.tag === "void" || ok(ty.ret));
   }
 
   // What may appear in an extern fn signature (by value). `&T` and `*T` cross by
@@ -5494,7 +5566,10 @@ export class TypeChecker {
         const frozenBeforeRhs = new Set<VarInfo>();
         for (const scope of this.scopes) for (const [, vi] of scope) if (vi.borrowed) frozenBeforeRhs.add(vi);
         const valType = this.checkExprWithHint(stmt.value, targetInfo.type);
-        if (!typeEq(targetInfo.type, valType) && valType.tag !== "unknown") {
+        if (targetInfo.type.tag === "cfn" && valType.tag !== "unknown"
+            && !this.checkCFnStore(stmt.value, targetInfo.type, valType, `cannot assign to '${this.describeExpr(stmt.target)}'`, sp)) {
+          this.error(`type mismatch: cannot assign ${typeName(valType)} to ${typeName(targetInfo.type)}`, sp);
+        } else if (targetInfo.type.tag !== "cfn" && !typeEq(targetInfo.type, valType) && valType.tag !== "unknown") {
           const optInner = this.optionInnerType(targetInfo.type);
           const isStringToPtr = valType.tag === "string" && targetInfo.type.tag === "ptr" && targetInfo.type.inner.tag === "int" && targetInfo.type.inner.bits === 8;
           if (optInner && typeEq(optInner, valType) && targetInfo.type.tag === "enum") {
@@ -7846,6 +7921,26 @@ export class TypeChecker {
       this.tryMove(expr.args[0]);
       return this.setType(expr, { tag: "void" });
     }
+    // `isNull(s.field)` — the ONE test a C function-pointer field admits besides being
+    // called. C hands out null function pointers routinely (an optional callback in an
+    // ops table), and the ordinary null idiom `p as i64 == 0` is not open here: casting
+    // the field to an integer would be reading it as a value, which is what the
+    // thin/fat split forbids. Deliberately narrow: it takes a `cfn` and nothing else, so
+    // it does not become a second spelling for a raw-pointer null test.
+    if (expr.func === "isNull" && !this.functions.has("isNull")) {
+      if (expr.args.length !== 1) {
+        this.error(`'isNull' takes exactly one argument`, sp);
+        return this.setType(expr, { tag: "bool" });
+      }
+      const t = this.checkExpr(expr.args[0]);
+      if (t.tag === "cfn") {
+        this.strandedCFnReads.delete(expr.args[0]);
+      } else if (t.tag !== "unknown") {
+        this.error(`'isNull' takes a C function-pointer field, got ${typeName(t)}`, sp,
+          `a raw pointer is tested with 'p as i64 == 0'`);
+      }
+      return this.setType(expr, { tag: "bool" });
+    }
     if (expr.func === "zeroed") {
       if (!expr.typeArgs || expr.typeArgs.length !== 1) { this.error(`zeroed requires exactly one type argument`, sp); return this.setType(expr, { tag: "unknown" }); }
       if (expr.args.length !== 0) { this.error(`zeroed takes no value arguments`, sp); return this.setType(expr, { tag: "unknown" }); }
@@ -8493,7 +8588,12 @@ export class TypeChecker {
         this.retypeConstInt(f.value, fieldDef.type);
         valType = fieldDef.type;
       }
-      if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown" && !this.tryInterfaceCoercion(f.value, valType, fieldDef.type)) {
+      const cfnField = fieldDef.type.tag === "cfn" ? fieldDef.type : null;
+      if (cfnField) {
+        if (valType.tag !== "unknown" && !this.checkCFnStore(f.value, cfnField, valType, `field '${f.name}' of '${expr.name}'`, sp)) {
+          this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
+        }
+      } else if (!typeEq(fieldDef.type, valType) && valType.tag !== "unknown" && !this.tryInterfaceCoercion(f.value, valType, fieldDef.type)) {
         this.error(`field '${f.name}' of '${expr.name}': expected ${typeName(fieldDef.type)}, got ${typeName(valType)}`, sp);
       }
       this.tryMove(f.value);
@@ -8528,6 +8628,7 @@ export class TypeChecker {
       const field = info.fields.find(f => f.name === expr.field);
       if (!field) { this.error(`struct '${objType.name}' has no field '${expr.field}'`, sp, memberHint(expr.field, this.fieldCandidates(objType))); return this.setType(expr, { tag: "unknown" }); }
       this.setType(expr, field.type);
+      if (field.type.tag === "cfn") this.strandedCFnReads.set(expr, { struct: objType.name, field: expr.field, span: sp });
       // The field's own move state, the counterpart of the `info.moved` check on a
       // plain identifier. `setType` first: `staticFieldPath` reads the recorded
       // types to walk the place, so the answer depends on this node having one.
@@ -10298,13 +10399,23 @@ export class TypeChecker {
     }
 
     // fn-typed struct field call: h.apply(args) where apply: fn(...): T
-    const structType = bareObjType.tag === "struct" ? bareObjType : null;
+    // A `*Struct` receiver is admitted only for a C function-pointer field, which is
+    // where it is the normal shape: C hands over `Ops *`, not a value. Opening the raw
+    // pointer to Milo fn fields as well would be a new auto-deref rule, not this feature.
+    const ptrStruct = bareObjType.tag === "ptr" && bareObjType.inner.tag === "struct" ? bareObjType.inner : null;
+    const structType = bareObjType.tag === "struct" ? bareObjType : ptrStruct;
     if (structType) {
       const sdef = this.structs.get(structType.name);
       if (sdef) {
         const field = sdef.fields.find(f => f.name === expr.method);
-        if (field && field.type.tag === "fn") {
+        if (field && (field.type.tag === "fn" || field.type.tag === "cfn") && (!ptrStruct || field.type.tag === "cfn")) {
           const fnType = field.type;
+          // A C function pointer may be null, may point at a signature that does not
+          // match, and is not owned by anything the checker can see — exactly the
+          // situation `unsafe` exists to mark. A Milo fn field has none of those.
+          if (fnType.tag === "cfn") {
+            this.requireUnsafe(`calling a C function pointer requires 'unsafe' block`, sp);
+          }
           if (expr.args.length !== fnType.params.length) {
             this.error(`'${expr.method}' expects ${fnType.params.length} argument(s), got ${expr.args.length}`, sp);
           }
@@ -10322,8 +10433,8 @@ export class TypeChecker {
               this.tryMove(expr.args[i]);
             }
           }
-          this.fnFieldCalls = this.fnFieldCalls || new Set();
-          this.fnFieldCalls.add(expr);
+          if (fnType.tag === "cfn") this.cfnFieldCalls.add(expr);
+          else this.fnFieldCalls.add(expr);
           return this.setType(expr, fnType.ret);
         }
       }

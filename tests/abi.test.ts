@@ -75,6 +75,27 @@ describe("abi: nullable extern reference", () => {
   }
 });
 
+// A `(A, B) => R` field in an extern struct claims to be ONE C function pointer, and the
+// call through it claims to pass no environment. Neither claim is visible to the fixture
+// lane — Milo compiles both sides, so a fat { code, env } field and a call that prepends
+// the env would run and print the right answer — so both are pinned on the IR, for both
+// ABIs.
+describe("abi: extern struct C function-pointer field", () => {
+  for (const target of ["linux-x64", "macos-arm64"]) {
+    test(`the field is one bare ptr and the call passes no env (${target})`, () => {
+      const ir = emitIR("externFnPtrField.milo", target);
+      // The WHOLE struct type, not a substring: a fat field would read
+      // `{ { ptr, ptr }, { ptr, ptr } }` and still contain "ptr, ptr".
+      const structTy = ir.split("\n").find(l => l.startsWith("%Ops = type"));
+      expect(structTy).toBe("%Ops = type { ptr, ptr }");
+      // An indirect call through the loaded field with exactly the declared arguments.
+      expect(ir).toMatch(/call i32 %[\w.]+\(ptr %[\w.]+, i32 41\)/);
+      // and the field is filled with the code pointer alone
+      expect(ir).toMatch(/store ptr @bump, ptr %[\w.]+/);
+    });
+  }
+});
+
 describe("abi: AArch64 AAPCS64 IR shape", () => {
   test("large struct → sret + PLAIN pointer arg (no byval on arm64)", () => {
     const ir = emitIR("externStructLarge.milo", "macos-arm64");

@@ -1,0 +1,19 @@
+// @error: 'Ops.read' is a C function pointer and cannot be used as a value
+// Binding the field to a local would need a thin-to-fat conversion — an environment
+// invented out of nothing — which is the conversion this feature deliberately does not
+// build. Call it, or test it with isNull; there is no third thing.
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn bump(_p: *u8, n: i32): i32 {
+    return n + 1
+}
+
+fn main() {
+    let ops = Ops {
+        read: bump,
+    }
+    let f = ops.read
+    print(1)
+}

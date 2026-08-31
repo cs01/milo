@@ -15,7 +15,7 @@ execSync(`bun run ${COMPILER} build-lib ${FIXTURE} -o ${libPath}`, { stdio: ["pi
 const header = readFileSync(headerPath, "utf-8");
 
 afterAll(() => {
-  for (const f of [libPath, headerPath, join(dir, "consumer.c"), join(dir, "consumer")]) {
+  for (const f of [libPath, headerPath, join(dir, "consumer.c"), join(dir, "consumer"), join(dir, "opsconsumer.c"), join(dir, "opsconsumer")]) {
     try { unlinkSync(f); } catch {}
   }
 });
@@ -59,6 +59,13 @@ describe("header generation", () => {
     expect(header).toContain("int32_t point_bump(Point* p);");
   });
 
+  // The C spelling of a fn-pointer field. A Milo fn value is a { code, env } pair; this
+  // field is the code pointer alone, which is the only thing that has a C spelling.
+  test("extern struct fn-pointer field is declared as a C function pointer", () => {
+    expect(header).toContain("int32_t (*read)(uint8_t*, int32_t);");
+    expect(header).toContain("int32_t ops_apply(Ops* ops, int32_t v);");
+  });
+
   test("non-C and by-value-struct functions are skipped with a comment", () => {
     expect(header).toContain("/* skipped make_point:");
     expect(header).toContain("/* skipped build:");
@@ -85,6 +92,38 @@ int main(void) {
     execSync(`clang -I ${dir} ${consumer} ${libPath} -o ${bin}`, { stdio: ["pipe", "pipe", "pipe"] });
     const out = execSync(bin, { encoding: "utf-8" }).trim();
     expect(out).toBe("7 10.0 30\n42 42 -1");
+  });
+
+  // The generated header is Milo describing itself, so a C consumer that includes it
+  // cannot disagree with Milo about the layout. This one does NOT include it: it writes
+  // the ops table out by hand the way a real C header would, fills the slot with a C
+  // function, and calls in. A fat { code, env } field or a call that prepends an
+  // environment argument fails here and nowhere in the fixture lane.
+  test("a C consumer with its own struct declaration drives the fn-pointer field", () => {
+    const consumer = join(dir, "opsconsumer.c");
+    writeFileSync(consumer, `#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+
+/* Hand-written, exactly as a C library would publish it. */
+typedef struct { int32_t (*read)(uint8_t *, int32_t); } Ops;
+extern int32_t ops_apply(Ops *ops, int32_t v);
+
+_Static_assert(sizeof(Ops) == sizeof(void *), "the ops table is one pointer wide");
+
+static int32_t c_triple(uint8_t *p, int32_t n) { (void)p; return n * 3; }
+
+int main(void) {
+    Ops ops = { c_triple };
+    Ops empty = { NULL };
+    printf("%d %d\\n", ops_apply(&ops, 14), ops_apply(&empty, 14));
+    return 0;
+}
+`);
+    execSync(`clang -fsyntax-only ${consumer}`, { stdio: ["pipe", "pipe", "pipe"] });
+    const bin = join(dir, "opsconsumer");
+    execSync(`clang ${consumer} ${libPath} -o ${bin}`, { stdio: ["pipe", "pipe", "pipe"] });
+    expect(execSync(bin, { encoding: "utf-8" }).trim()).toBe("42 -1");
   });
 
   // `ar r` merges rather than replaces, and each build names its temp object randomly,

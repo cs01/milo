@@ -2593,6 +2593,48 @@ extern struct SockAddrIn {
 }
 ```
 
+#### C function-pointer fields
+
+A field typed `(A, B) => R` inside an `extern struct` is a **thin C function pointer**: one
+word, the code pointer alone. Everywhere else in the language a fn value is a
+`{ code, environment }` pair; only the code half has a C representation, so this field is
+laid out, `sizeOf`'d, `@cLayout`-checked and published by `milo build-lib` exactly as C's
+`int32_t (*read)(uint8_t*, int32_t)`.
+
+```milo
+extern struct Ops {
+    read: (*u8, i32) => i32,
+}
+
+fn readCount(_p: *u8, n: i32): i32 {
+    return n
+}
+
+fn main() {
+    let ops = Ops {
+        read: readCount,
+    }
+    unsafe {
+        print(ops.read(0 as *u8, 41))       // indirect call, no environment argument
+    }
+    print(isNull(ops.read))                 // the only other thing you may do with it
+}
+```
+
+Two values may be stored: a top-level `fn` whose signature matches exactly, and another
+fn-pointer field of the same type (a pointer copy). A closure is rejected — the field has
+nowhere to put its environment, so the C call would read garbage.
+
+Two things may be done with one: call it, which requires `unsafe` (it may be null, and its
+real signature is the declaration's word, exactly as in C), and `isNull(s.field)`, because a
+C ops table routinely leaves an optional callback null. Binding it to a local, passing it to
+a `(A, B) => R` parameter, returning it, or storing it in a collection are all errors: each
+would need the thin pointer to become a fat one, which means inventing an environment.
+
+The parameter and return types of such a field must themselves be C-representable, by the
+same rule the surrounding struct obeys. A `move (A, B) => R` field is rejected rather than
+thinned: it owns a heap environment, which is the one thing a C field cannot hold.
+
 #### Verifying a signature: `@cSig`
 
 An `extern fn` is the same kind of claim an `extern struct` is, and nothing checks it —
@@ -2764,7 +2806,8 @@ fn main(): i32 {
   extern function is a compile error — declare it `extern struct`, or pass it by
   reference (`&T`).
 - Extern-struct fields must be C-representable: integers, floats, `bool`, pointers
-  (`*T`), nested extern structs, and fixed arrays of those. `string`, `Vec`, enums, and
+  (`*T`), C function pointers (`(A, B) => R`, see above), nested extern structs, and
+  fixed arrays of those. `string`, `Vec`, enums, and
   other managed types are rejected — every extern struct is plain-old-data (Copy, no
   drop glue), so passing one leaves the original usable.
 - Not supported (compile error, pass `&T` instead): a struct in a variadic (`...`)

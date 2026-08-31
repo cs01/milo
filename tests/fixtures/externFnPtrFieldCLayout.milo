@@ -1,0 +1,36 @@
+// @skip-os: win32
+// zlib.h is not part of the MSVC CRT, so the guard would be a named skip there rather
+// than a check — a test-side portability limit, not a compiler gap.
+
+// The layout claim a fn-pointer field makes, checked against a real C header instead of
+// asserted. zlib's `z_stream` carries two of them (`zalloc`, `zfree`) in the middle of
+// the struct, so a field lowered as Milo's fat { code, env } pair would push `zfree` and
+// everything after it eight bytes out and the offsetof asserts would fail.
+//
+// This declares a PREFIX of z_stream, which @cLayout allows (the size assert is `>=`).
+// Nothing here calls zlib, so no library is linked; only the header is read.
+@cLayout("z_stream", "zlib.h")
+extern struct ZStream {
+    next_in: *u8,
+    avail_in: u32,
+    total_in: u64,
+    next_out: *u8,
+    avail_out: u32,
+    total_out: u64,
+    msg: *u8,
+    state: *u8,
+    zalloc: (*u8, u32, u32) => *u8,
+    zfree: (*u8, *u8) => void,
+    opaque: *u8,
+}
+
+pub fn main() {
+    // @expect: true
+    print(offsetOf<ZStream>("zalloc") == 64)
+    // @expect: true
+    print(offsetOf<ZStream>("zfree") == 72)
+    // @expect: true
+    print(offsetOf<ZStream>("opaque") == 80)
+    // @expect: true
+    print(sizeOf<ZStream>() == 88)
+}

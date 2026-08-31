@@ -28,6 +28,19 @@ export const RAW_SLICE_INTRINSICS: ReadonlySet<string> = new Set(["rawSlice", "r
 export const ADOPT_INTRINSICS: ReadonlySet<string> = new Set(["adoptHeap", "adoptVec"]);
 export const FOREIGN_MODULE = "std/foreign.milo";
 
+// The intrinsic file gates key on a path SUFFIX, and on Windows the resolver hands back
+// `D:\a\milo\std\foreign.milo`, which does not end with "std/foreign.milo". Every
+// std/foreign fixture therefore failed to compile there with "undefined function
+// 'adoptHeap'" while the whole macOS and Linux lane stayed green: the gate was not merely
+// wrong on Windows, it silently removed the feature. Compare on posix separators.
+export function isForeignModule(file: string | undefined): boolean {
+  if (!file) return false;
+  const posix = file.replace(/\\/g, "/");
+  // Anchored on a separator, so a directory that merely ENDS in "std" (".../notstd/
+  // foreign.milo") is not the module. A bare suffix test accepted that.
+  return posix === FOREIGN_MODULE || posix.endsWith(`/${FOREIGN_MODULE}`);
+}
+
 // One hop from a place to a place inside it. `index` is deliberately opaque —
 // two index steps may or may not select the same element, and nothing here tries
 // to decide that. `payload` is the inside of an Option/Result reached by `!`/`?`.
@@ -562,7 +575,7 @@ export class TypeChecker {
   // are the normal case and the compiler cannot tell those from owned ones.
   private warnAdoptRawFields(fnName: string, declSpan: Span | undefined, typeArgs: TypeKind[], sp?: Span) {
     if (fnName !== "adopt" && fnName !== "adoptSlice") return;
-    if (!declSpan?.file?.endsWith(FOREIGN_MODULE)) return;
+    if (!isForeignModule(declSpan?.file)) return;
     const t = typeArgs[0];
     if (t?.tag !== "struct") return;
     const raw = (this.structs.get(t.name)?.fields ?? []).filter(f => f.type.tag === "ptr");
@@ -7852,7 +7865,7 @@ export class TypeChecker {
     // The restriction is what keeps this from being a general escape hatch: `withRaw`'s
     // closure parameter is what bounds the view's life, and a `let s = rawSlice(p, n)` in
     // user code would hand back the same view with no such bound.
-    if (RAW_SLICE_INTRINSICS.has(expr.func) && sp?.file?.endsWith(FOREIGN_MODULE)) {
+    if (RAW_SLICE_INTRINSICS.has(expr.func) && isForeignModule(sp?.file)) {
       const mutable = expr.func === "rawSliceMut";
       if (expr.args.length !== 2) {
         this.error(`'${expr.func}' takes exactly two arguments (pointer, length)`, sp);
@@ -7882,7 +7895,7 @@ export class TypeChecker {
     // reason: `std/foreign`'s `adopt`/`adoptSlice` add the null test and the `Option`
     // wrapping in readable Milo, and outside that file the name is an ordinary undefined
     // function rather than a way to mint ownership of an arbitrary address.
-    if (ADOPT_INTRINSICS.has(expr.func) && sp?.file?.endsWith(FOREIGN_MODULE)) {
+    if (ADOPT_INTRINSICS.has(expr.func) && isForeignModule(sp?.file)) {
       const wantsLen = expr.func === "adoptVec";
       const arity = wantsLen ? 2 : 1;
       if (expr.args.length !== arity) {

@@ -185,6 +185,7 @@
   "promiseBlocking.milo": "noEmit",
   "promiseBlockingAll.milo": "noEmit",
   "promiseBlockingTask.milo": "noEmit",
+  "promiseCaptureDropOrder.milo": "noEmit",
   "promiseConstructor.milo": "noEmit",
   "promiseErgonomic.milo": "noEmit",
   "promiseRace.milo": "noEmit",

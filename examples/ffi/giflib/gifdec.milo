@@ -683,7 +683,9 @@ pub fn slurp(rd: &mut GifReader, lzw: &mut Lzw, doc: &mut Doc, pixelCount: &mut 
             // so a failure anywhere above leaves ImageCount where it was and the pending
             // extension run still on the file. The differential is what settled that: the
             // append-first reading of the code disagrees with the installed library on
-            // 1105 of the 3021 corpus files.
+            // 1105 of the 3021 corpus files. Checkable without this port at all: a
+            // single-image GIF truncated inside its LZW data comes back from the real
+            // library with ImageCount=0.
             let exts = replace(doc.pending, Vec.new())
 
             doc.images.push(Image {

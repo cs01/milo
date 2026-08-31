@@ -145,9 +145,14 @@ where the obvious implementation, or `giflib-rs`'s, disagrees with the installed
   the extension run that was pending when it gave up, left on the file rather than on an
   image. Publishing only on success is the obvious implementation and is wrong on 360 of
   3021 inputs. The complementary trap is to conclude from that that C appends each
-  `SavedImage` up front the way `DGifGetImageDesc` does; it does not, and assuming so is
-  wrong on 1105. Both readings look right from the source alone, which is the argument for
-  the differential.
+  `SavedImage` up front the way `DGifGetImageDesc` does; it does not, and one restructure
+  along those lines measured `GATE RED 1105/3021`. Neither number needs the port to check
+  the underlying claim: link twelve lines against `-lgif`, slurp a single-image GIF
+  truncated inside its LZW data, and the real library answers `ImageCount=0` (the image is
+  appended only once it has fully decoded), while a multi-image file truncated in its
+  SECOND image still answers `ImageCount=1` with a non-null `RasterBits` (the first one
+  survives the failure). Both readings look right from the C source alone, which is the
+  argument for the differential.
 * **The LZW block cursor wraps.** C increments a `GifByteType` in `Buf[1]`; a 255-byte
   sub-block rolls it over to 0. Milo traps on overflow by default, so the increment is
   masked to 8 bits explicitly.

@@ -19,6 +19,9 @@ video and not audio, which is not an error — it just makes every sound a silen
 - `terminal/` — tetris, sysmon, tmux
 - `net/` — servers, weather, termpair
 - `embedded/` — bare-metal PID
+- `ffi/giflib/` holds the decode half of giflib 6.1.3 as an ABI-compatible C library, gated
+  by a differential against the real `-lgif` (`sh examples/ffi/giflib/build.sh <out> <work>`,
+  needs libgif installed). Five `unsafe` sites, none in the decoder.
 - `tools/` — java-dap
 
 emulators, milojs, dapweb: own repos.

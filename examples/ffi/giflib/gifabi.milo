@@ -1,0 +1,104 @@
+// The C ABI of giflib 6.1.3's decode surface: the six structs a caller reads through
+// `gif_lib.h`, plus the constants the header spells as #defines.
+//
+// Every struct here carries @cLayout, so the claim "this is what C's struct looks like"
+// is compiled against the real header at build time rather than asserted in a comment.
+// Build with CPATH pointing at the directory holding gif_lib.h (see build.sh); without
+// it the guards SKIP, announced, and the layouts go unchecked.
+//
+// Fields carry C's spelling, not Milo camelCase: @cLayout emits
+// `offsetof(struct GifFileType, <field>)` with the name verbatim, so `sWidth` would not
+// compile. std/platform.darwin.milo sets the same precedent.
+
+// GifByteType Red, Green, Blue: three bytes, no padding.
+@cLayout("struct GifColorType", "gif_lib.h")
+pub extern struct GifColorType {
+    Red: u8,
+    Green: u8,
+    Blue: u8,
+}
+
+@cLayout("struct ColorMapObject", "gif_lib.h")
+pub extern struct ColorMapObject {
+    ColorCount: i32,
+    BitsPerPixel: i32,
+    SortFlag: bool,
+    Colors: *GifColorType,
+}
+
+@cLayout("struct GifImageDesc", "gif_lib.h")
+pub extern struct GifImageDesc {
+    Left: i32,
+    Top: i32,
+    Width: i32,
+    Height: i32,
+    Interlace: bool,
+    ColorMap: *ColorMapObject,
+}
+
+@cLayout("struct ExtensionBlock", "gif_lib.h")
+pub extern struct ExtensionBlock {
+    ByteCount: i32,
+    Bytes: *u8,
+    Function: i32,
+}
+
+@cLayout("struct SavedImage", "gif_lib.h")
+pub extern struct SavedImage {
+    ImageDesc: GifImageDesc,
+    RasterBits: *u8,
+    ExtensionBlockCount: i32,
+    ExtensionBlocks: *ExtensionBlock,
+}
+
+@cLayout("struct GifFileType", "gif_lib.h")
+pub extern struct GifFileType {
+    SWidth: i32,
+    SHeight: i32,
+    SColorResolution: i32,
+    SBackGroundColor: i32,
+    AspectByte: u8,
+    SColorMap: *ColorMapObject,
+    ImageCount: i32,
+    Image: GifImageDesc,
+    SavedImages: *SavedImage,
+    ExtensionBlockCount: i32,
+    ExtensionBlocks: *ExtensionBlock,
+    Error: i32,
+    UserData: *u8,
+    Private: *u8,
+}
+
+// gif_lib.h spells these as #defines, so there is no C symbol to link against and
+// @cValue is the anchor that keeps the transcription honest: a wrong error code is a
+// runtime-only difference the type checker would never see.
+@cValue("GIF_ERROR", "gif_lib.h")
+pub let gifError: i32 = 0
+@cValue("GIF_OK", "gif_lib.h")
+pub let gifOk: i32 = 1
+
+@cValue("D_GIF_ERR_OPEN_FAILED", "gif_lib.h")
+pub let dGifErrOpenFailed: i32 = 101
+@cValue("D_GIF_ERR_READ_FAILED", "gif_lib.h")
+pub let dGifErrReadFailed: i32 = 102
+@cValue("D_GIF_ERR_NOT_GIF_FILE", "gif_lib.h")
+pub let dGifErrNotGifFile: i32 = 103
+@cValue("D_GIF_ERR_NO_SCRN_DSCR", "gif_lib.h")
+pub let dGifErrNoScrnDscr: i32 = 104
+@cValue("D_GIF_ERR_NO_IMAG_DSCR", "gif_lib.h")
+pub let dGifErrNoImagDscr: i32 = 105
+@cValue("D_GIF_ERR_WRONG_RECORD", "gif_lib.h")
+pub let dGifErrWrongRecord: i32 = 107
+@cValue("D_GIF_ERR_DATA_TOO_BIG", "gif_lib.h")
+pub let dGifErrDataTooBig: i32 = 108
+@cValue("D_GIF_ERR_NOT_ENOUGH_MEM", "gif_lib.h")
+pub let dGifErrNotEnoughMem: i32 = 109
+@cValue("D_GIF_ERR_CLOSE_FAILED", "gif_lib.h")
+pub let dGifErrCloseFailed: i32 = 110
+@cValue("D_GIF_ERR_IMAGE_DEFECT", "gif_lib.h")
+pub let dGifErrImageDefect: i32 = 112
+@cValue("D_GIF_ERR_EOF_TOO_SOON", "gif_lib.h")
+pub let dGifErrEofTooSoon: i32 = 113
+
+@cValue("CONTINUE_EXT_FUNC_CODE", "gif_lib.h")
+pub let continueExtFuncCode: i32 = 0

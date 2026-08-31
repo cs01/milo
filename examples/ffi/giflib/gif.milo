@@ -1,0 +1,505 @@
+// The C entry points: DGifOpenFileName / DGifSlurp / DGifCloseFile, ABI-compatible with
+// giflib 6.1.3 so a program that already links `-lgif` can link this instead.
+//
+// This file is the whole FFI seam. Everything it decides is about ownership and layout;
+// every decision about GIF is in gifdec.milo, which has no pointer in it. The split is
+// what the `unsafe` count measures: the decoder cannot be wrong about memory because it
+// never names any.
+//
+// The ownership shape, and why it needs so little `unsafe`:
+//
+//   * Milo owns every buffer C reads. A `Vec` that has been filled and then had `.ptr()`
+//     taken is a stable C array for as long as the `Vec` lives, and `.ptr()` is safe to
+//     call. `CStore` is the set of those Vecs; it lives in the private state, so
+//     DGifCloseFile frees the entire object graph by dropping one value, with no walk
+//     over C's structs and no `free` call of our own.
+//   * Exactly one allocation crosses the boundary as an owned thing: the `GifFileType`
+//     itself, which C is handed and hands back. That is `forget` on the way out and
+//     `adopt` on the way back, the pair std/foreign exists for.
+//   * The private state travels the same way between calls, because C holds it in the
+//     `Private` field for us.
+//
+// Scope is decode-from-a-filename and nothing else: no encoder, and no DGifOpen, because
+// that takes a C function pointer to call back into and Milo has no typed extern
+// fn-pointer values yet (docs/foreign-memory.md, kind F).
+
+from "std/foreign" import {
+    adopt,
+    adoptSlice
+}
+from "std/io" import {
+    File
+}
+from "std/cstr" import {
+    CStr
+}
+from "./gifabi" import {
+    GifColorType,
+    ColorMapObject,
+    GifImageDesc,
+    ExtensionBlock,
+    SavedImage,
+    GifFileType,
+    gifOk,
+    gifError,
+    dGifErrOpenFailed,
+    dGifErrReadFailed,
+    dGifErrNotGifFile,
+    continueExtFuncCode
+}
+from "./gifdec" import {
+    errSilent,
+    GifReader,
+    Lzw,
+    Doc,
+    Palette,
+    Ext,
+    getScreenDesc,
+    slurp
+}
+
+// ---------------------------------------------------------------------------
+//  Pointer helpers: the only place an integer becomes a pointer
+// ---------------------------------------------------------------------------
+
+// C spells an absent optional field as NULL, and Milo has no null pointer literal
+// because safe code has no pointers at all. One place mints it.
+fn nullOf<T>(): *T {
+    unsafe {
+        return 0 as *T
+    }
+}
+
+fn isNull<T>(p: *T): bool {
+    return p as i64 == 0
+}
+
+// ---------------------------------------------------------------------------
+//  Storage for everything C is allowed to read
+// ---------------------------------------------------------------------------
+
+// Every C array this library publishes is a Milo `Vec` kept alive here. Nothing in it is
+// ever pushed to after its `.ptr()` has been handed out, so the addresses C holds stay
+// valid; the outer Vecs may reallocate freely, because that moves the 24-byte headers and
+// not the buffers those pointers name.
+struct CStore {
+    bytes: Vec<Vec<u8>>,
+    colors: Vec<Vec<GifColorType>>,
+    maps: Vec<Vec<ColorMapObject>>,
+    exts: Vec<Vec<ExtensionBlock>>,
+    images: Vec<Vec<SavedImage>>,
+}
+
+impl CStore {
+    fn new(): CStore {
+        return CStore {
+            bytes: Vec.new(),
+            colors: Vec.new(),
+            maps: Vec.new(),
+            exts: Vec.new(),
+            images: Vec.new(),
+        }
+    }
+}
+
+// What C's `GifFilePrivateType` holds, plus the decoded document. It is reachable only
+// through `GifFileType.Private`, which is what makes the two entry points able to share
+// it without a global.
+struct GifState {
+    rd: GifReader,
+    lzw: Lzw,
+    doc: Doc,
+    store: CStore,
+    pixelCount: i64,
+    // Read from the stamp and carried, as C carries it, but nothing in this scope asks:
+    // the only reader is DGifGetGifVersion, which is outside the three entry points.
+    gif89: bool,
+}
+
+// Hand the state to C as an opaque pointer. `.ptr()` is safe and `forget` is safe
+// (leaking is not a memory error), so the give leg needs no unsafe at all.
+fn boxState(st: GifState): *u8 {
+    var v: Vec<GifState> = Vec.withCapacity(1)
+    v.push(st)
+    let p = v.ptr()
+    forget(v)
+    unsafe {
+        return p as *u8
+    }
+}
+
+// The return leg. `adoptSlice` is where the caller asserts what the compiler cannot see:
+// this pointer came from `boxState`, nothing else aliases it, and it has not been adopted
+// before. `pop` moves the state out; the one-element Vec then drops and frees the block.
+fn takeState(p: *u8): Option<GifState> {
+    unsafe {
+        let Option.Some(v) = adoptSlice(p as *GifState, 1) else {
+            return Option.None
+        }
+        var owned = v
+        return owned.pop()
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Milo values -> C structs
+// ---------------------------------------------------------------------------
+
+// GifMakeMapObject plus its Colors array. Both become Vecs the store keeps.
+fn palettePtr(store: &mut CStore, src: &Option<Palette>): *ColorMapObject {
+    match src {
+        Option.None => {
+            return nullOf<ColorMapObject>()
+        }
+        Option.Some(p) => {
+            var colors: Vec<GifColorType> = Vec.withCapacity(p.colorCount)
+            var i: i64 = 0
+            while i < p.colorCount {
+                colors.push(GifColorType {
+                    Red: p.rgb[i * 3], Green: p.rgb[i * 3 + 1], Blue: p.rgb[i * 3 + 2]
+                }
+                )
+                i = i + 1
+            }
+            let colorsPtr = colors.ptr()
+            store.colors.push(colors)
+
+            var map: Vec<ColorMapObject> = Vec.withCapacity(1)
+            map.push(ColorMapObject {
+                ColorCount: p.colorCount as i32,
+                BitsPerPixel: p.bitsPerPixel as i32,
+                SortFlag: p.sortFlag,
+                Colors: colorsPtr,
+            }
+            )
+            let mapPtr = map.ptr()
+            store.maps.push(map)
+            return mapPtr
+        }
+    }
+}
+
+// GifAddExtensionBlock's array, built in one shot rather than realloc'd per block. C
+// leaves the pointer NULL when the count is zero (it only ever allocates on the first
+// add), so this does too: the count says the same thing, but a caller is entitled to
+// test either one.
+fn extsPtr(store: &mut CStore, exts: Vec<Ext>): *ExtensionBlock {
+    var src = exts
+    var arr: Vec<ExtensionBlock> = Vec.withCapacity(src.len)
+    src.reverse()
+    var more = true
+    while more {
+        match src.pop() {
+            Option.None => {
+                more = false
+            }
+            Option.Some(e) => {
+                var block = e
+                var payload = replace(block.bytes, Vec.new())
+                let byteCount = payload.len as i32
+                let payloadPtr = payload.ptr()
+                store.bytes.push(payload)
+                arr.push(ExtensionBlock {
+                    ByteCount: byteCount, Bytes: payloadPtr, Function: block.function
+                }
+                )
+            }
+        }
+    }
+    if arr.len == 0 {
+        return nullOf<ExtensionBlock>()
+    }
+    let arrPtr = arr.ptr()
+    store.exts.push(arr)
+    return arrPtr
+}
+
+// Publish a decoded document through the C struct the caller holds. Called once per slurp,
+// on the success and the failure path alike, which is why nothing here has to be re-entrant.
+fn publish(doc: &mut Doc, store: &mut CStore, gif: &mut GifFileType) {
+    var arr: Vec<SavedImage> = Vec.withCapacity(doc.images.len)
+    // `pop` is the only way to move an owned raster out of the Vec without copying it,
+    // and reversing first keeps the images in stream order.
+    doc.images.reverse()
+    var more = true
+    while more {
+        match doc.images.pop() {
+            Option.None => {
+                more = false
+            }
+            Option.Some(img) => {
+                var image = img
+                let mapPtr = palettePtr(store, image.map)
+                var raster = replace(image.raster, Vec.new())
+                let rasterPtr = raster.ptr()
+                store.bytes.push(raster)
+                let blocks = replace(image.exts, Vec.new())
+                let blockCount = blocks.len as i32
+                let blocksPtr = extsPtr(store, blocks)
+                arr.push(SavedImage {
+                    ImageDesc: GifImageDesc {
+                        Left: image.left,
+                        Top: image.top,
+                        Width: image.width,
+                        Height: image.height,
+                        Interlace: image.interlace,
+                        ColorMap: mapPtr,
+                    }
+                    ,
+                    RasterBits: rasterPtr,
+                    ExtensionBlockCount: blockCount,
+                    ExtensionBlocks: blocksPtr,
+                }
+                )
+            }
+        }
+    }
+    let imageCount = arr.len as i32
+    let imagesPtr = arr.ptr()
+    store.images.push(arr)
+    gif.ImageCount = imageCount
+    gif.SavedImages = imagesPtr
+
+    // Extensions that arrived after the last image stay on the file, as in C.
+    let trailing = replace(doc.pending, Vec.new())
+    let trailingCount = trailing.len as i32
+    gif.ExtensionBlockCount = trailingCount
+    gif.ExtensionBlocks = extsPtr(store, trailing)
+
+    // GifFile->Image: the low-level API's cursor, left on the last header read.
+    gif.Image = GifImageDesc {
+        Left: doc.curLeft,
+        Top: doc.curTop,
+        Width: doc.curWidth,
+        Height: doc.curHeight,
+        Interlace: doc.curInterlace,
+        ColorMap: palettePtr(store, doc.curMap),
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Open
+// ---------------------------------------------------------------------------
+
+// C's DGifOpenFileHandle: six stamp bytes, a "GIF" prefix test, the 8x/9x version digit,
+// then the screen descriptor.
+//
+// The screen-descriptor failure is the one path that writes NO error code. C frees the
+// handle and returns NULL without ever touching `*Error`, so a caller that zeroed its own
+// int sees 0 and not D_GIF_ERR_NO_SCRN_DSCR (104), which giflib-rs reports instead and
+// which the differential caught on 49 of 2665 inputs. `errSilent` is that answer; C's own
+// error constant for it exists and is never stored.
+fn openPath(path: &string): Result<*GifFileType, i32> {
+    let Result.Ok(file) = File.openRead(path) else {
+        return Result.Err(dGifErrOpenFailed)
+    }
+    var handle = file
+    // A read error is indistinguishable from a short file here, exactly as it is for
+    // `fread`: both leave the stamp check with too few bytes.
+    var text = ""
+    match handle.readAll() {
+        Result.Ok(content) => {
+            text = content
+        }
+        Result.Err(_) => {
+        }
+    }
+    match handle.close() {
+        Result.Ok(_) => {
+        }
+        Result.Err(_) => {
+        }
+    }
+
+    var data: Vec<u8> = Vec.withCapacity(text.len)
+    for b in text {
+        data.push(b)
+    }
+
+    var rd = GifReader.new(data)
+    var stamp: Vec<u8> = Vec.filled(6, 0)
+    if !rd.takeInto(stamp, 0, 6) {
+        return Result.Err(dGifErrReadFailed)
+    }
+    // GIF_VERSION_POS is 3, so only "GIF" is required; the version digits are advisory.
+    if stamp[0] != 0x47 || stamp[1] != 0x49 || stamp[2] != 0x46 {
+        return Result.Err(dGifErrNotGifFile)
+    }
+    let gif89 = stamp[4] == 0x39
+
+    var lzw = Lzw.new()
+    var doc = Doc.new()
+    match getScreenDesc(rd, doc) {
+        Result.Ok(_) => {
+        }
+        Result.Err(_) => {
+            return Result.Err(errSilent)
+        }
+    }
+
+    var store = CStore.new()
+    let screenMap = palettePtr(store, doc.screenMap)
+    let sWidth = doc.sWidth
+    let sHeight = doc.sHeight
+    let sColorResolution = doc.sColorResolution
+    let sBackGroundColor = doc.sBackGroundColor
+    let aspectByte = doc.aspectByte
+
+    let statePtr = boxState(GifState {
+        rd: rd, lzw: lzw, doc: doc, store: store, pixelCount: 0, gif89: gif89
+    }
+    )
+
+    var gifs: Vec<GifFileType> = Vec.withCapacity(1)
+    gifs.push(GifFileType {
+        SWidth: sWidth,
+        SHeight: sHeight,
+        SColorResolution: sColorResolution,
+        SBackGroundColor: sBackGroundColor,
+        AspectByte: aspectByte,
+        SColorMap: screenMap,
+        ImageCount: 0,
+        Image: GifImageDesc {
+            Left: 0,
+            Top: 0,
+            Width: 0,
+            Height: 0,
+            Interlace: false,
+            ColorMap: nullOf<ColorMapObject>(),
+        }
+        ,
+        SavedImages: nullOf<SavedImage>(),
+        ExtensionBlockCount: 0,
+        ExtensionBlocks: nullOf<ExtensionBlock>(),
+        Error: 0,
+        UserData: nullOf<u8>(),
+        Private: statePtr,
+    }
+    )
+    let gifPtr = gifs.ptr()
+    forget(gifs)
+    return Result.Ok(gifPtr)
+}
+
+// DGifOpenFileName. Returns NULL on failure, writing `*Error` only where C does.
+@externalLinkage
+pub fn DGifOpenFileName(fileName: *u8, errorOut: ?&mut i32): *GifFileType {
+    var code = dGifErrOpenFailed
+    match CStr.wrap(fileName) {
+        Option.None => {
+        }
+        Option.Some(name) => {
+            match openPath(name.toString()) {
+                Result.Ok(gif) => {
+                    return gif
+                }
+                Result.Err(e) => {
+                    code = e
+                }
+            }
+        }
+    }
+    if code == errSilent {
+        return nullOf<GifFileType>()
+    }
+    let out = errorOut else {
+        return nullOf<GifFileType>()
+    }
+    out = code
+    return nullOf<GifFileType>()
+}
+
+// ---------------------------------------------------------------------------
+//  Slurp
+// ---------------------------------------------------------------------------
+
+// DGifSlurp. The `?&mut GifFileType` spelling is the whole null check: a C caller passing
+// NULL takes the else block, and the body below never sees a pointer.
+@externalLinkage
+pub fn DGifSlurp(gifFile: ?&mut GifFileType): i32 {
+    let gif = gifFile else {
+        return gifError
+    }
+    let Option.Some(taken) = takeState(gif.Private) else {
+        return gifError
+    }
+    var state = taken
+
+    var status = gifOk
+    match slurp(state.rd, state.lzw, state.doc, state.pixelCount, continueExtFuncCode) {
+        Result.Ok(_) => {
+        }
+        Result.Err(e) => {
+            // Zero is the "GIF_ERROR without an error code" case C has in two places; the
+            // C field keeps whatever it held, which is 0 for a handle that got this far.
+            if e != 0 {
+                gif.Error = e
+            }
+            status = gifError
+        }
+    }
+    // Published on both paths. C decodes straight into the caller's GifFileType, so a
+    // failed slurp still hands back every image and extension block it managed to read;
+    // publishing only on success made a truncated file look like an empty one, which the
+    // differential reddened on 360 of the 3021 corpus files.
+    publish(state.doc, state.store, gif)
+    // The state goes back even on the error path: the caller still has to close, and
+    // close is what frees it.
+    gif.Private = boxState(state)
+    return status
+}
+
+// ---------------------------------------------------------------------------
+//  Close
+// ---------------------------------------------------------------------------
+
+// DGifCloseFile. Two adoptions and no `free`: the private state owns every buffer C was
+// reading, so dropping it releases the whole graph, and the GifFileType is the one block
+// that has to be reclaimed by hand because C was holding it.
+//
+// The first parameter is a raw pointer rather than `?&mut GifFileType` because this
+// function consumes the object, and `adopt` already puts the null case in its return
+// type, the same place `?&mut` would have put it.
+@externalLinkage
+pub fn DGifCloseFile(gifFile: *GifFileType, errorCode: ?&mut i32): i32 {
+    if isNull(gifFile) {
+        return gifError
+    }
+    var statePtr = nullOf<u8>()
+    unsafe {
+        statePtr = gifFile.Private
+    }
+    if isNull(statePtr) {
+        return gifError
+    }
+
+    // Bound and dropped: GifState's drop runs CStore's, which frees every raster,
+    // palette, extension payload and array this library published.
+    let state = takeState(statePtr)
+    match state {
+        Option.Some(_) => {
+        }
+        Option.None => {
+        }
+    }
+
+    // `adopt-raw-fields` fires here and is right to: dropping this box frees the
+    // GifFileType and none of the arrays SavedImages/ExtensionBlocks point at. In this
+    // library those pointers are BORROWED - every array they address is a Milo Vec owned
+    // by the CStore dropped on the line above - so the box is the only block left to
+    // reclaim, and build.sh allows the warning for exactly that reason.
+    unsafe {
+        match adopt(gifFile) {
+            Option.Some(_) => {
+            }
+            Option.None => {
+            }
+        }
+    }
+
+    let out = errorCode else {
+        return gifOk
+    }
+    out = 0
+    return gifOk
+}

@@ -1,0 +1,756 @@
+// The GIF decode path of giflib 6.1.3, in safe Milo: no pointers, no `unsafe`, no C
+// structs. Everything here works on Milo-native types and answers `Result<_, i32>` where
+// the error is the `D_GIF_ERR_*` code C would have stored in `GifFile->Error`.
+//
+// The C original is dgif_lib.c. The port is deliberately line-for-line with it, including
+// two quirks that look like bugs and are not ours to fix, because a differential gate
+// against the real library is what this port is measured by:
+//
+//   * `SColorResolution` is `(((Buf[0] & 0x70) + 1) >> 4) + 1`, not the `((Buf[0] >> 4) &
+//     7) + 1` the GIF spec asks for. Every C-decoded GIF in the world carries the first
+//     answer.
+//   * two failures return GIF_ERROR while leaving `GifFile->Error` alone: a stack
+//     pointer past LZ_MAX_CODE, and an image with degenerate dimensions. `errSilent` is
+//     that case, and the caller writes no error code for it.
+//
+// What is NOT copied from C is C's memory model: the sub-block buffer, the LZW tables and
+// the raster are `Vec`s with bounds checks, so the class of bug this file's ancestor is
+// famous for (CVE-2026-26740 and relatives, a code index walking off `Prefix[]`) is a
+// panic here rather than a read of whatever followed the array. Every index below is
+// argued to be in range anyway; the check is the backstop, not the argument.
+
+// gif_lib_private.h. Not in the public header, so @cValue has nothing to anchor to.
+pub let lzMaxCode: i64 = 4095
+
+pub let lzBits: i64 = 12
+
+pub let noSuchCode: i64 = 4098
+
+// Sub-block introducers, also private to the C implementation.
+let descriptorIntroducer: u8 = 0x2C
+let extensionIntroducer: u8 = 0x21
+let terminatorIntroducer: u8 = 0x3B
+
+pub let recordImage: i64 = 0
+
+pub let recordExtension: i64 = 1
+
+pub let recordTerminate: i64 = 2
+
+// "return GIF_ERROR but leave GifFile->Error untouched". See the header comment. Zero is
+// safe to overload because no D_GIF_ERR_* code is 0 (they start at 101).
+pub let errSilent: i32 = 0
+
+// D_GIF_ERR_* codes, verified against gif_lib.h in gifabi.milo; repeated here as i32
+// literals only because this module has no reason to depend on the C ABI declarations.
+let errReadFailed: i32 = 102
+let errWrongRecord: i32 = 107
+let errDataTooBig: i32 = 108
+let errNoImagDscr: i32 = 105
+let errImageDefect: i32 = 112
+let errEofTooSoon: i32 = 113
+
+fn ok(): Result<Unit, i32> {
+    return Result.Ok(Unit {
+    }
+    )
+}
+
+// ---------------------------------------------------------------------------
+//  Reader: C's InternalRead over a FILE*, here over the bytes already read
+// ---------------------------------------------------------------------------
+
+// giflib reads through `fread`, which returns however many bytes it could; every caller
+// in dgif_lib.c treats a short count as failure and bails, so nothing observes where the
+// stream position lands afterwards. Holding the whole file lets every read be a bounds
+// check instead of a syscall, and reproduces `fread` exactly for a regular file.
+pub struct GifReader {
+    data: Vec<u8>,
+    pos: i64,
+}
+
+impl GifReader {
+    fn new(data: Vec<u8>): GifReader {
+        return GifReader {
+            data: data, pos: 0
+        }
+    }
+
+    fn readByte(self: &mut Self): Option<u8> {
+        if self.pos >= self.data.len {
+            return Option.None
+        }
+        let b = self.data[self.pos]
+        self.pos = self.pos + 1
+        return Option.Some(b)
+    }
+
+    // Copy `n` bytes into `dst[at..at+n]`. False means the stream was short, which is the
+    // only thing any caller does with `fread`'s count.
+    fn takeInto(self: &mut Self, dst: &mut Vec<u8>, at: i64, n: i64): bool {
+        if self.data.len - self.pos < n {
+            self.pos = self.data.len
+            return false
+        }
+        var i: i64 = 0
+        while i < n {
+            dst[at + i] = self.data[self.pos + i]
+            i = i + 1
+        }
+        self.pos = self.pos + n
+        return true
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Decoded document: what a caller reads back through the C structs
+// ---------------------------------------------------------------------------
+
+pub struct Palette {
+    colorCount: i64,
+    bitsPerPixel: i64,
+    sortFlag: bool,
+    // colorCount * 3 bytes, red/green/blue interleaved, C's GifColorType[] order.
+    rgb: Vec<u8>,
+}
+
+pub struct Ext {
+    function: i32,
+    bytes: Vec<u8>,
+}
+
+pub struct Image {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    interlace: bool,
+    map: Option<Palette>,
+    raster: Vec<u8>,
+    exts: Vec<Ext>,
+}
+
+pub struct Doc {
+    sWidth: i32,
+    sHeight: i32,
+    sColorResolution: i32,
+    sBackGroundColor: i32,
+    aspectByte: u8,
+    screenMap: Option<Palette>,
+    images: Vec<Image>,
+    // Extensions seen since the last image. C keeps these on GifFile until an image
+    // descriptor arrives, then hands the whole run to that image.
+    pending: Vec<Ext>,
+    // GifFile->Image: the low-level API's current descriptor, left holding the last
+    // image header the stream produced.
+    curLeft: i32,
+    curTop: i32,
+    curWidth: i32,
+    curHeight: i32,
+    curInterlace: bool,
+    curMap: Option<Palette>,
+}
+
+impl Doc {
+    fn new(): Doc {
+        return Doc {
+            sWidth: 0,
+            sHeight: 0,
+            sColorResolution: 0,
+            sBackGroundColor: 0,
+            aspectByte: 0,
+            screenMap: Option.None,
+            images: Vec.new(),
+            pending: Vec.new(),
+            curLeft: 0,
+            curTop: 0,
+            curWidth: 0,
+            curHeight: 0,
+            curInterlace: false,
+            curMap: Option.None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  LZW state
+// ---------------------------------------------------------------------------
+
+pub struct Lzw {
+    // Pascal-string sub-block buffer: buf[0] is the count still unread, data from buf[1].
+    // buf[1] doubles as the read cursor once the block has been loaded, which is C's own
+    // dual use, kept because the extension reader shares this same buffer.
+    buf: Vec<u8>,
+    stack: Vec<u8>,
+    suffix: Vec<u8>,
+    prefix: Vec<i64>,
+    bitsPerPixel: i64,
+    clearCode: i64,
+    eofCode: i64,
+    runningCode: i64,
+    runningBits: i64,
+    maxCode1: i64,
+    lastCode: i64,
+    stackPtr: i64,
+    crntShiftState: i64,
+    crntShiftDword: i64,
+}
+
+impl Lzw {
+    fn new(): Lzw {
+        return Lzw {
+            buf: Vec.filled(256, 0),
+            stack: Vec.filled(lzMaxCode + 1, 0),
+            suffix: Vec.filled(lzMaxCode + 1, 0),
+            prefix: Vec.filled(lzMaxCode + 1, noSuchCode),
+            bitsPerPixel: 0,
+            clearCode: 0,
+            eofCode: 0,
+            runningCode: 0,
+            runningBits: 0,
+            maxCode1: 0,
+            lastCode: 0,
+            stackPtr: 0,
+            crntShiftState: 0,
+            crntShiftDword: 0,
+        }
+    }
+
+    fn resetPrefix(self: &mut Self) {
+        var i: i64 = 0
+        while i <= lzMaxCode {
+            self.prefix[i] = noSuchCode
+            i = i + 1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Primitive reads
+// ---------------------------------------------------------------------------
+
+// DGifGetWord: little-endian u16 widened to C's `int`, so it is always 0..65535.
+fn getWord(rd: &mut GifReader): Result<i32, i32> {
+    let Option.Some(lo) = rd.readByte() else {
+        return Result.Err(errReadFailed)
+    }
+    let Option.Some(hi) = rd.readByte() else {
+        return Result.Err(errReadFailed)
+    }
+    return Result.Ok(((hi as i64) * 256 + (lo as i64)) as i32)
+}
+
+// GifMakeMapObject + the read loop that fills it. `bitsPerPixel` is 1..8, so the count is
+// 2..256 and BitsPerPixel comes back out as GifBitSize(1 << bpp) == bpp.
+fn readPalette(rd: &mut GifReader, bitsPerPixel: i64, sortFlag: bool): Result<Palette, i32> {
+    let count = 1 << bitsPerPixel
+    var rgb: Vec<u8> = Vec.filled(count * 3, 0)
+    var i: i64 = 0
+    while i < count {
+        if !rd.takeInto(rgb, i * 3, 3) {
+            return Result.Err(errReadFailed)
+        }
+        i = i + 1
+    }
+    return Result.Ok(Palette {
+        colorCount: count, bitsPerPixel: bitsPerPixel, sortFlag: sortFlag, rgb: rgb
+    }
+    )
+}
+
+// ---------------------------------------------------------------------------
+//  Screen descriptor
+// ---------------------------------------------------------------------------
+
+// DGifGetScreenDesc. Note what is NOT here: C ends this function with a comment saying
+// there is no check that the background colour indexes the screen map, and the port must
+// not add one: a clamped background byte is a visible difference in the digest.
+pub fn getScreenDesc(rd: &mut GifReader, doc: &mut Doc): Result<Unit, i32> {
+    doc.sWidth = getWord(rd)?
+    doc.sHeight = getWord(rd)?
+
+    var buf: Vec<u8> = Vec.filled(3, 0)
+    if !rd.takeInto(buf, 0, 3) {
+        doc.screenMap = Option.None
+        return Result.Err(errReadFailed)
+    }
+
+    let flags = buf[0] as i64
+    // The C precedence quirk, preserved: the spec's ((flags >> 4) & 7) + 1 gives a
+    // different colour resolution for every file whose flags byte has bit 4 set.
+    doc.sColorResolution = ((((flags & 0x70) + 1) >> 4) + 1) as i32
+    let sortFlag = (flags & 0x08) != 0
+    let bitsPerPixel = (flags & 0x07) + 1
+    doc.sBackGroundColor = buf[1] as i32
+    doc.aspectByte = buf[2]
+
+    if (flags & 0x80) != 0 {
+        match readPalette(rd, bitsPerPixel, sortFlag) {
+            Result.Ok(p) => {
+                doc.screenMap = Option.Some(p)
+            }
+            Result.Err(e) => {
+                doc.screenMap = Option.None
+                return Result.Err(e)
+            }
+        }
+    } else {
+        doc.screenMap = Option.None
+    }
+    return ok()
+}
+
+// ---------------------------------------------------------------------------
+//  Record type
+// ---------------------------------------------------------------------------
+
+fn getRecordType(rd: &mut GifReader): Result<i64, i32> {
+    let Option.Some(b) = rd.readByte() else {
+        return Result.Err(errReadFailed)
+    }
+    if b == descriptorIntroducer {
+        return Result.Ok(recordImage)
+    }
+    if b == extensionIntroducer {
+        return Result.Ok(recordExtension)
+    }
+    if b == terminatorIntroducer {
+        return Result.Ok(recordTerminate)
+    }
+    return Result.Err(errWrongRecord)
+}
+
+// ---------------------------------------------------------------------------
+//  LZW
+// ---------------------------------------------------------------------------
+
+// DGifSetupDecompress. The `> 8` rejection is C's, and it is the only guard between a
+// severely malformed code size and a clear code that no longer fits the tables.
+fn setupDecompress(rd: &mut GifReader, lzw: &mut Lzw): Result<Unit, i32> {
+    let Option.Some(codeSize) = rd.readByte() else {
+        return Result.Err(errReadFailed)
+    }
+    let bitsPerPixel = codeSize as i64
+    if bitsPerPixel > 8 {
+        return Result.Err(errReadFailed)
+    }
+
+    lzw.buf[0] = 0
+    lzw.bitsPerPixel = bitsPerPixel
+    lzw.clearCode = 1 << bitsPerPixel
+    lzw.eofCode = lzw.clearCode + 1
+    lzw.runningCode = lzw.eofCode + 1
+    lzw.runningBits = bitsPerPixel + 1
+    lzw.maxCode1 = 1 << lzw.runningBits
+    lzw.stackPtr = 0
+    lzw.lastCode = noSuchCode
+    lzw.crntShiftState = 0
+    lzw.crntShiftDword = 0
+    lzw.resetPrefix()
+    return ok()
+}
+
+// DGifBufferedInput. buf[0] counts down as bytes are handed out, so the cursor in buf[1]
+// can never run past the block: the two hit their limits together.
+fn bufferedInput(rd: &mut GifReader, lzw: &mut Lzw): Result<u8, i32> {
+    if lzw.buf[0] == 0 {
+        let Option.Some(blockLen) = rd.readByte() else {
+            return Result.Err(errReadFailed)
+        }
+        lzw.buf[0] = blockLen
+        // The LZW terminator must arrive before an empty sub-block, so being here with a
+        // zero-length block means the stream is defective.
+        if blockLen == 0 {
+            return Result.Err(errImageDefect)
+        }
+        if !rd.takeInto(lzw.buf, 1, blockLen as i64) {
+            return Result.Err(errReadFailed)
+        }
+        let first = lzw.buf[1]
+        lzw.buf[1] = 2
+        lzw.buf[0] = lzw.buf[0] - 1
+        return Result.Ok(first)
+    }
+    let cursor = lzw.buf[1] as i64
+    let b = lzw.buf[cursor]
+    // C increments a `GifByteType`, which wraps at 256. A 255-byte block ends with the
+    // cursor rolling over to 0 on the read that also takes buf[0] to zero, so the wrap is
+    // never observed, but a trap here would be a crash C does not have.
+    lzw.buf[1] = ((cursor + 1) & 255) as u8
+    lzw.buf[0] = lzw.buf[0] - 1
+    return Result.Ok(b)
+}
+
+// DGifDecompressInput: pull `runningBits` bits out of the shift register, refilling from
+// the sub-block stream as needed, then widen the code width if the table just outgrew it.
+fn decompressInput(rd: &mut GifReader, lzw: &mut Lzw): Result<i64, i32> {
+    let runningBits = lzw.runningBits
+    if runningBits > lzBits {
+        return Result.Err(errImageDefect)
+    }
+
+    while lzw.crntShiftState < runningBits {
+        let nextByte = bufferedInput(rd, lzw)?
+        lzw.crntShiftDword = lzw.crntShiftDword | ((nextByte as i64) << lzw.crntShiftState)
+        lzw.crntShiftState = lzw.crntShiftState + 8
+    }
+
+    let code = lzw.crntShiftDword & ((1 << runningBits) - 1)
+    lzw.crntShiftDword = lzw.crntShiftDword >> runningBits
+    lzw.crntShiftState = lzw.crntShiftState - runningBits
+
+    // C spells this as one short-circuited condition with a pre-increment in the middle:
+    // the running code only advances while it is below LZ_MAX_CODE + 2.
+    if lzw.runningCode < lzMaxCode + 2 {
+        lzw.runningCode = lzw.runningCode + 1
+        if lzw.runningCode > lzw.maxCode1 && runningBits < lzBits {
+            lzw.maxCode1 = lzw.maxCode1 << 1
+            lzw.runningBits = lzw.runningBits + 1
+        }
+    }
+    return Result.Ok(code)
+}
+
+// DGifGetPrefixChar: walk a code back to the pixel it starts with. The iteration count is
+// its own fuse, because a defective table can point a chain at itself.
+fn getPrefixChar(prefix: &Vec<i64>, code: i64, clearCode: i64): i64 {
+    var c = code
+    var i: i64 = 0
+    while c > clearCode && i <= lzMaxCode {
+        if c > lzMaxCode {
+            return noSuchCode
+        }
+        c = prefix[c]
+        i = i + 1
+    }
+    return c
+}
+
+// DGifDecompressLine: fill out[at..at+lineLen] with decoded pixels.
+//
+// Every index below stays in range without relying on the bounds check:
+//   * `stackPtr` is 0 on entry to each iteration of the outer loop (the pop loop only
+//     stops early when the line is full, which also ends the outer loop), the trace loop
+//     stops at lzMaxCode, and the push after it is guarded, so stack[] tops out at 4095.
+//   * `runningCode` is capped at lzMaxCode + 2 by decompressInput, so `runningCode - 2`
+//     indexes prefix[]/suffix[] at 4095 at worst and at 1 at least.
+//   * `crntCode` is at most (1 << runningBits) - 1 with runningBits <= 12.
+fn decompressLine(rd: &mut GifReader, lzw: &mut Lzw, out: &mut Vec<u8>, at: i64, lineLen: i64,): Result<Unit, i32> {
+    var i: i64 = 0
+    var stackPtr = lzw.stackPtr
+    let eofCode = lzw.eofCode
+    let clearCode = lzw.clearCode
+    var lastCode = lzw.lastCode
+
+    // C returns GIF_ERROR here without touching GifFile->Error.
+    if stackPtr > lzMaxCode {
+        return Result.Err(errSilent)
+    }
+
+    while stackPtr != 0 && i < lineLen {
+        stackPtr = stackPtr - 1
+        out[at + i] = lzw.stack[stackPtr]
+        i = i + 1
+    }
+
+    while i < lineLen {
+        let crntCode = decompressInput(rd, lzw)?
+
+        if crntCode == eofCode {
+            return Result.Err(errEofTooSoon)
+        }
+        if crntCode == clearCode {
+            lzw.resetPrefix()
+            lzw.runningCode = lzw.eofCode + 1
+            lzw.runningBits = lzw.bitsPerPixel + 1
+            lzw.maxCode1 = 1 << lzw.runningBits
+            lastCode = noSuchCode
+            lzw.lastCode = noSuchCode
+        } else {
+            if crntCode < clearCode {
+                out[at + i] = crntCode as u8
+                i = i + 1
+            } else {
+                var crntPrefix: i64 = 0
+                if lzw.prefix[crntCode] == noSuchCode {
+                    crntPrefix = lastCode
+                    // Only legal when crntCode IS the code being defined: then its suffix
+                    // is the first pixel of the previous code's expansion.
+                    let rcIdx = lzw.runningCode - 2
+                    var traceFrom = crntCode
+                    if crntCode == rcIdx {
+                        traceFrom = lastCode
+                    }
+                    let pc = getPrefixChar(lzw.prefix, traceFrom, clearCode)
+                    lzw.suffix[rcIdx] = pc as u8
+                    lzw.stack[stackPtr] = pc as u8
+                    stackPtr = stackPtr + 1
+                } else {
+                    crntPrefix = crntCode
+                }
+
+                var cp = crntPrefix
+                while stackPtr < lzMaxCode && cp > clearCode && cp <= lzMaxCode {
+                    lzw.stack[stackPtr] = lzw.suffix[cp]
+                    stackPtr = stackPtr + 1
+                    cp = lzw.prefix[cp]
+                }
+                if stackPtr >= lzMaxCode || cp > lzMaxCode {
+                    return Result.Err(errImageDefect)
+                }
+                lzw.stack[stackPtr] = cp as u8
+                stackPtr = stackPtr + 1
+
+                while stackPtr != 0 && i < lineLen {
+                    stackPtr = stackPtr - 1
+                    out[at + i] = lzw.stack[stackPtr]
+                    i = i + 1
+                }
+            }
+
+            let rcIdx = lzw.runningCode - 2
+            if lastCode != noSuchCode && rcIdx >= 0 && lzw.prefix[rcIdx] == noSuchCode {
+                lzw.prefix[rcIdx] = lastCode
+                var traceFrom = crntCode
+                if crntCode == rcIdx {
+                    traceFrom = lastCode
+                }
+                lzw.suffix[rcIdx] = getPrefixChar(lzw.prefix, traceFrom, clearCode) as u8
+            }
+            lastCode = crntCode
+        }
+    }
+
+    lzw.lastCode = lastCode
+    lzw.stackPtr = stackPtr
+    return ok()
+}
+
+// DGifGetCodeNext: read one sub-block into the shared buffer. False is the zero-length
+// terminator, which also ends the image.
+fn getCodeNext(rd: &mut GifReader, lzw: &mut Lzw, pixelCount: &mut i64): Result<bool, i32> {
+    let Option.Some(blockLen) = rd.readByte() else {
+        return Result.Err(errReadFailed)
+    }
+    if blockLen > 0 {
+        lzw.buf[0] = blockLen
+        if !rd.takeInto(lzw.buf, 1, blockLen as i64) {
+            return Result.Err(errReadFailed)
+        }
+        return Result.Ok(true)
+    }
+    lzw.buf[0] = 0
+    pixelCount = 0
+    return Result.Ok(false)
+}
+
+// DGifGetLine. C decrements an unsigned PixelCount and then tests it against 0xffff0000,
+// which is an underflow test: a legitimate count never exceeds INT_MAX.
+fn getLine(rd: &mut GifReader, lzw: &mut Lzw, out: &mut Vec<u8>, at: i64, lineLen: i64, pixelCount: &mut i64,): Result<Unit, i32> {
+    // C's `LineLen == 0 -> LineLen = Image.Width` fallback is unreachable from slurp,
+    // which validates the dimensions above zero before it ever calls this.
+    pixelCount = pixelCount - lineLen
+    if pixelCount < 0 {
+        return Result.Err(errDataTooBig)
+    }
+
+    decompressLine(rd, lzw, out, at, lineLen)?
+
+    if pixelCount == 0 {
+        // Drain the rest of the image's sub-blocks so the stream is positioned on the
+        // next record.
+        var more = true
+        while more {
+            more = getCodeNext(rd, lzw, pixelCount)?
+        }
+    }
+    return ok()
+}
+
+// ---------------------------------------------------------------------------
+//  Image header
+// ---------------------------------------------------------------------------
+
+// DGifGetImageHeader.
+fn getImageHeader(rd: &mut GifReader, lzw: &mut Lzw, doc: &mut Doc, pixelCount: &mut i64,): Result<Unit, i32> {
+    doc.curLeft = getWord(rd)?
+    doc.curTop = getWord(rd)?
+    doc.curWidth = getWord(rd)?
+    doc.curHeight = getWord(rd)?
+
+    let Option.Some(flagsByte) = rd.readByte() else {
+        doc.curMap = Option.None
+        return Result.Err(errReadFailed)
+    }
+    let flags = flagsByte as i64
+    let bitsPerPixel = (flags & 0x07) + 1
+    doc.curInterlace = (flags & 0x40) != 0
+
+    // C frees any map left over from the previous image before deciding whether this one
+    // has its own; dropping the Option is the same statement.
+    doc.curMap = Option.None
+
+    if (flags & 0x80) != 0 {
+        // A local colour table is never marked sorted by giflib: GifMakeMapObject clears
+        // SortFlag and DGifGetImageHeader never sets it.
+        match readPalette(rd, bitsPerPixel, false) {
+            Result.Ok(p) => {
+                doc.curMap = Option.Some(p)
+            }
+            Result.Err(e) => {
+                doc.curMap = Option.None
+                return Result.Err(e)
+            }
+        }
+    }
+
+    pixelCount = (doc.curWidth as i64) * (doc.curHeight as i64)
+    return setupDecompress(rd, lzw)
+}
+
+// ---------------------------------------------------------------------------
+//  Extensions
+// ---------------------------------------------------------------------------
+
+// DGifGetExtensionNext: one sub-block into the shared buffer, Pascal-string layout.
+// `Option.None` is the zero-length terminator.
+fn getExtensionNext(rd: &mut GifReader, lzw: &mut Lzw): Result<Option<Vec<u8>>, i32> {
+    let Option.Some(blockLen) = rd.readByte() else {
+        return Result.Err(errReadFailed)
+    }
+    if blockLen == 0 {
+        lzw.buf[0] = 0
+        return Result.Ok(Option.None)
+    }
+    lzw.buf[0] = blockLen
+    if !rd.takeInto(lzw.buf, 1, blockLen as i64) {
+        return Result.Err(errReadFailed)
+    }
+    var payload: Vec<u8> = Vec.withCapacity(blockLen as i64)
+    var i: i64 = 1
+    while i <= blockLen as i64 {
+        payload.push(lzw.buf[i])
+        i = i + 1
+    }
+    return Result.Ok(Option.Some(payload))
+}
+
+// ---------------------------------------------------------------------------
+//  Slurp
+// ---------------------------------------------------------------------------
+
+let interlacedOffset: [i64; 4] = [0, 4, 2, 1]
+let interlacedJumps: [i64; 4] = [8, 8, 4, 2]
+
+// DGifSlurp: read records until the trailer, decoding every image into core.
+pub fn slurp(rd: &mut GifReader, lzw: &mut Lzw, doc: &mut Doc, pixelCount: &mut i64, continueExtFuncCode: i32,): Result<Unit, i32> {
+    var running = true
+    while running {
+        let recordType = getRecordType(rd)?
+
+        if recordType == recordTerminate {
+            running = false
+        } else if recordType == recordImage {
+            getImageHeader(rd, lzw, doc, pixelCount)?
+
+            let width = doc.curWidth
+            let height = doc.curHeight
+            // C's guard, and it returns GIF_ERROR without recording an error code. Both
+            // halves matter: a zero dimension would make the raster empty, and the
+            // division is the overflow test for width * height as a C `int`.
+            if width <= 0 || height <= 0 || width > 2147483647 / height {
+                return Result.Err(errSilent)
+            }
+            let imageSize = (width as i64) * (height as i64)
+
+            var raster: Vec<u8> = Vec.filled(imageSize, 0)
+
+            if doc.curInterlace {
+                var pass: i64 = 0
+                while pass < 4 {
+                    var row = interlacedOffset[pass]
+                    while row < height as i64 {
+                        getLine(rd, lzw, raster, row * (width as i64), width as i64, pixelCount)?
+                        row = row + interlacedJumps[pass]
+                    }
+                    pass = pass + 1
+                }
+            } else {
+                getLine(rd, lzw, raster, 0, imageSize, pixelCount)?
+            }
+
+            // C's DGifSlurp appends the SavedImage only once the image has fully decoded,
+            // so a failure anywhere above leaves ImageCount where it was and the pending
+            // extension run still on the file. The differential is what settled that: the
+            // append-first reading of the code disagrees with the installed library on
+            // 1105 of the 3021 corpus files.
+            let exts = replace(doc.pending, Vec.new())
+
+            doc.images.push(Image {
+                left: doc.curLeft,
+                top: doc.curTop,
+                width: width,
+                height: height,
+                interlace: doc.curInterlace,
+                map: clonePalette(doc.curMap),
+                raster: raster,
+                exts: exts,
+            }
+            )
+        } else {
+            // DGifGetExtension: the function code, then the first sub-block.
+            let Option.Some(extFunction) = rd.readByte() else {
+                return Result.Err(errReadFailed)
+            }
+            match getExtensionNext(rd, lzw)? {
+                Option.Some(payload) => {
+                    doc.pending.push(Ext {
+                        function: extFunction as i32, bytes: payload
+                    }
+                    )
+                }
+                Option.None => {
+                }
+            }
+            var more = true
+            while more {
+                match getExtensionNext(rd, lzw)? {
+                    Option.Some(payload) => {
+                        doc.pending.push(Ext {
+                            function: continueExtFuncCode, bytes: payload
+                        }
+                        )
+                    }
+                    Option.None => {
+                        more = false
+                    }
+                }
+            }
+        }
+    }
+
+    // C's sanity check for a file that terminated without ever describing an image.
+    if doc.images.len == 0 {
+        return Result.Err(errNoImagDscr)
+    }
+    return ok()
+}
+
+// DGifGetImageDesc copies the current colour map into the saved image rather than moving
+// it, because GifFile->Image keeps its own and both are freed at close.
+fn clonePalette(src: &Option<Palette>): Option<Palette> {
+    match src {
+        Option.Some(p) => {
+            return Option.Some(Palette {
+                colorCount: p.colorCount,
+                bitsPerPixel: p.bitsPerPixel,
+                sortFlag: p.sortFlag,
+                rgb: p.rgb.clone(),
+            }
+            )
+        }
+        Option.None => {
+            return Option.None
+        }
+    }
+}

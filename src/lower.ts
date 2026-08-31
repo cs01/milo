@@ -4,7 +4,7 @@
 import type { Program, Function as AstFn, Stmt, Expr, Pattern } from "./ast";
 import { declaredType, floatNamespaceConst } from "./ast";
 import type { CheckResult, FnSig, EnumInfo } from "./checker";
-import { RAW_SLICE_INTRINSICS, ADOPT_INTRINSICS, FOREIGN_MODULE } from "./checker";
+import { RAW_SLICE_INTRINSICS, ADOPT_INTRINSICS, isForeignModule } from "./checker";
 import type { HIRModule, HIRFunction, HIRStmt, HIRExpr, HIRArg, HIRPattern, HIRStruct, HIREnum, HIRGlobal, HIRContract } from "./hir";
 import type { TypeKind } from "./types";
 import { typeFromAst, SLICE_COMBINATORS, ARRAY_COMBINATORS } from "./types";
@@ -693,7 +693,7 @@ class LowerCtx {
         }
         // Gated exactly as the checker gates it (name + the one module), so a call it
         // typed as a foreign view can never lower as an ordinary function call.
-        if (RAW_SLICE_INTRINSICS.has(expr.func) && expr.span?.file?.endsWith(FOREIGN_MODULE)) {
+        if (RAW_SLICE_INTRINSICS.has(expr.func) && isForeignModule(expr.span?.file)) {
           const element = type.tag === "ref" && type.inner.tag === "array" ? type.inner.element : { tag: "unknown" as const };
           return {
             kind: "RawSlice",
@@ -706,7 +706,7 @@ class LowerCtx {
         }
         // Same gate as the checker's (name + the one module), so a call it typed as an
         // adoption can never lower as an ordinary function call.
-        if (ADOPT_INTRINSICS.has(expr.func) && expr.span?.file?.endsWith(FOREIGN_MODULE)) {
+        if (ADOPT_INTRINSICS.has(expr.func) && isForeignModule(expr.span?.file)) {
           return {
             kind: "Adopt",
             ptr: this.lowerExpr(expr.args[0]),

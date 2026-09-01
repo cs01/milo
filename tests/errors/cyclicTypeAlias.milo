@@ -1,0 +1,14 @@
+// @error: type alias 'A' is cyclic
+// An alias is expanded, so one that names itself has no type to expand into and the
+// expansion does not terminate. Before this it ran until the host stack died and printed a
+// JavaScript trace instead of a diagnostic - it did exit nonzero, so the build failed
+// either way, but the message named a line of the compiler rather than a line of the
+// program. A struct or enum may refer to itself through an indirection; an alias cannot.
+type A = B
+type B = A
+
+pub fn main(): i32 {
+    var x: A = 1
+    print(x)
+    return 0
+}

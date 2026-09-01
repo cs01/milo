@@ -433,6 +433,12 @@ export class TypeChecker {
   // a struct (breaks `?` auto-From into an aliased Result error type). Resolve
   // lazily at each use site, when every type name is registered.
   private typeAliases = new Map<string, MiloType>();
+  // Alias names currently being expanded. `type A = A`, `type A = B` / `type B = A`, and the
+  // generic `type Loop<T> = Loop<T>` all resolve by expanding a body that names the alias
+  // again; without this the recursion runs until the JS stack dies and the user gets a host
+  // stack trace instead of a diagnostic. It exits 1 either way, so this is a message fix
+  // rather than a silent-success one.
+  private expandingAliases = new Set<string>();
   // Parameters of a GENERIC alias, by alias name. An alias is a template expanded at the
   // use site rather than a type of its own, so this is the arity to check the use against
   // and the names to substitute — there is no instantiation to record anywhere.
@@ -1266,9 +1272,20 @@ export class TypeChecker {
             : `it declares '${ty.name}<${aliasParams.join(", ")}>'`);
         return { tag: "unknown" };
       }
+      if (this.expandingAliases.has(ty.name)) {
+        this.error(`type alias '${ty.name}' is cyclic`, undefined,
+          `it expands to itself, so there is no type it names — break the cycle, or use a struct or enum, which may refer to itself through 'Heap' or 'Vec'`);
+        return { tag: "unknown" };
+      }
       const subst = new Map<string, MiloType>();
       aliasParams.forEach((p, i) => subst.set(p, args[i]));
-      const inner = this.resolve(substituteAliasType(alias, subst));
+      this.expandingAliases.add(ty.name);
+      let inner: TypeKind;
+      try {
+        inner = this.resolve(substituteAliasType(alias, subst));
+      } finally {
+        this.expandingAliases.delete(ty.name);
+      }
       const depth = ty.ptrDepth ?? (ty.isPtr ? 1 : 0);
       if (depth > 0) {
         let result = inner;
@@ -1281,9 +1298,20 @@ export class TypeChecker {
       return inner;
     }
     if (alias && !ty.isArray && !ty.typeArgs?.length) {
+      if (this.expandingAliases.has(ty.name)) {
+        this.error(`type alias '${ty.name}' is cyclic`, undefined,
+          `it expands to itself, so there is no type it names — break the cycle, or use a struct or enum, which may refer to itself through 'Heap' or 'Vec'`);
+        return { tag: "unknown" };
+      }
       // The ptr/ref flags belong to the *use site* (`&Board`), not to the alias:
       // expand the alias body, then re-apply the wrapper the use site asked for.
-      const inner = this.resolve(alias);
+      this.expandingAliases.add(ty.name);
+      let inner: TypeKind;
+      try {
+        inner = this.resolve(alias);
+      } finally {
+        this.expandingAliases.delete(ty.name);
+      }
       const depth = ty.ptrDepth ?? (ty.isPtr ? 1 : 0);
       if (depth > 0) {
         let result = inner;

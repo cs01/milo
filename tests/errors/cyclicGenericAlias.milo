@@ -1,0 +1,10 @@
+// @error: type alias 'Loop' is cyclic
+// Same rule through the generic path, where the substitution rebuilds the same
+// application on every step.
+type Loop<T> = Loop<T>
+
+pub fn main(): i32 {
+    var x: Loop<i64> = 1
+    print(x)
+    return 0
+}

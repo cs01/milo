@@ -3,7 +3,7 @@ system: milo-idioms
 purpose: canonical Milo patterns for text handling and ownership, and the papercuts that push agents toward non-idiomatic code
 key-files: std/string.milo, std/unicode.milo, docs/language-reference.md, CONVENTIONS.md
 update-when: a listed workaround stops being necessary, or a new papercut keeps producing the same non-idiomatic shape
-last-verified: 2026-08-03
+last-verified: 2026-09-01
 -->
 
 # Milo Idioms
@@ -209,6 +209,56 @@ print(v)                       // [1, 2, 3]
 print(nested)                  // [[1, 2], [3]]
 print(byName)                  // {"a": User { name: "a", age: 3 }}
 ```
+
+## Making illegal states unrepresentable
+
+Milo has no proof terms and is not getting them ([proofs-vs-contracts](proofs-vs-contracts.md)).
+What it does have is enough type structure to stop the wrong value from existing, which is
+where most of the value in that idea actually lives. All four of these work today with no
+language change.
+
+**An uninhabited type marks a branch that cannot happen.** An empty enum has no values, so a
+`match` on one has nothing to handle, and the checker accepts the empty arm list as the
+argument that the branch is dead:
+
+```milo
+enum Never { }
+
+fn cannotFail(n: i64): Result<i64, Never> {
+    return Result.Ok(n * 2)
+}
+```
+
+At the call site the impossible arm is discharged rather than faked: `match e { }` in place
+of an `abort()`, an `unreachable` or a comment claiming it cannot happen.
+
+**A witness type carries evidence.** A single-field struct whose only constructor establishes
+the invariant means holding the value IS holding the evidence:
+
+```milo
+struct NonZero {
+    v: i64,
+}
+
+fn nonZero(v: i64): Option<NonZero> {
+    if v == 0 {
+        return Option.None
+    }
+    return Option.Some(NonZero { v: v })
+}
+```
+
+Use it for an API surface you want to be impossible to misuse. Do NOT reach for it to state a
+fact about a value that already exists: that is what `requires`/`ensures` are for, they are one
+line instead of nine, and they are machine-checked. A witness is checked only by the discipline
+of keeping the constructor honest.
+
+**A phantom brand separates two things with the same representation.** `struct Id<Tag> { raw: i64 }`
+gives each pool or key space its own type, and a cross-pool call stops compiling.
+
+**Typestate is already here.** Move checking is a substructural type system: a consumed `File`
+cannot be used again, and a builder method taking `self` by value makes the previous state
+unreachable. Nothing needs to be added for this; it is what ownership already buys.
 
 ## When something feels harder than it should
 

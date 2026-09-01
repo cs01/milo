@@ -182,6 +182,6 @@ Refinement discharge is undecidable in general; SMT solvers (Z3) are the proven 
 
 ## Non-Goals
 
-- Dependent types / hand-written proof terms (Tier 3). Out of scope by design.
+- Dependent types / hand-written proof terms (Tier 3). Out of scope by design, and re-examined with evidence on 2026-09-01: see [proofs-vs-contracts.md](proofs-vs-contracts.md) for what was measured, the one-sentence rule for users, and the four triggers that would reopen it.
 - Full functional-correctness specs. Milo proves *safety and simple contracts*, not arbitrary program logic.
 - Proving the compiler itself correct.

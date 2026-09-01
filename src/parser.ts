@@ -428,9 +428,13 @@ export class Parser {
   private parseTypeAlias(): TypeAlias {
     const tok = this.expect(TokenKind.Type);
     const name = this.expect(TokenKind.Ident).value;
+    // The same `<T, U>` a struct or fn declares. Bounds parse here because the shared
+    // parser accepts them, and the checker rejects them: an alias is expanded rather
+    // than instantiated, so there is no body whose uses a bound could be checked against.
+    const typeParams = this.parseTypeParams();
     this.expect(TokenKind.Eq);
     const type = this.parseType();
-    return { kind: "TypeAlias", name, type, span: this.span(tok) };
+    return { kind: "TypeAlias", name, ...(typeParams.length ? { typeParams } : {}), type, span: this.span(tok) };
   }
 
   // ── Struct ──

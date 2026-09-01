@@ -1,0 +1,75 @@
+// @expect: 9
+// @expect: 2
+// @expect: 1
+// @expect: true
+// @expect: 10
+// @expect: 9
+// A type alias may take parameters, so a name can stand for a SHAPE rather than for one
+// type: `Handler<T, R>` is the signature every callback in a module shares, written once.
+//
+// An alias is expanded at the use site, not instantiated: `Pair<i64>` IS `Vec<i64>` to
+// everything downstream, so it needs no monomorphization, has no separate identity, and
+// passes to anything expecting the underlying type. That is what makes it free, and it is
+// also why a bound on an alias parameter is rejected: there would be no body to check it
+// against.
+type Pair<T> = Vec<T>
+type Table<K, V> = HashMap<K, V>
+type Nested<T> = Pair<T>
+type Res<T> = Result<T, string>
+type Handler<T, R> = (T) => R
+type Slot<T> = *T
+
+struct Holder<T> {
+    items: Pair<T>,
+}
+
+fn twice(n: i64): i64 {
+    return n * 2
+}
+
+// The alias in a signature, including behind a borrow: the `&` belongs to the use site
+// and the `Vec` to the alias body, and both survive the expansion.
+fn firstOr<T>(xs: &Pair<T>, fallback: T): T {
+    if xs.len() == 0 {
+        return fallback
+    }
+    return xs[0]
+}
+
+fn lookup(t: &Table<string, i64>, k: string): Res<i64> {
+    match t.get(k) {
+        Option.Some(v) => {
+            return Result.Ok(v)
+        }
+        Option.None => {
+            return Result.Err("missing")
+        }
+    }
+}
+
+pub fn main(): i32 {
+    // An alias of an alias expands all the way down.
+    var n: Nested<i64> = Vec.new()
+    n.push(9)
+    print(firstOr(n, 0))
+
+    var h: Holder<i64> = Holder {
+        items: Vec.new()
+    }
+    h.items.push(2)
+    print(h.items[0])
+
+    var t: Table<string, i64> = HashMap.new()
+    t.insert("a", 1)
+    print(lookup(t, "a")!)
+    print(lookup(t, "b").isErr())
+
+    // A fn type through an alias, and a raw pointer whose `*` comes from the alias body.
+    let f: Handler<i64, i64> = twice
+    print(f(5))
+    unsafe {
+        let p: Slot<i64> = n.ptr()
+        print(*p)
+    }
+    return 0
+}

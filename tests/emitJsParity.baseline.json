@@ -109,6 +109,7 @@
   "fsResults.milo": "noEmit",
   "fsTree.milo": "noEmit",
   "genericTraitDrop.milo": "mismatch",
+  "genericTypeAlias.milo": "noEmit",
   "globalRuntimeInit.milo": "noEmit",
   "greenIoPipe.milo": "noEmit",
   "greenStackSize.milo": "noEmit",

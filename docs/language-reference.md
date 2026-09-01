@@ -123,7 +123,22 @@ The float types carry the IEEE special values as namespace constants: `f64.NAN`,
 ```milo
 type Meters = f64
 type Altitude = i32(0..50000)     // with range constraint
+type Handler<T, R> = (T) => R     // parameterized
+type Table<K, V> = HashMap<K, V>
 ```
+
+An alias may take type parameters, so a name can stand for a **shape** rather than for one
+type. It is **expanded at the use site, not instantiated**: `Table<string, i64>` *is*
+`HashMap<string, i64>` to everything downstream, so it needs no monomorphization, has no
+identity of its own, and passes anywhere the underlying type is accepted. Aliases nest, and
+the wrappers compose — with `type Slot<T> = *T`, `Slot<Point>` is `*Point`, and a `&Pair<T>`
+parameter borrows the `Vec` the alias names.
+
+Two rules follow from expansion. The argument count must match (`Pair<i64, bool>` on a
+one-parameter alias is an error naming the alias, not an unknown type), and a parameter
+**cannot carry a bound**: a bound constrains what a body does with a parameter, an alias has
+no body, so `type Shown<T: Show> = Vec<T>` is rejected rather than accepted and never
+checked. Put the bound on the function or struct that uses the alias.
 
 ### Number Literals
 

@@ -1,0 +1,10 @@
+// @error: type alias 'Pair' takes 1 type argument(s), got 0
+// A generic alias names a shape, not a type: `Pair` on its own is missing the very thing
+// that would make it one.
+type Pair<T> = Vec<T>
+
+pub fn main(): i32 {
+    var x: Pair = Vec.new()
+    x.push(1)
+    return 0
+}

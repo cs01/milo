@@ -1,0 +1,12 @@
+// @error: 'Meters' is not a generic type
+// The mirror of the arity error: an ordinary alias stands for one type, so arguments have
+// nowhere to go. This message predates generic aliases and is already the right one, so
+// there is no second rule for it - the fixture is here to keep it that way now that
+// SOME aliases do take arguments.
+type Meters = f64
+
+pub fn main(): i32 {
+    let x: Meters<i64> = 1.0
+    print(x)
+    return 0
+}

@@ -1,0 +1,15 @@
+// @error: type parameter 'T' cannot carry a bound
+// A bound constrains what a body may do with a parameter. An alias has no body of its own
+// - it is replaced at each use - so a bound here would be a promise nothing checks. Put it
+// on the function or struct that uses the alias instead.
+trait Show {
+    fn show(self: &Self): string
+}
+
+type Shown<T: Show> = Vec<T>
+
+pub fn main(): i32 {
+    var x: Shown<i64> = Vec.new()
+    x.push(1)
+    return 0
+}

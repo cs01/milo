@@ -87,7 +87,7 @@ interface_method = "fn" IDENT "(" [ param_list ] ")" [ ":" type ] [ block ] ;
 interface_decl = "interface" IDENT "{" { interface_method } "}" ;
 impl_decl   = [ "unsafe" ] "impl" IDENT [ "for" IDENT ] "{" { fn_decl } "}" ;
 
-type_alias  = "type" IDENT "=" type ;
+type_alias  = "type" IDENT [ type_params ] "=" type ;   (* parameters: expanded, not instantiated *)
 global_decl = [ "thread_local" ] ( "let" | "var" ) IDENT [ ":" type ] "=" expr ;
 
 type_params = "<" IDENT [ ":" IDENT { "+" IDENT } ] { "," IDENT [ ":" IDENT { "+" IDENT } ] } ">" ;

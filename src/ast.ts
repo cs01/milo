@@ -300,6 +300,10 @@ export interface InterfaceDecl {
 export interface TypeAlias {
   kind: "TypeAlias";
   name: string;
+  // `type Handler<T> = (T) => Result<T, Error>` — the alias is a TEMPLATE, expanded per
+  // use site by substituting the arguments into its body. Empty for an ordinary alias,
+  // which stays what it was: a second spelling for one type.
+  typeParams?: TypeParam[];
   type: MiloType;
   span?: Span;
   isPub?: boolean;

@@ -41,6 +41,38 @@ export function inModule(file: string | undefined, module: string): boolean {
   return !!file && file.replace(/\\/g, "/").includes(module);
 }
 
+// Substitute a generic alias's arguments into its body, at the AST level rather than on
+// resolved types: the body may name types that are not registered yet (an alias is
+// registered before the enums it mentions), which is the same reason the alias table
+// stores AST in the first place.
+//
+// The use site's own wrappers compose with the parameter's: in `type Slot<T> = *T` used as
+// `Slot<Point>`, the `*` comes from the body and the name from the argument, while in
+// `Handler<&Point>` the `&` comes from the argument. Both have to survive, so the two are
+// merged rather than one overwriting the other.
+function substituteAliasType(body: MiloType, subst: ReadonlyMap<string, MiloType>): MiloType {
+  const arg = !body.isFn && !body.typeArgs?.length ? subst.get(body.name) : undefined;
+  if (arg) {
+    const ptrDepth = (body.ptrDepth ?? (body.isPtr ? 1 : 0)) + (arg.ptrDepth ?? (arg.isPtr ? 1 : 0));
+    return {
+      ...arg,
+      isPtr: ptrDepth > 0,
+      ...(ptrDepth > 0 ? { ptrDepth } : {}),
+      isRef: body.isRef || arg.isRef,
+      isRefMut: body.isRefMut || arg.isRefMut,
+      // `[T]` in the body wraps whatever T turns out to be; an array argument keeps its own.
+      isArray: body.isArray || arg.isArray,
+      arraySize: body.isArray ? body.arraySize : arg.arraySize,
+    };
+  }
+  return {
+    ...body,
+    ...(body.typeArgs ? { typeArgs: body.typeArgs.map(t => substituteAliasType(t, subst)) } : {}),
+    ...(body.fnParams ? { fnParams: body.fnParams.map(t => substituteAliasType(t, subst)) } : {}),
+    ...(body.fnRet ? { fnRet: substituteAliasType(body.fnRet, subst) } : {}),
+  };
+}
+
 export function isForeignModule(file: string | undefined): boolean {
   if (!file) return false;
   const posix = file.replace(/\\/g, "/");
@@ -401,6 +433,10 @@ export class TypeChecker {
   // a struct (breaks `?` auto-From into an aliased Result error type). Resolve
   // lazily at each use site, when every type name is registered.
   private typeAliases = new Map<string, MiloType>();
+  // Parameters of a GENERIC alias, by alias name. An alias is a template expanded at the
+  // use site rather than a type of its own, so this is the arity to check the use against
+  // and the names to substitute — there is no instantiation to record anywhere.
+  private aliasTypeParams = new Map<string, string[]>();
   private rangeCheckedExprs = new Map<Expr, { min: number; max: number; typeName: string }>();
   private returnHint: TypeKind | null = null;
   private monomorphizedDecls: import("./ast").EnumDecl[] = [];
@@ -1189,6 +1225,34 @@ export class TypeChecker {
     }
     // type alias resolution
     const alias = this.typeAliases.get(ty.name);
+    const aliasParams = this.aliasTypeParams.get(ty.name);
+    if (alias && aliasParams && !ty.isArray) {
+      // A generic alias is a TEMPLATE: substitute the arguments into its body and resolve
+      // the result. There is no instantiation to register and no monomorphization to run,
+      // because the alias names no type of its own — `Handler<i64>` IS `(i64) => Result<i64, Error>`
+      // to everything downstream, which is what makes it free.
+      const args = ty.typeArgs ?? [];
+      if (args.length !== aliasParams.length) {
+        this.error(`type alias '${ty.name}' takes ${aliasParams.length} type argument(s), got ${args.length}`, undefined,
+          args.length === 0
+            ? `write '${ty.name}<${aliasParams.map(() => "…").join(", ")}>' — a generic alias has no meaning without its arguments`
+            : `it declares '${ty.name}<${aliasParams.join(", ")}>'`);
+        return { tag: "unknown" };
+      }
+      const subst = new Map<string, MiloType>();
+      aliasParams.forEach((p, i) => subst.set(p, args[i]));
+      const inner = this.resolve(substituteAliasType(alias, subst));
+      const depth = ty.ptrDepth ?? (ty.isPtr ? 1 : 0);
+      if (depth > 0) {
+        let result = inner;
+        for (let i = 0; i < depth; i++) result = { tag: "ptr", inner: result };
+        return result;
+      }
+      if (ty.isNullableRef) return { tag: "ptr", inner };
+      if (ty.isRef) return { tag: "ref", inner, mutable: false };
+      if (ty.isRefMut) return { tag: "ref", inner, mutable: true };
+      return inner;
+    }
     if (alias && !ty.isArray && !ty.typeArgs?.length) {
       // The ptr/ref flags belong to the *use site* (`&Board`), not to the alias:
       // expand the alias body, then re-apply the wrapper the use site asked for.
@@ -2063,6 +2127,19 @@ export class TypeChecker {
     // register type aliases
     for (const ta of program.typeAliases) {
       this.typeAliases.set(ta.name, ta.type);
+      if (ta.typeParams?.length) {
+        this.aliasTypeParams.set(ta.name, ta.typeParams.map(tp => tp.name));
+        for (const tp of ta.typeParams) {
+          if (tp.bounds.length > 0) {
+            // A bound constrains the uses of a type parameter inside a body. An alias has
+            // no body of its own — it is textually replaced — so there is nothing here for
+            // a bound to constrain, and honouring the syntax silently would promise a
+            // check that never runs.
+            this.error(`type alias '${ta.name}': type parameter '${tp.name}' cannot carry a bound`, ta.span,
+              `an alias is expanded at each use, so a bound here would never be checked — put the bound on the function or struct that uses the alias`);
+          }
+        }
+      }
     }
 
     // pre-register enum names so struct fields can reference enum types

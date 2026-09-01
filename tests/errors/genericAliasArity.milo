@@ -1,0 +1,11 @@
+// @error: type alias 'Pair' takes 1 type argument(s), got 2
+// An alias is expanded by substituting one argument per parameter, so the wrong count has
+// nothing to expand into. Reported against the alias rather than as an "unknown type",
+// which is what the use site would otherwise become.
+type Pair<T> = Vec<T>
+
+pub fn main(): i32 {
+    var x: Pair<i64, bool> = Vec.new()
+    x.push(1)
+    return 0
+}

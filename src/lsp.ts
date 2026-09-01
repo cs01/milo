@@ -436,7 +436,11 @@ function handleHover(uri: string, line: number, character: number): object | nul
     // Type aliases
     for (const ta of program.typeAliases) {
       if (ta.name === word) {
-        return { contents: { kind: "markdown", value: `\`\`\`milo\n${pubPrefix(ta.isPub)}type ${ta.name} = ${formatMiloType(ta.type)}\n\`\`\`${visibilityNote(ta.isPub)}` } };
+        // A generic alias hovers as what it is declared as, parameters included: without
+        // them `type Handler<T, R> = (T) => R` renders as `type Handler = (T) => R`, which
+        // reads like an alias over two undefined types.
+        const params = ta.typeParams?.length ? `<${ta.typeParams.map(tp => tp.name).join(", ")}>` : "";
+        return { contents: { kind: "markdown", value: `\`\`\`milo\n${pubPrefix(ta.isPub)}type ${ta.name}${params} = ${formatMiloType(ta.type)}\n\`\`\`${visibilityNote(ta.isPub)}` } };
       }
     }
 

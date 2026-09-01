@@ -378,7 +378,14 @@ export function manglePackage(
     walkBounds(e.typeParams, sc);
     for (const v of e.variants) for (const ft of v.fields ?? []) walkType(ft, sc);
   }
-  for (const a of prog.typeAliases) walkType(a.type, topScope());
+  for (const a of prog.typeAliases) {
+    // A generic alias's parameters are names bound by the alias, not module-level types:
+    // without binding them here `type Handler<T> = (T) => R` would have its `T` qualified
+    // into `somemodule.T` and stop matching the parameter it names.
+    const sc = topScope();
+    for (const tp of a.typeParams ?? []) sc.bindType(tp.name);
+    walkType(a.type, sc);
+  }
   for (const g of prog.globals) {
     const sc = topScope();
     walkType(g.type, sc);

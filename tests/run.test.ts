@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { poolTimeoutMs, poolMarginWarning } from "./pool-budget";
 import { readdirSync, readFileSync, unlinkSync, existsSync, mkdtempSync, rmSync, statSync } from "fs";
 import { execSync, spawnSync } from "child_process";
 import { tmpdir, devNull, homedir } from "os";
@@ -28,10 +29,15 @@ const CHILD_ENV = { ...process.env, MILO_ROOT };
 // before anything is written. Windows' NUL device is not a path lld-link will
 // accept as an output file, so point it at a scratch name there instead.
 const REJECTED_OUT = IS_WINDOWS ? join(TOOL_DIR, "rejected") : devNull;
-// Windows CI runners are ~4 cores and clang-on-COFF is slower than the mac/linux
-// path; the 5-minute pool budget that fits macOS times out there before the
-// fixture set finishes compiling.
-const POOL_TIMEOUT_MS = IS_WINDOWS ? 1_500_000 : 300_000;
+// The compile-pool budget and its margin warning live in ./pool-budget so they can be
+// tested directly: the budget only bites on a slow CI runner and the warning only fires in
+// a narrow band, so neither is observable from an ordinary run of this file.
+const POOL_TIMEOUT_MS = (n: number) => poolTimeoutMs(n, IS_WINDOWS);
+
+function reportPoolMargin(lane: string, elapsedMs: number, budgetMs: number): void {
+  const line = poolMarginWarning(lane, elapsedMs, budgetMs);
+  if (line) console.warn(line);
+}
 
 beforeAll(() => {
   execSync(`bun build --compile ${join(MILO_ROOT, "src", "main.ts")} --outfile ${MILOC}`, {
@@ -194,6 +200,7 @@ describe("fixtures (compile + run)", () => {
   const builds = new Map<string, RunResult>();
 
   beforeAll(async () => {
+    const startedAt = Date.now();
     await mapPool(files, COMPILE_JOBS, async (file) => {
       const path = join(FIXTURES_DIR, file);
       const outBin = join(FIXTURES_DIR, file.replace(".milo", ""));
@@ -205,7 +212,8 @@ describe("fixtures (compile + run)", () => {
       if (existsSync(companionC)) buildArgs.push(companionC);
       builds.set(file, await runWithRetry(MILOC, buildArgs));
     });
-  }, POOL_TIMEOUT_MS);
+    reportPoolMargin("fixtures", Date.now() - startedAt, POOL_TIMEOUT_MS(files.length));
+  }, POOL_TIMEOUT_MS(files.length));
 
   for (const file of files) {
     test(file.replace(".milo", ""), async () => {
@@ -233,10 +241,12 @@ describe("errors (type checker rejects)", () => {
   // Compile-only lane: the compile IS the test, so results are captured in the
   // pool and the tests just assert.
   beforeAll(async () => {
+    const startedAt = Date.now();
     await mapPool(files, COMPILE_JOBS, async (file) => {
       results.set(file, await run(MILOC, ["build", join(ERRORS_DIR, file), "-o", REJECTED_OUT]));
     });
-  }, POOL_TIMEOUT_MS);
+    reportPoolMargin("errors", Date.now() - startedAt, POOL_TIMEOUT_MS(files.length));
+  }, POOL_TIMEOUT_MS(files.length));
 
   for (const file of files) {
     test(file.replace(".milo", ""), () => {
@@ -259,13 +269,15 @@ describe("runtime errors (debug mode traps)", () => {
   const builds = new Map<string, RunResult>();
 
   beforeAll(async () => {
+    const startedAt = Date.now();
     await mapPool(files, COMPILE_JOBS, async (file) => {
       const path = join(RUNTIME_ERRORS_DIR, file);
       const outBin = join(RUNTIME_ERRORS_DIR, file.replace(".milo", ""));
       binaries.push(outBin + EXE);
       builds.set(file, await runWithRetry(MILOC, ["build", path, "--debug", "-o", outBin]));
     });
-  }, POOL_TIMEOUT_MS);
+    reportPoolMargin("runtime-errors", Date.now() - startedAt, POOL_TIMEOUT_MS(files.length));
+  }, POOL_TIMEOUT_MS(files.length));
 
   for (const file of files) {
     test(file.replace(".milo", ""), async () => {

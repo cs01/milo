@@ -42,9 +42,19 @@ fi
 # 4. Refill the corpus counts quoted in prose when the corpus changes. Same reasoning as
 # above: tests/docStats.test.ts fails CI on a stale count, and the way that happens is
 # adding a fixture. Counts come from `git ls-files`, so this must run AFTER staging.
+#
+# The file list comes FROM the generator (`--files`) rather than being repeated here. It
+# used to be repeated, the copy was missing docs/site/roadmap.md, and so every fixture
+# added left the published roadmap stale and CI said so twenty minutes after the push.
 if git diff --cached --name-only --diff-filter=ACMDR | grep -qE '^(tests/(fixtures|errors|runtime-errors|prove)/|std/|examples/)'; then
     bun run scripts/gen-stats.ts >/dev/null
-    git add -- CLAUDE.md AGENTS.md README.md docs/testing.md docs/roadmap.md
+    bun run scripts/gen-stats.ts --files | while IFS= read -r f; do
+        [ -f "$f" ] && git add -- "$f"
+    done
+    # docs/spec.md is generated from the fixture corpus too, and tests/spec.test.ts fails
+    # CI on a stale one for exactly the same reason.
+    bun run scripts/gen-spec.ts >/dev/null
+    git add -- docs/spec.md
 fi
 
 # 5. Deterministic lint + auto-fix on all staged files (scripts/lint.ts).

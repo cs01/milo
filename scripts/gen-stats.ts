@@ -72,6 +72,14 @@ function rewrite(text: string, file: string): string {
 // STATS is imported by tests/docStats.test.ts, so the CLI half must not run on import
 // — it writes files, and a test that rewrites the docs it is checking proves nothing.
 if (import.meta.main) {
+  // The pre-commit hook has to stage exactly what this writes, and hardcoding that list
+  // there is how docs/site/roadmap.md drifted: the hook staged five of the six files and
+  // CI reported the sixth stale, twenty minutes after the push, on a commit that had only
+  // added a fixture. The hook asks for the list now instead of repeating it.
+  if (process.argv.includes("--files")) {
+    for (const f of TRACKED) console.log(f);
+    process.exit(0);
+  }
   if (process.argv.includes("--list")) {
     for (const [name, fn] of Object.entries(STATS)) console.log(`${name}\t${fn()}`);
     process.exit(0);

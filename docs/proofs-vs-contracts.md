@@ -119,9 +119,10 @@ either. The witness buys no runtime anything; the contract buys a machine-checke
 None of these need a language change, and all of them are the honest content of
 "propositions as types" in a systems language. See [milo-idioms](milo-idioms.md):
 
-- **Uninhabited types marking dead branches.** `Result<T, Never>` for infallible code, with
-  the impossible arm discharged by `match e { }`: a checked argument rather than an
-  `abort()` or a comment.
+- **Uninhabited types marking dead branches.** `Result<T, Never>` for infallible code needs
+  no `Err` arm at all: exhaustiveness skips a variant whose payload cannot exist (shipped
+  2026-09-01, the one slice this review recommended). Writing the arm and discharging it with
+  `match e { }` stays legal and stays a checked argument rather than an `abort()`.
 - **Witness / token types.** A single-field struct obtainable only from the function that
   establishes the invariant.
 - **Phantom brands.** `struct Id<Tag> { raw: i64 }` rejects a cross-pool mixup.

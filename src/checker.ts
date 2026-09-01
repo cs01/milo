@@ -642,6 +642,33 @@ export class TypeChecker {
         : "are raw pointers: they own nothing and have no drop glue, so free what they address before the adopted value drops"}, or '--allow=adopt-raw-fields' if they are borrowed`);
   }
 
+  // Can a value of this type exist at all? Conservative and total: anything not proven
+  // empty is treated as inhabited, and a type that reaches itself is assumed inhabited
+  // rather than chased, because deciding that case needs a fixpoint and getting it wrong
+  // in the other direction would silently drop a real arm from an exhaustiveness check.
+  private isUninhabited(t: TypeKind, seen: Set<string>): boolean {
+    if (t.tag === "enum") {
+      if (seen.has(t.name)) return false;
+      seen.add(t.name);
+      const info = this.enums.get(t.name);
+      if (!info) return false;
+      // Zero variants is the base case (`enum Never { }`); an enum all of whose variants
+      // are themselves uninhabited has no constructible value either.
+      return [...info.variants.values()].every(v => v.fields.some(f => this.isUninhabited(f, seen)));
+    }
+    if (t.tag === "struct") {
+      if (seen.has(t.name)) return false;
+      seen.add(t.name);
+      const info = this.structs.get(t.name);
+      if (!info) return false;
+      // A product needs every field, so one uninhabited field is enough.
+      return info.fields.some(f => this.isUninhabited(f.type, seen));
+    }
+    // `[Never; 3]` cannot be built; `[Never; 0]` and an empty `Vec<Never>` can.
+    if (t.tag === "array" && t.size !== null && t.size > 0) return this.isUninhabited(t.element, seen);
+    return false;
+  }
+
   private error(msg: string, span?: Span, hint?: string) {
     this.diagnostics.push({ severity: "error", span, message: msg, hint });
   }
@@ -11125,8 +11152,13 @@ export class TypeChecker {
       this.restoreMoveState(preMoves);
       this.mergeMoveState(mergedMoves);
       if (!hasWildcard) {
-        for (const [name] of enumInfo.variants) {
-          if (!covered.has(name)) {
+        for (const [name, v] of enumInfo.variants) {
+          // A variant carrying an uninhabited payload has no values, so demanding an arm
+          // for it asks the reader to handle a case the checker can prove cannot occur —
+          // `Result<T, Never>` from infallible generic code was unusable without the
+          // `match e { }` incantation. The empty match stays legal and stays the way to
+          // discharge one explicitly; this only stops it from being mandatory.
+          if (!covered.has(name) && !v.fields.some(f => this.isUninhabited(f, new Set()))) {
             this.error(`non-exhaustive match: missing variant '${name}'`, sp);
             this.nonExhaustiveMatches.add(arms);
           }

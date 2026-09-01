@@ -1,0 +1,77 @@
+// @expect: 42
+// @expect: 42
+// @expect: none
+// @expect: 5
+// @expect: 1
+// A variant whose payload cannot exist is not a case anyone has to handle. `Result<T, Never>`
+// is what infallible generic code returns, and before this the reader had to write an `Err`
+// arm and discharge it with `match e { }` - handling a case the checker could already prove
+// impossible, which is a ritual rather than a check.
+//
+// The empty match stays legal and stays the explicit way to say "this cannot happen"; what
+// changed is that it is no longer mandatory. Uninhabitedness is computed structurally: an
+// enum with no variants, an enum all of whose variants are uninhabited, a struct with an
+// uninhabited field, or a fixed array of a positive size over one.
+enum Never {
+}
+
+struct Tagged {
+    id: i64,
+    ghost: Never,
+}
+
+enum Wrapper {
+    Boxed(Tagged),
+    Plain(i64),
+}
+
+// Recursion must not hang the check: a type that reaches itself is assumed inhabited.
+enum Tree {
+    Leaf(i64),
+    Node(Heap<Tree>),
+}
+
+fn cannotFail(n: i64): Result<i64, Never> {
+    return Result.Ok(n * 2)
+}
+
+pub fn main(): i32 {
+    // No Err arm at all.
+    match cannotFail(21) {
+        Result.Ok(v) => {
+            print(v)
+        }
+    }
+    // The explicit discharge still compiles, and still means the same thing.
+    match cannotFail(21) {
+        Result.Ok(v) => {
+            print(v)
+        }
+        Result.Err(e) => {
+            match e {
+            }
+        }
+    }
+    let o: Option<Never> = Option.None
+    match o {
+        Option.None => {
+            print("none")
+        }
+    }
+    let w = Wrapper.Plain(5)
+    match w {
+        Wrapper.Plain(n) => {
+            print(n)
+        }
+    }
+    let t = Tree.Leaf(1)
+    match t {
+        Tree.Leaf(n) => {
+            print(n)
+        }
+        Tree.Node(_h) => {
+            print("node")
+        }
+    }
+    return 0
+}

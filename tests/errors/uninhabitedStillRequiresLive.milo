@@ -1,0 +1,21 @@
+// @error: non-exhaustive match: missing variant 'Plain'
+// The other direction of the same rule: only a variant that CANNOT hold a value is excused.
+// A live variant sitting next to a dead one is still a case the reader has to handle, and
+// dropping the whole check would be the silent-success version of this feature.
+enum Never {}
+
+enum Wrapper {
+    Boxed(Never),
+    Plain(i64),
+}
+
+pub fn main(): i32 {
+    let w = Wrapper.Plain(5)
+    match w {
+        Wrapper.Boxed(n) => {
+            match n {
+            }
+        }
+    }
+    return 0
+}

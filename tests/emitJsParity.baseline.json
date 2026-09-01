@@ -275,6 +275,7 @@
   "totpRfc.milo": "noEmit",
   "totpVerify.milo": "noEmit",
   "typedFnPtr.milo": "noEmit",
+  "uninhabitedExhaustive.milo": "crash",
   "unixSocket.milo": "noEmit",
   "unwrap_temp_no_leak.milo": "noEmit",
   "vecCallbackByValue.milo": "noEmit",

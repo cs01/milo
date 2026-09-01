@@ -229,8 +229,10 @@ fn cannotFail(n: i64): Result<i64, Never> {
 }
 ```
 
-At the call site the impossible arm is discharged rather than faked: `match e { }` in place
-of an `abort()`, an `unreachable` or a comment claiming it cannot happen.
+At the call site there is **no `Err` arm to write**: exhaustiveness skips a variant whose
+payload cannot exist, so `match cannotFail(21) { Result.Ok(v) => { print(v) } }` is complete.
+Writing the arm anyway stays legal, and `match e { }` is still the explicit way to say "this
+cannot happen" - a checked argument rather than an `abort()`, an `unreachable`, or a comment.
 
 **A witness type carries evidence.** A single-field struct whose only constructor establishes
 the invariant means holding the value IS holding the evidence:

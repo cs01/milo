@@ -946,7 +946,14 @@ let Opcode.Some(op) = Opcode.tryFrom(raw) else {
 
 ### Pattern Matching
 
-`match` is exhaustive — the compiler requires you to handle every variant.
+`match` is exhaustive — the compiler requires you to handle every variant that can hold a
+value. A variant whose payload is **uninhabited** is skipped, because there is nothing to
+handle: `Result<T, Never>` (where `enum Never { }` has no variants) needs no `Err` arm. Writing
+one anyway is legal, and `match e { }` inside it is the explicit way to say the case cannot
+occur — an argument the compiler checks, rather than an `abort()` or a comment. A type counts
+as uninhabited when it is an empty enum, an enum all of whose variants are uninhabited, a
+struct with an uninhabited field, or a fixed-size array of one; a type that reaches itself is
+assumed inhabited.
 
 ```milo
 enum Shape {
